@@ -12,6 +12,7 @@
 #include "device/dcd.h"
 #include "pico/sync.h"
 #include "pico/time.h"
+#include "bt.h"
 
 #define WAKE_KBD_INSTANCE     1
 #define WAKE_KEYCODE_F15      0x68
@@ -72,12 +73,21 @@ void wake_init(void) {
     critical_section_init(&wake_cs);
 }
 
+// Set in tud_suspend_cb (USB ISR context), drained in wake_task (main loop).
+// We can't call BTstack from an ISR, so the actual power-off send is deferred.
+static volatile bool dualsense_power_off_pending = false;
+
 extern "C" void tud_suspend_cb(bool remote_wakeup_en) {
     WAKE_DBG("tud_suspend_cb remote_wakeup_en=%d prev_state=%s",
              (int)remote_wakeup_en, wake_state_name(state));
     host_suspended = true;
     host_resumed_event = false;
-    
+
+    // Host went to S3/S5 — flag the controller to power off so it doesn't sit
+    // awake until its idle timer fires. Drained in wake_task() because BTstack
+    // calls aren't safe from ISR context.
+    dualsense_power_off_pending = true;
+
     // Unconditionally re-arm on suspend. If a previous wake attempt hung
     // (e.g. Linux ignored a keystroke and left the endpoint busy forever),
     // we must abort and reset so the NEXT wake attempt can trigger.
@@ -173,6 +183,17 @@ void wake_on_bt_disconnect(void) {
 
 void wake_task(void) {
     const uint64_t now = time_us_64();
+
+    // Drain a deferred power-off request from tud_suspend_cb before anything
+    // else. We do this before the early-return on idle FSM states so the
+    // power-off still fires on host suspend regardless of what state the wake
+    // FSM is in. bt_dualsense_power_off is a no-op if no controller is
+    // currently connected, so it's safe to call unconditionally here.
+    if (dualsense_power_off_pending) {
+        dualsense_power_off_pending = false;
+        bt_dualsense_power_off();
+        WAKE_DBG("dispatched DualSense power-off on host suspend");
+    }
 
     critical_section_enter_blocking(&wake_cs);
     const wake_state_t s = state;

@@ -25,4 +25,9 @@ std::vector<uint8_t> get_feature_data(uint8_t reportId,uint16_t len);
 void init_feature();
 void set_feature_data(uint8_t reportId, uint8_t* data,uint16_t len);
 
+// Tells the connected DualSense to power off (same as a long-press of the
+// PS button). No-op if no controller is connected. Used on host-suspend so
+// the controller doesn't sit awake until its idle timer fires.
+void bt_dualsense_power_off();
+
 #endif //DS5_BRIDGE_BT_H

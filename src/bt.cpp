@@ -598,3 +598,21 @@ void init_feature() {
     check_dse = true;
     get_feature_data(0x70, 64);
 }
+
+void bt_dualsense_power_off() {
+    if (hid_control_cid == 0) return; // no controller connected, nothing to do
+
+    // DualSense feature report 0x08 ("Set USB Settings 1") accepts a
+    // sub-command at byte 0; sub-command 0x02 is power-off, equivalent to
+    // a long PS-button hold. Remaining bytes are settings fields we leave
+    // as zero (= "no change") because the controller is about to power down.
+    // Report 0x08's payload is 47 bytes per the HID report descriptor; the
+    // last 4 bytes get overwritten with the CRC32 inside set_feature_data().
+    constexpr uint8_t REPORT_ID_SET_USB_SETTINGS_1 = 0x08;
+    constexpr uint8_t SUBCMD_POWER_OFF             = 0x02;
+    constexpr size_t  REPORT_08_PAYLOAD_LEN        = 47;
+
+    uint8_t payload[REPORT_08_PAYLOAD_LEN] = {0};
+    payload[0] = SUBCMD_POWER_OFF;
+    set_feature_data(REPORT_ID_SET_USB_SETTINGS_1, payload, sizeof(payload));
+}

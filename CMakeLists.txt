@@ -6,6 +6,12 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Audio pipeline is real-time and crackles under -O0. Default to Release;
+# override explicitly with -DCMAKE_BUILD_TYPE=Debug only when debugging.
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 # Initialise pico_sdk from installed location
 # (note this can come from environment, CMake cache etc)
 

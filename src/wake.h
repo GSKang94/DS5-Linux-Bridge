@@ -12,11 +12,13 @@ void wake_init(void);
 void wake_on_bt_input(const uint8_t *hid_input, uint16_t len);
 void wake_on_bt_disconnect(void);
 void wake_task(void);
+void wake_reset_for_variant_swap(void);
 #else
 static inline void wake_init(void) {}
 static inline void wake_on_bt_input(const uint8_t *, uint16_t) {}
 static inline void wake_on_bt_disconnect(void) {}
 static inline void wake_task(void) {}
+static inline void wake_reset_for_variant_swap(void) {}
 #endif
 
 #endif //DS5_BRIDGE_WAKE_H

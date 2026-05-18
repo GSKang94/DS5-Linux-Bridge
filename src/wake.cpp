@@ -13,8 +13,13 @@
 #include "pico/sync.h"
 #include "pico/time.h"
 #include "bt.h"
+#include "usb.h"
 
-#define WAKE_KBD_INSTANCE     1
+// The boot keyboard's TinyUSB HID instance index is variant-dependent
+// (kbd is HID instance 1 in full descriptor variant, 0 in minimal — see
+// usb_descriptors.cpp). Query it at use time so this code follows live
+// variant swaps without having to be notified.
+#define WAKE_KBD_INSTANCE     (usb_kbd_hid_instance())
 #define WAKE_KEYCODE_F15      0x68
 // Post-resume timings tuned for "wake-and-resleep" Windows behavior: the host
 // resumes USB, but if no HID input is consumed during the brief wake window
@@ -87,6 +92,7 @@ extern "C" void tud_suspend_cb(bool remote_wakeup_en) {
              (int)remote_wakeup_en, wake_state_name(state));
     host_suspended = true;
     host_resumed_event = false;
+    usb_set_host_suspended(true);
 
     // Arm the deferred DualSense power-off. wake_task() will fire it after
     // POWER_OFF_DEBOUNCE_US unless tud_resume_cb / tud_mount_cb cancel it
@@ -109,17 +115,30 @@ extern "C" void tud_suspend_cb(bool remote_wakeup_en) {
 }
 
 extern "C" void tud_resume_cb(void) {
-    WAKE_DBG("tud_resume_cb state=%s armed=%d", wake_state_name(state), (int)power_off_armed);
+    WAKE_DBG("tud_resume_cb state=%s armed=%d swap=%d",
+             wake_state_name(state), (int)power_off_armed,
+             (int)usb_variant_swap_in_progress());
+    // If this resume is the consequence of our own variant-swap bounce
+    // (tud_connect after tud_disconnect), ignore it entirely. Otherwise
+    // the wake FSM treats it as a genuine S3 wake event and starts
+    // sending F15 keystrokes — visible as random "fic" key spam on the
+    // host after a few connect/disconnect cycles.
+    if (usb_variant_swap_in_progress()) return;
     host_suspended = false;
     host_resumed_event = true;
     power_off_armed = false; // cancel pending power-off
+    usb_set_host_suspended(false);
 }
 
 extern "C" void tud_mount_cb(void) {
-    WAKE_DBG("tud_mount_cb state=%s armed=%d", wake_state_name(state), (int)power_off_armed);
+    WAKE_DBG("tud_mount_cb state=%s armed=%d swap=%d",
+             wake_state_name(state), (int)power_off_armed,
+             (int)usb_variant_swap_in_progress());
+    if (usb_variant_swap_in_progress()) return;
     host_suspended = false;
     host_resumed_event = true;
     power_off_armed = false;
+    usb_set_host_suspended(false);
 }
 
 void wake_on_bt_input(const uint8_t *hid_input, uint16_t len) {
@@ -154,7 +173,10 @@ void wake_on_bt_input(const uint8_t *hid_input, uint16_t len) {
     prev_b7 = b7; prev_b8 = b8; prev_b9 = b9;
     critical_section_exit(&wake_cs);
 
-    if (changed && armable) {
+    // Don't try to wake while a variant swap is in flight — both
+    // tud_remote_wakeup() and our subsequent F15 keystrokes would race
+    // the re-enumeration the swap is doing.
+    if (changed && armable && !usb_variant_swap_in_progress()) {
         bool ok = tud_remote_wakeup();
         
         // Linux quirk: Sometimes Linux fails to set the REMOTE_WAKEUP feature
@@ -190,6 +212,20 @@ void wake_on_bt_disconnect(void) {
     critical_section_enter_blocking(&wake_cs);
     state = WAKE_IDLE;
     prev_b7 = 0x08; prev_b8 = 0x00; prev_b9 = 0x00;
+    key_attempts = 0;
+    critical_section_exit(&wake_cs);
+}
+
+// Called by the USB variant-swap orchestrator before it bounces the
+// bus. Any in-flight wake keystroke would land in the wrong
+// enumeration, and the FSM's hid_n_ready waits would fire spurious
+// F15s after the re-enumeration completes. Reset to IDLE so the FSM
+// re-arms cleanly on the next genuine suspend.
+void wake_reset_for_variant_swap(void) {
+    critical_section_enter_blocking(&wake_cs);
+    state = WAKE_IDLE;
+    key_attempts = 0;
+    host_resumed_event = false;
     critical_section_exit(&wake_cs);
 }
 

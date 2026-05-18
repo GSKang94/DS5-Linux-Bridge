@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include "bt.h"
+#include "usb.h"
 #include <queue>
 #include <unordered_map>
 #include <vector>
@@ -331,13 +332,20 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
         }
 
         case HCI_EVENT_DISCONNECTION_COMPLETE: {
-#if !ENABLE_SERIAL && !defined(ENABLE_WAKE_HID)
+#if !ENABLE_SERIAL
+#  ifdef ENABLE_WAKE_HID
+            // With ENABLE_WAKE_HID we stay enumerated for remote-wakeup,
+            // but switch to the minimal descriptor variant so the host
+            // no longer sees audio/gamepad ghosts. The variant-swap
+            // orchestrator handles the actual tud_disconnect/swap/
+            // tud_connect bounce on the main loop (gated on host
+            // not-suspended).
+            usb_request_variant_minimal();
+#  else
             // Without ENABLE_WAKE_HID we hide the USB device whenever no
-            // controller is paired (upstream behavior). With wake enabled
-            // we must stay on the bus across controller power-cycles, so
-            // tud_suspend_cb can later fire and tud_remote_wakeup() can
-            // signal a wake when the controller is turned back on.
+            // controller is paired (upstream behavior).
             tud_disconnect();
+#  endif
 #endif
             gap_connectable_control(1);
             gap_discoverable_control(1);
@@ -403,14 +411,22 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
                     check_dse = false;
                     is_dse = true;
 #if !ENABLE_SERIAL
+#  ifdef ENABLE_WAKE_HID
+                    usb_request_variant_full();
+#  else
                     tud_connect();
+#  endif
 #endif
                 } else if (packet[0] == 0x02) {
                     printf("Connected DS5 Controller\n");
                     check_dse = false;
                     is_dse = false;
 #if !ENABLE_SERIAL
+#  ifdef ENABLE_WAKE_HID
+                    usb_request_variant_full();
+#  else
                     tud_connect();
+#  endif
 #endif
                 }
             }

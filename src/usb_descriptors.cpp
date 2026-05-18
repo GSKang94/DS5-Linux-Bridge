@@ -437,11 +437,163 @@ uint8_t descriptor_configuration[] = {
 #endif
 };
 
+#ifdef ENABLE_WAKE_HID
+// Minimal config descriptor used when no DualSense is connected.
+// Contains only the boot keyboard so the dongle stays enumerated and
+// retains remote-wakeup capability (needed for wake-from-S3/S5), but
+// presents no audio function and no gamepad — so Windows Sound applet
+// and joy.cpl don't show ghost devices.
+//
+// TinyUSB class drivers (audio, gamepad HID) remain compiled in but
+// receive no open() callback while this variant is active; they sit
+// idle. When the host re-enumerates after a variant swap they'll be
+// torn down / brought back up cleanly.
+//
+// Layout (34 bytes total):
+//   Config descriptor       9
+//   Kbd interface descriptor 9
+//   HID class descriptor    9
+//   EP IN descriptor        7
+#define CONFIG_DESC_LEN_MINIMAL 34
+uint8_t descriptor_configuration_minimal[CONFIG_DESC_LEN_MINIMAL] = {
+    // --- CONFIGURATION DESCRIPTOR ---
+    0x09, // bLength
+    0x02, // bDescriptorType (CONFIGURATION)
+    U16_TO_U8S_LE(CONFIG_DESC_LEN_MINIMAL), // wTotalLength
+    0x01, // bNumInterfaces: just the kbd
+    0x01, // bConfigurationValue: 1
+    0x00, // iConfiguration: 0
+    0xE0, // bmAttributes: SELF-POWERED + REMOTE-WAKEUP (must keep for wake)
+    0xFA, // bMaxPower: 500mA
+
+    // --- INTERFACE DESCRIPTOR: HID Boot Keyboard (only interface here) ---
+    0x09, // bLength
+    0x04, // bDescriptorType (INTERFACE)
+    0x00, // bInterfaceNumber: 0 (only one in this variant)
+    0x00, // bAlternateSetting: 0
+    0x01, // bNumEndpoints: 1 (IN only)
+    0x03, // bInterfaceClass: HID
+    0x01, // bInterfaceSubClass: Boot
+    0x01, // bInterfaceProtocol: Keyboard
+    0x00, // iInterface
+
+    // HID Descriptor (keyboard)
+    0x09, // bLength
+    0x21, // bDescriptorType (HID)
+    0x11, 0x01, // bcdHID: 1.11
+    0x00, // bCountryCode
+    0x01, // bNumDescriptors
+    0x22, // bDescriptorType: Report
+    0x2D, 0x00, // wDescriptorLength: 45 (sizeof desc_hid_report_kbd)
+
+    // Endpoint Descriptor (HID IN: EP7) — same EP address as full variant
+    0x07, // bLength
+    0x05, // bDescriptorType (ENDPOINT)
+    0x87, // bEndpointAddress: IN EP7
+    0x03, // bmAttributes: Interrupt
+    0x08, 0x00, // wMaxPacketSize: 8 (boot keyboard report)
+    0x0A, // bInterval: 10ms
+};
+static_assert(sizeof(descriptor_configuration_minimal) == CONFIG_DESC_LEN_MINIMAL,
+              "descriptor_configuration_minimal size mismatch");
+
+// Runtime selector: which variant to present on the next GET_CONFIGURATION.
+// Updated by usb_set_descriptor_variant() (from BT connect/disconnect),
+// read by tud_descriptor_configuration_cb() when the host re-enumerates
+// after a tud_disconnect()/tud_connect() cycle.
+typedef enum {
+    DESC_VARIANT_MINIMAL = 0, // kbd only
+    DESC_VARIANT_FULL,        // audio + gamepad + kbd
+} desc_variant_t;
+static volatile desc_variant_t active_variant = DESC_VARIANT_MINIMAL;
+
+void usb_set_descriptor_variant_full(void)    { active_variant = DESC_VARIANT_FULL; }
+void usb_set_descriptor_variant_minimal(void) { active_variant = DESC_VARIANT_MINIMAL; }
+bool usb_descriptor_variant_is_full(void)     { return active_variant == DESC_VARIANT_FULL; }
+uint8_t usb_kbd_hid_instance(void) { return active_variant == DESC_VARIANT_FULL ? 1 : 0; }
+
+//--------------------------------------------------------------------+
+// Variant swap orchestrator
+//--------------------------------------------------------------------+
+// State machine that drives a USB re-enumeration when the desired
+// descriptor variant differs from the active one. Runs from the main
+// loop via usb_variant_task().
+//
+// Sequence:
+//   IDLE     — desired == active, nothing to do.
+//   DISCONNECTING — called tud_disconnect(); wait SETTLE_US so the host
+//                   sees the disconnect cleanly before we present a
+//                   different descriptor.
+//   CONNECTING    — flipped active_variant, called tud_connect(); wait
+//                   for host re-enumeration to settle, then back to IDLE.
+//
+// Refuses to start or continue a swap while the host is suspended: a
+// re-enumeration mid-suspend defeats the whole point of ENABLE_WAKE_HID
+// (the dongle needs to be enumerated when the host wakes so remote-
+// wakeup can fire).
+
+#include "pico/time.h"
+#include "wake.h"
+
+static volatile desc_variant_t desired_variant = DESC_VARIANT_MINIMAL;
+static volatile bool host_suspended_flag = false;
+
+typedef enum {
+    SWAP_IDLE,
+    SWAP_DISCONNECTING,
+    SWAP_CONNECTING,
+} swap_state_t;
+
+static swap_state_t  swap_state         = SWAP_IDLE;
+static uint64_t      swap_state_entered = 0;
+static constexpr uint64_t SWAP_DISCONNECT_SETTLE_US = 500000;  // 500 ms
+static constexpr uint64_t SWAP_CONNECT_SETTLE_US    = 1500000; // 1500 ms
+
+void usb_request_variant_full(void)    { desired_variant = DESC_VARIANT_FULL; }
+void usb_request_variant_minimal(void) { desired_variant = DESC_VARIANT_MINIMAL; }
+void usb_set_host_suspended(bool s)    { host_suspended_flag = s; }
+bool usb_variant_swap_in_progress(void) { return swap_state != SWAP_IDLE; }
+
+void usb_variant_task(void) {
+    if (host_suspended_flag) {
+        // Never re-enumerate during host suspend.
+        return;
+    }
+    const uint64_t now = time_us_64();
+    switch (swap_state) {
+        case SWAP_IDLE:
+            if (desired_variant != active_variant) {
+                wake_reset_for_variant_swap();
+                tud_disconnect();
+                swap_state = SWAP_DISCONNECTING;
+                swap_state_entered = now;
+            }
+            return;
+        case SWAP_DISCONNECTING:
+            if (now - swap_state_entered < SWAP_DISCONNECT_SETTLE_US) return;
+            active_variant = desired_variant;
+            tud_connect();
+            swap_state = SWAP_CONNECTING;
+            swap_state_entered = now;
+            return;
+        case SWAP_CONNECTING:
+            if (now - swap_state_entered < SWAP_CONNECT_SETTLE_US) return;
+            swap_state = SWAP_IDLE;
+            return;
+    }
+}
+#endif // ENABLE_WAKE_HID
+
 // Invoked when received GET CONFIGURATION DESCRIPTOR
 // Application return pointer to descriptor
 // Descriptor contents must exist long enough for transfer to complete
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
     (void) index; // for multiple configurations
+#ifdef ENABLE_WAKE_HID
+    if (active_variant == DESC_VARIANT_MINIMAL) {
+        return descriptor_configuration_minimal;
+    }
+#endif
     auto bInterval = 0x01;
     switch (get_config().polling_rate_mode) {
         case 0:
@@ -889,8 +1041,12 @@ _Static_assert(sizeof(desc_hid_report_kbd) == 45, "keyboard report descriptor le
 // Descriptor contents must exist long enough for transfer to complete
 uint8_t const *tud_hid_descriptor_report_cb(uint8_t itf) {
 #ifdef ENABLE_WAKE_HID
-    // HID instance 1 is the wake-only boot keyboard added by ENABLE_WAKE_HID.
-    if (itf == 1) return desc_hid_report_kbd;
+    // TinyUSB assigns HID instance indices by descriptor byte order:
+    //   Full variant   — gamepad (instance 0), kbd (instance 1)
+    //   Minimal variant — kbd only (instance 0)
+    // So the kbd's instance index is variant-dependent.
+    const uint8_t kbd_instance = active_variant == DESC_VARIANT_FULL ? 1 : 0;
+    if (itf == kbd_instance) return desc_hid_report_kbd;
 #endif
     (void) itf;
     if (ds_mode()) {

@@ -9,6 +9,7 @@
 #include "resample.h"
 #include "audio.h"
 #include "wake.h"
+#include "usb.h"
 #include "hardware/clocks.h"
 #include "hardware/vreg.h"
 #include "hardware/watchdog.h"
@@ -46,6 +47,16 @@ critical_section_t report_cs;
 volatile bool report_dirty = false;
 
 void interrupt_loop() {
+#ifdef ENABLE_WAKE_HID
+    // In minimal variant TinyUSB HID instance 0 is the boot keyboard,
+    // not the gamepad. Sending the 63-byte gamepad report to instance 0
+    // here lands on the kbd interface and Windows interprets byte 0
+    // (0x01) as Ctrl modifier plus stray scancodes -- visible as a
+    // rogue keyboard hammering Ctrl/Win/etc after the first connect/
+    // disconnect cycle. Only emit gamepad reports when full variant
+    // is active (DS5 connected).
+    if (!usb_descriptor_variant_is_full()) return;
+#endif
     if (!tud_hid_ready()) return;
 
     // TODO: Refactor for better code reuse
@@ -145,7 +156,7 @@ void on_bt_data(CHANNEL_TYPE channel, uint8_t *data, uint16_t len) {
 uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t *buffer,
                                uint16_t reqlen) {
 #ifdef ENABLE_WAKE_HID
-    if (itf == 1) {
+    if (itf == usb_kbd_hid_instance()) {
         if (reqlen >= 8) {
             memset(buffer, 0, 8);
             return 8;
@@ -192,7 +203,7 @@ bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *p_reques
 void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const *buffer,
                            uint16_t bufsize) {
 #ifdef ENABLE_WAKE_HID
-    if (itf == 1) {
+    if (itf == usb_kbd_hid_instance()) {
         // Drop keyboard SET_REPORT (host LED state).
         return;
     }
@@ -312,6 +323,9 @@ int main() {
         bt_pump();
         tud_task();
         wake_task();
+#ifdef ENABLE_WAKE_HID
+        usb_variant_task();
+#endif
         audio_loop();
         interrupt_loop();
 #if ENABLE_BATT_LED

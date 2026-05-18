@@ -73,9 +73,14 @@ void wake_init(void) {
     critical_section_init(&wake_cs);
 }
 
-// Set in tud_suspend_cb (USB ISR context), drained in wake_task (main loop).
-// We can't call BTstack from an ISR, so the actual power-off send is deferred.
-static volatile bool dualsense_power_off_pending = false;
+// Debounced DualSense power-off on host suspend.
+// Armed in tud_suspend_cb, cancelled by tud_resume_cb / tud_mount_cb,
+// fired by wake_task once the debounce window elapses. Debounce avoids
+// killing the controller during brief suspend/resume blips on Linux S5
+// wake, which leaves hid-playstation wedged until replug.
+static volatile bool     power_off_armed = false;
+static volatile uint64_t power_off_armed_at_us = 0;
+static constexpr uint64_t POWER_OFF_DEBOUNCE_US = 10ULL * 1000000ULL; // 10 s
 
 extern "C" void tud_suspend_cb(bool remote_wakeup_en) {
     WAKE_DBG("tud_suspend_cb remote_wakeup_en=%d prev_state=%s",
@@ -83,10 +88,11 @@ extern "C" void tud_suspend_cb(bool remote_wakeup_en) {
     host_suspended = true;
     host_resumed_event = false;
 
-    // Host went to S3/S5 — flag the controller to power off so it doesn't sit
-    // awake until its idle timer fires. Drained in wake_task() because BTstack
-    // calls aren't safe from ISR context.
-    dualsense_power_off_pending = true;
+    // Arm the deferred DualSense power-off. wake_task() will fire it after
+    // POWER_OFF_DEBOUNCE_US unless tud_resume_cb / tud_mount_cb cancel it
+    // first. BTstack calls aren't safe from ISR context anyway.
+    power_off_armed_at_us = time_us_64();
+    power_off_armed = true;
 
     // Unconditionally re-arm on suspend. If a previous wake attempt hung
     // (e.g. Linux ignored a keystroke and left the endpoint busy forever),
@@ -99,15 +105,17 @@ extern "C" void tud_suspend_cb(bool remote_wakeup_en) {
 }
 
 extern "C" void tud_resume_cb(void) {
-    WAKE_DBG("tud_resume_cb state=%s", wake_state_name(state));
+    WAKE_DBG("tud_resume_cb state=%s armed=%d", wake_state_name(state), (int)power_off_armed);
     host_suspended = false;
     host_resumed_event = true;
+    power_off_armed = false; // cancel pending power-off
 }
 
 extern "C" void tud_mount_cb(void) {
-    WAKE_DBG("tud_mount_cb state=%s", wake_state_name(state));
+    WAKE_DBG("tud_mount_cb state=%s armed=%d", wake_state_name(state), (int)power_off_armed);
     host_suspended = false;
     host_resumed_event = true;
+    power_off_armed = false;
 }
 
 void wake_on_bt_input(const uint8_t *hid_input, uint16_t len) {
@@ -184,15 +192,15 @@ void wake_on_bt_disconnect(void) {
 void wake_task(void) {
     const uint64_t now = time_us_64();
 
-    // Drain a deferred power-off request from tud_suspend_cb before anything
-    // else. We do this before the early-return on idle FSM states so the
-    // power-off still fires on host suspend regardless of what state the wake
-    // FSM is in. bt_dualsense_power_off is a no-op if no controller is
-    // currently connected, so it's safe to call unconditionally here.
-    if (dualsense_power_off_pending) {
-        dualsense_power_off_pending = false;
+    // Fire the deferred DualSense power-off if the debounce window has
+    // elapsed without a resume cancelling it. Checked before the early-return
+    // on idle FSM states so it still fires regardless of wake-FSM state.
+    // bt_dualsense_power_off is a no-op if no controller is connected.
+    if (power_off_armed && (now - power_off_armed_at_us) >= POWER_OFF_DEBOUNCE_US) {
+        power_off_armed = false;
         bt_dualsense_power_off();
-        WAKE_DBG("dispatched DualSense power-off on host suspend");
+        WAKE_DBG("dispatched DualSense power-off (debounce %llu ms elapsed)",
+                 (unsigned long long)(POWER_OFF_DEBOUNCE_US / 1000));
     }
 
     critical_section_enter_blocking(&wake_cs);

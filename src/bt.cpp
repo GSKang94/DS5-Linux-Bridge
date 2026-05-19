@@ -528,14 +528,20 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
                 }
             }
             if (!queue_is_empty(&send_fifo)) {
+                // Self-chain: still have data, keep chain active.
                 l2cap_request_can_send_now_event(hid_interrupt_cid);
+            } else {
+                // Chain idle. bt_pump from main loop will kick it again
+                // when new data arrives.
+                extern volatile bool send_chain_active;
+                send_chain_active = false;
             }
             break;
         }
     }
 }
 
-void bt_write(const uint8_t *data, const uint16_t len) {
+void bt_write(const uint8_t *data, const uint16_t len, bool kick) {
     if (hid_interrupt_cid == 0) return;
     static send_element packet{};
     memset(packet.data, 0, 512);
@@ -548,9 +554,36 @@ void bt_write(const uint8_t *data, const uint16_t len) {
         printf("[L2CAP bt_write] Error: Failed to add packet to send FIFO\n");
         return;
     }
-    if (queue_get_level(&send_fifo) == 1) {
+
+    // Kick the can-send-now chain ONLY when called from low-frequency
+    // paths (HID reports, command responses). The audio path at ~93 Hz
+    // uses kick=false; bt_pump() in the main loop handles chain restart
+    // for it. Calling l2cap_request_can_send_now_event from the audio
+    // path costs ~535 us/call under PICO_CYW43_ARCH_POLL because it
+    // dispatches event handlers (including the actual l2cap_send and
+    // SPI transmit) inline.
+    if (kick && queue_get_level(&send_fifo) == 1) {
         l2cap_request_can_send_now_event(hid_interrupt_cid);
     }
+}
+
+// Called from main loop after cyw43_arch_poll(). Kicks the can-send-now
+// chain if there's pending data AND we're not already in flight. This
+// moves the ~535 us l2cap_request_can_send_now_event cost off the audio
+// thread and onto the main loop, which is already paying that cost in
+// cyw43_arch_poll().
+//
+// Tracks a "kick pending" flag so we don't request a second event while
+// one is already in flight (would be wasted work). Cleared by the
+// L2CAP_EVENT_CAN_SEND_NOW handler. Set here when we issue a request.
+volatile bool send_chain_active = false;
+
+void bt_pump() {
+    if (hid_interrupt_cid == 0) return;
+    if (send_chain_active) return;
+    if (queue_is_empty(&send_fifo)) return;
+    send_chain_active = true;
+    l2cap_request_can_send_now_event(hid_interrupt_cid);
 }
 
 vector<uint8_t> get_feature_data(uint8_t reportId, uint16_t len) {

@@ -41,6 +41,14 @@ alignas(8) static uint32_t audio_core1_stack[8192];
 queue_t audio_fifo;
 static uint8_t opus_buf[200];
 critical_section_t opus_cs;
+// Cadence instrumentation: encoder runs at 100 Hz (10 ms Opus frames), packet
+// builder runs at USB cadence (~93.75 Hz when haptic_buf hits SAMPLE_SIZE).
+// If ratio drifts from 1.0 we're sending duplicate/skipped frames.
+static volatile uint32_t encode_count = 0;
+static volatile uint32_t pktbuild_count = 0;
+static volatile uint32_t decode_count = 0;
+static volatile uint32_t audio_fifo_drop_count = 0; // speaker chunks dropped when fifo full
+static volatile uint32_t mic_fifo_drop_count = 0;   // mic frames dropped when fifo full
 queue_t mic_fifo;        // BT-encoded mic frames pending Opus decode (core0 -> core1)
 queue_t mic_decode_fifo; // PCM mic frames pending USB write (core1 -> core0)
 
@@ -95,6 +103,7 @@ void audio_loop() {
             memcpy(element.data, audio_buf, 512 * 2 * 4);
             if (queue_is_full(&audio_fifo)) {
                 queue_try_remove(&audio_fifo,NULL);
+                audio_fifo_drop_count++;
             }
             if (!queue_try_add(&audio_fifo, &element)) {
                 printf("[Audio] Warning: audio_fifo add failed\n");
@@ -163,7 +172,32 @@ void audio_loop() {
 #endif
 
         bt_write(pkt, sizeof(pkt));
+        pktbuild_count++;
         haptic_buf_pos = 0;
+    }
+
+    // Cadence dump: every ~1 s, print encode vs packet-build vs decode counts.
+    // Expected steady state: encode ~100/s, pktbuild ~93–94/s, decode ~100/s
+    // when DS5 mic is active. A large encode/pktbuild gap means we're
+    // overwriting opus_buf between sends (duplicated newer frame, dropped
+    // older frame) at ~6 frames/sec.
+    static uint64_t last_dump_us = 0;
+    const uint64_t now_us = time_us_64();
+    if (now_us - last_dump_us >= 1'000'000) {
+        const uint32_t e = encode_count;
+        const uint32_t p = pktbuild_count;
+        const uint32_t d = decode_count;
+        encode_count = 0;
+        pktbuild_count = 0;
+        decode_count = 0;
+        last_dump_us = now_us;
+        const uint32_t adrop = audio_fifo_drop_count;
+        const uint32_t mdrop = mic_fifo_drop_count;
+        audio_fifo_drop_count = 0;
+        mic_fifo_drop_count = 0;
+        printf("[Cadence] enc=%lu pkt=%lu dec=%lu adrop=%lu mdrop=%lu (per sec)\n",
+               (unsigned long) e, (unsigned long) p, (unsigned long) d,
+               (unsigned long) adrop, (unsigned long) mdrop);
     }
 }
 
@@ -196,6 +230,7 @@ void mic_proc() {
         printf("[Audio] OpusDecoder decode failed: %d\n", decoded_samples);
         return;
     }
+    decode_count++;
     static mic_decode_element decode_element{};
     decode_element.len = decoded_samples * MIC_CHANNELS * sizeof(int16_t);
     memcpy(decode_element.data,decoded_data,decode_element.len);
@@ -248,16 +283,24 @@ void core1_entry() {
             critical_section_enter_blocking(&opus_cs);
             memcpy(opus_buf, out, 200);
             critical_section_exit(&opus_cs);
+            encode_count++;
         }
         mic_proc();
     }
 }
 
+extern bool mic_active; // set by tud_audio_set_itf_cb in main.cpp
+
 void mic_add_queue(uint8_t *data) {
+    // Don't decode mic frames if the host isn't streaming the mic interface.
+    // Decode load on core1 degrades speaker quality (see findings memo); when
+    // nobody is listening we skip the work entirely.
+    if (!mic_active) return;
     static mic_element mic_packet{};
     memcpy(mic_packet.data,data,MIC_OPUS_SIZE);
     if (queue_is_full(&mic_fifo)) {
         queue_try_remove(&mic_fifo,NULL);
+        mic_fifo_drop_count++;
     }
     queue_try_add(&mic_fifo,&mic_packet);
 }

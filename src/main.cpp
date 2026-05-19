@@ -29,6 +29,7 @@
 int reportSeqCounter = 0;
 uint8_t packetCounter = 0;
 bool spk_active = false;
+bool mic_active = false;
 
 uint8_t interrupt_in_data[63] = {
     0x7f, 0x7d, 0x7f, 0x7e, 0x00, 0x00, 0xa7,
@@ -163,6 +164,9 @@ bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *p_reques
     if (itf == 1) {
         printf("[AUDIO] Set interface Speaker to alternate setting %d\n", alt);
         spk_active = alt;
+    } else if (itf == 2) {
+        printf("[AUDIO] Set interface Mic to alternate setting %d\n", alt);
+        mic_active = alt;
     }
 
     return true;

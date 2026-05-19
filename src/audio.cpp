@@ -97,10 +97,16 @@ void audio_loop() {
     }
     const float audio_gain = cached_audio_gain;
     const float haptics_gain = cfg.haptics_gain;
+    // Replace division by 32768.0f with multiplication by its reciprocal.
+    // GCC -O3 likely already constant-folds this, but being explicit is
+    // bulletproof. Pre-multiplied gains save the per-sample multiply too.
+    constexpr float INV_INT16 = 1.0f / 32768.0f;
+    const float audio_scale = audio_gain * INV_INT16;
+    const float haptics_scale = haptics_gain * INV_INT16;
     for (int i = 0; i < nframes; i++) {
- #if !DISABLE_SPEAKER_PROC       
-        audio_buf[audio_buf_pos++] = raw[i * INPUT_CHANNELS] / 32768.0f * audio_gain;
-        audio_buf[audio_buf_pos++] = raw[i * INPUT_CHANNELS + 1] / 32768.0f * audio_gain;
+ #if !DISABLE_SPEAKER_PROC
+        audio_buf[audio_buf_pos++] = raw[i * INPUT_CHANNELS] * audio_scale;
+        audio_buf[audio_buf_pos++] = raw[i * INPUT_CHANNELS + 1] * audio_scale;
         if (audio_buf_pos == 512 * 2) {
             static audio_raw_element element{};
             memcpy(element.data, audio_buf, 512 * 2 * 4);
@@ -113,9 +119,9 @@ void audio_loop() {
             audio_buf_pos = 0;
         }
 #endif
-        in_buf[i * 2] = static_cast<WDL_ResampleSample>(clamp(raw[i * INPUT_CHANNELS + 2] / 32768.0f * haptics_gain,
+        in_buf[i * 2] = static_cast<WDL_ResampleSample>(clamp(raw[i * INPUT_CHANNELS + 2] * haptics_scale,
                                                               -1.0f, 1.0f));
-        in_buf[i * 2 + 1] = static_cast<WDL_ResampleSample>(clamp(raw[i * INPUT_CHANNELS + 3] / 32768.0f * haptics_gain,
+        in_buf[i * 2 + 1] = static_cast<WDL_ResampleSample>(clamp(raw[i * INPUT_CHANNELS + 3] * haptics_scale,
                                                                   -1.0f, 1.0f));
     }
 

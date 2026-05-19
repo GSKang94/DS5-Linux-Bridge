@@ -90,9 +90,13 @@ extern "C" void tud_suspend_cb(bool remote_wakeup_en) {
 
     // Arm the deferred DualSense power-off. wake_task() will fire it after
     // POWER_OFF_DEBOUNCE_US unless tud_resume_cb / tud_mount_cb cancel it
-    // first. BTstack calls aren't safe from ISR context anyway.
+    // first. BTstack calls aren't safe from ISR context anyway. The
+    // 64-bit timestamp write is paired with the wake_task reader under
+    // wake_cs to prevent a torn read across the two 32-bit halves.
+    critical_section_enter_blocking(&wake_cs);
     power_off_armed_at_us = time_us_64();
     power_off_armed = true;
+    critical_section_exit(&wake_cs);
 
     // Unconditionally re-arm on suspend. If a previous wake attempt hung
     // (e.g. Linux ignored a keystroke and left the endpoint busy forever),
@@ -196,7 +200,13 @@ void wake_task(void) {
     // elapsed without a resume cancelling it. Checked before the early-return
     // on idle FSM states so it still fires regardless of wake-FSM state.
     // bt_dualsense_power_off is a no-op if no controller is connected.
-    if (power_off_armed && (now - power_off_armed_at_us) >= POWER_OFF_DEBOUNCE_US) {
+    // Snapshot armed+timestamp atomically under wake_cs so the ISR setter
+    // can't tear the 64-bit timestamp across our comparison.
+    critical_section_enter_blocking(&wake_cs);
+    const bool     armed_now    = power_off_armed;
+    const uint64_t armed_at_now = power_off_armed_at_us;
+    critical_section_exit(&wake_cs);
+    if (armed_now && (now - armed_at_now) >= POWER_OFF_DEBOUNCE_US) {
         power_off_armed = false;
         bt_dualsense_power_off();
         WAKE_DBG("dispatched DualSense power-off (debounce %llu ms elapsed)",

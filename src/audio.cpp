@@ -145,42 +145,49 @@ void audio_loop() {
         if (haptic_buf_pos != SAMPLE_SIZE) {
             continue;
         }
-        // pkt is static + zero-initialized once. All bytes we use are
-        // overwritten each iteration; trailing bytes (past pkt+343) stay
-        // zero permanently. Saves ~100 cycles of stack zero-init per
-        // packet build (398-byte fill at REPORT_SIZE).
+        // pkt is static. Constant fields (type/length bytes) are written
+        // once on first call; only per-packet-varying bytes are touched
+        // in the hot path. Variable rare-change bytes (buf_len, headset
+        // type) are refreshed only when their inputs change.
         static uint8_t pkt[REPORT_SIZE] = {};
-        pkt[0] = REPORT_ID;
+        static bool pkt_init = false;
+        if (!pkt_init) {
+            pkt[0] = REPORT_ID;
+            pkt[2] = 0x11 | 0 << 6 | 1 << 7;
+            pkt[3] = 7;
+            // bit 0 of pkt[4] enables the controller's mic upload.
+            pkt[4] = 0b11111111;
+            pkt[11] = 0x10 | 0 << 6 | 1 << 7; // SetStateData type
+            pkt[12] = 63;
+            pkt[76] = 0x12 | 0 << 6 | 1 << 7; // Haptics Audio Data type
+            pkt[77] = SAMPLE_SIZE;
+#if !DISABLE_SPEAKER_PROC
+            pkt[143] = 200;                   // Speaker payload length
+#endif
+            pkt_init = true;
+        }
+        // buf_len: refresh only when config value changes (writes to pkt[5..9]).
+        static uint8_t cached_buf_len = 0xFF;
+        const auto buf_len = cfg.audio_buffer_length;
+        if (buf_len != cached_buf_len) {
+            pkt[5] = pkt[6] = pkt[7] = pkt[8] = pkt[9] = buf_len;
+            cached_buf_len = buf_len;
+        }
+#if !DISABLE_SPEAKER_PROC
+        // Speaker/headset type byte changes only when headset is plugged/unplugged.
+        static bool cached_plug_headset = !plug_headset; // force first write
+        if (plug_headset != cached_plug_headset) {
+            pkt[142] = (plug_headset ? 0x16 : 0x13) | 0 << 6 | 1 << 7;
+            cached_plug_headset = plug_headset;
+        }
+#endif
+        // Per-packet variable fields.
         pkt[1] = reportSeqCounter << 4;
         reportSeqCounter = (reportSeqCounter + 1) & 0x0F;
-        pkt[2] = 0x11 | 0 << 6 | 1 << 7;
-        pkt[3] = 7;
-        // bit 0 of pkt[4] enables the controller's mic upload (set by awalol's
-        // mic-work commit). Was 0b11111110 — kept all other bits, flipped bit 0
-        // from 0 -> 1 so DS5 begins emitting mic frames in its 0x31 input report.
-        pkt[4] = 0b11111111;
-        const auto buf_len = cfg.audio_buffer_length;
-        pkt[5] = buf_len;
-        pkt[6] = buf_len;
-        pkt[7] = buf_len;
-        pkt[8] = buf_len; // 这 4 个字节的作用未知，调整没有效果
-        pkt[9] = buf_len; // audio buffer length 只有调整这个字节生效。
         pkt[10] = packetCounter++;
-        // SetStateData
-        pkt[11] = 0x10 | 0 << 6 | 1 << 7;
-        pkt[12] = 63;
         state_get(pkt + 13, 63);
-        // Haptics Audio Data
-        pkt[76] = 0x12 | 0 << 6 | 1 << 7;
-        pkt[77] = SAMPLE_SIZE;
         memcpy(pkt + 78, haptic_buf, SAMPLE_SIZE);
 #if !DISABLE_SPEAKER_PROC
-        // Speaker Audio Data
-        pkt[142] = (plug_headset ? 0x16 : 0x13) | 0 << 6 | 1 << 7; // Speaker: 0x13
-        // L Headset Mono: 0x14
-        // L Headset R Speaker: 0x15
-        // Headset: 0x16
-        pkt[143] = 200;
         critical_section_enter_blocking(&opus_cs);
         memcpy(pkt + 144, opus_buf, 200);
         critical_section_exit(&opus_cs);

@@ -376,7 +376,7 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
         if (channel == hid_interrupt_cid) {
             // printf("[L2CAP] HID Interrupt data len=%u\n", size);
             // printf_hexdump(packet, size);
-            bt_data_callback(INTERRUPT, packet, size);
+            if (bt_data_callback) bt_data_callback(INTERRUPT, packet, size);
 
             // 静默检测
             if (get_config().disable_inactive_disconnect) {
@@ -425,7 +425,7 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
             printf("[L2CAP] HID Control data len=%u\n", size);
             printf_hexdump(packet, size);
 #endif
-            bt_data_callback(CONTROL, packet, size);
+            if (bt_data_callback) bt_data_callback(CONTROL, packet, size);
         } else {
             printf("[L2CAP] Data on unknown channel 0x%04X (Interrupt: 0x%04X, Control: 0x%04X)\n",
                    channel, hid_interrupt_cid, hid_control_cid);
@@ -464,7 +464,7 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
                     report32[1] = 0x10; // reportSeqCounter
                     report32[2] = 0x10 | 0 << 6 | 1 << 7;
                     report32[3] = 0x3f; // 63 bytes
-                    state_set(report32 + 4,sizeof(SetStateData));
+                    state_get(report32 + 4, sizeof(SetStateData));
                     bt_write(report32, sizeof(report32));
 
                     const auto mtu = l2cap_get_remote_mtu_for_local_cid(hid_interrupt_cid);
@@ -579,18 +579,26 @@ vector<uint8_t> get_feature_data(uint8_t reportId, uint16_t len) {
 }
 
 void set_feature_data(uint8_t reportId, uint8_t *data, uint16_t len) {
-    if (hid_control_cid != 0) {
-        uint8_t get_feature[len + 2];
-        get_feature[0] = 0x53;
-        get_feature[1] = reportId;
-        memcpy(get_feature + 2, data, len);
-        fill_feature_report_checksum(get_feature + 1, len + 1);
-        l2cap_send(hid_control_cid, get_feature, len + 2);
-#if ENABLE_VERBOSE
-        printf("[L2CAP] Requesting Set Feature Report 0x%02X\n", reportId);
-        printf_hexdump(get_feature, len + 2);
-#endif
+    if (hid_control_cid == 0) return;
+    // Largest legitimate DS/DSE feature report payload is ~63 bytes; +2 for
+    // SET_REPORT header. Cap at 128 to keep this off the stack as a VLA and
+    // prevent a too-large len (or attacker-influenced value) from smashing
+    // the stack with no diagnostic.
+    constexpr size_t SET_FEATURE_MAX = 128;
+    if (static_cast<size_t>(len) + 2 > SET_FEATURE_MAX) {
+        printf("[L2CAP] set_feature_data len=%u too large, dropped\n", len);
+        return;
     }
+    uint8_t get_feature[SET_FEATURE_MAX];
+    get_feature[0] = 0x53;
+    get_feature[1] = reportId;
+    memcpy(get_feature + 2, data, len);
+    fill_feature_report_checksum(get_feature + 1, len + 1);
+    l2cap_send(hid_control_cid, get_feature, len + 2);
+#if ENABLE_VERBOSE
+    printf("[L2CAP] Requesting Set Feature Report 0x%02X\n", reportId);
+    printf_hexdump(get_feature, len + 2);
+#endif
 }
 
 void init_feature() {

@@ -34,9 +34,13 @@ void state_init() {
     memcpy(state, state_init_data, sizeof(state));
 }
 
-void state_set(uint8_t *data, const uint8_t size) {
-    if (size > 63) {
-        printf("[StateMgr] Warning: State Set over 63 bytes\n");
+void state_get(uint8_t *data, const uint8_t size) {
+    if (size > sizeof(state)) {
+        // state[] is 63 bytes; copying more would OOB-read state and OOB-write
+        // caller's buffer. Refuse rather than memcpy past the source.
+        printf("[StateMgr] Error: state_get size %u > %u; refused\n",
+               size, static_cast<unsigned>(sizeof(state)));
+        return;
     }
     memcpy(data, state, size);
 }

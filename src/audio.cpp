@@ -120,7 +120,7 @@ void audio_loop() {
         // SetStateData
         pkt[11] = 0x10 | 0 << 6 | 1 << 7;
         pkt[12] = 63;
-        state_set(pkt + 13,63);
+        state_get(pkt + 13, 63);
         // Haptics Audio Data
         pkt[76] = 0x12 | 0 << 6 | 1 << 7;
         pkt[77] = SAMPLE_SIZE;

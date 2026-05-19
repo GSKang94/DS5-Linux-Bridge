@@ -78,7 +78,12 @@ void audio_loop() {
         return;
     }
 
-    static float audio_buf[512 * 2];
+    // Accumulate directly into the staging queue element so the only
+    // copy needed is the queue's internal memcpy at queue_try_add. Was:
+    // accumulate into audio_buf, memcpy 4 KB into element, queue copies
+    // another 4 KB into its slot — two memcpys per push (~760 KB/sec of
+    // pure-overhead memcpy at 93 push/sec).
+    static audio_raw_element staging{};
     static uint audio_buf_pos = 0;
     // 2. 从4ch中提取ch3/ch4，转换为float输入重采样器
     WDL_ResampleSample *in_buf;
@@ -105,15 +110,13 @@ void audio_loop() {
     const float haptics_scale = haptics_gain * INV_INT16;
     for (int i = 0; i < nframes; i++) {
  #if !DISABLE_SPEAKER_PROC
-        audio_buf[audio_buf_pos++] = raw[i * INPUT_CHANNELS] * audio_scale;
-        audio_buf[audio_buf_pos++] = raw[i * INPUT_CHANNELS + 1] * audio_scale;
+        staging.data[audio_buf_pos++] = raw[i * INPUT_CHANNELS] * audio_scale;
+        staging.data[audio_buf_pos++] = raw[i * INPUT_CHANNELS + 1] * audio_scale;
         if (audio_buf_pos == 512 * 2) {
-            static audio_raw_element element{};
-            memcpy(element.data, audio_buf, 512 * 2 * 4);
             if (queue_is_full(&audio_fifo)) {
                 queue_try_remove(&audio_fifo,NULL);
             }
-            if (!queue_try_add(&audio_fifo, &element)) {
+            if (!queue_try_add(&audio_fifo, &staging)) {
                 printf("[Audio] Warning: audio_fifo add failed\n");
             }
             audio_buf_pos = 0;

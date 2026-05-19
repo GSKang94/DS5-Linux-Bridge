@@ -115,30 +115,31 @@ extern "C" void tud_suspend_cb(bool remote_wakeup_en) {
 }
 
 extern "C" void tud_resume_cb(void) {
+    const bool swap = usb_variant_swap_in_progress();
     WAKE_DBG("tud_resume_cb state=%s armed=%d swap=%d",
-             wake_state_name(state), (int)power_off_armed,
-             (int)usb_variant_swap_in_progress());
-    // If this resume is the consequence of our own variant-swap bounce
-    // (tud_connect after tud_disconnect), ignore it entirely. Otherwise
-    // the wake FSM treats it as a genuine S3 wake event and starts
-    // sending F15 keystrokes — visible as random "fic" key spam on the
-    // host after a few connect/disconnect cycles.
-    if (usb_variant_swap_in_progress()) return;
+             wake_state_name(state), (int)power_off_armed, (int)swap);
+    // Bus-state bookkeeping always runs: host_suspended must reflect
+    // reality so wake_on_bt_input / wake_task make correct decisions
+    // even if a genuine host wake lands inside the variant-swap window
+    // (the same PS press that triggered the swap can also be the press
+    // that woke the host — observed on Linux S5).
     host_suspended = false;
-    host_resumed_event = true;
     power_off_armed = false; // cancel pending power-off
     usb_set_host_suspended(false);
+    // Only the FSM-arming flag is suppressed during a swap: this is the
+    // resume our own tud_connect generated, not a real wake event, and
+    // letting the FSM act on it caused the "fic" key spam.
+    if (!swap) host_resumed_event = true;
 }
 
 extern "C" void tud_mount_cb(void) {
+    const bool swap = usb_variant_swap_in_progress();
     WAKE_DBG("tud_mount_cb state=%s armed=%d swap=%d",
-             wake_state_name(state), (int)power_off_armed,
-             (int)usb_variant_swap_in_progress());
-    if (usb_variant_swap_in_progress()) return;
+             wake_state_name(state), (int)power_off_armed, (int)swap);
     host_suspended = false;
-    host_resumed_event = true;
     power_off_armed = false;
     usb_set_host_suspended(false);
+    if (!swap) host_resumed_event = true;
 }
 
 void wake_on_bt_input(const uint8_t *hid_input, uint16_t len) {

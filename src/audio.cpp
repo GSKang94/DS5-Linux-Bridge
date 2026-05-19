@@ -224,16 +224,18 @@ void mic_proc() {
     if (!queue_try_remove(&mic_fifo,&mic_packet)) {
         return;
     }
-    static int16_t decoded_data[MIC_FRAMES * MIC_CHANNELS];
-    auto decoded_samples = opus_decode(decoder,mic_packet.data,MIC_OPUS_SIZE,decoded_data,MIC_FRAMES,false);
+    // Decode straight into the queue element to avoid an intermediate
+    // ~960 B memcpy on the hot path. decode_element is the staging buffer
+    // we'd be copying into anyway.
+    static mic_decode_element decode_element{};
+    auto decoded_samples = opus_decode(decoder, mic_packet.data, MIC_OPUS_SIZE,
+                                       decode_element.data, MIC_FRAMES, false);
     if (decoded_samples <= 0) {
         printf("[Audio] OpusDecoder decode failed: %d\n", decoded_samples);
         return;
     }
     decode_count++;
-    static mic_decode_element decode_element{};
     decode_element.len = decoded_samples * MIC_CHANNELS * sizeof(int16_t);
-    memcpy(decode_element.data,decoded_data,decode_element.len);
     if (queue_is_full(&mic_decode_fifo)) {
         queue_try_remove(&mic_decode_fifo,NULL);
     }

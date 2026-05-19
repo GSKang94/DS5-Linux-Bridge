@@ -84,8 +84,19 @@ void audio_loop() {
     WDL_ResampleSample *in_buf;
     int nframes = resampler.ResamplePrepare(frames, OUTPUT_CHANNELS, &in_buf);
 
-    const float audio_gain = mute[0] ? 0.0f : powf(10.0f, get_config().speaker_volume / 20.0f);
-    const float haptics_gain = get_config().haptics_gain;
+    // Cache powf result across audio_loop calls — volume only changes on
+    // explicit config update, but the prior code recomputed it every iter.
+    const auto &cfg = get_config();
+    static float cached_audio_gain = 0.0f;
+    static float cached_speaker_volume = 1.0f; // impossible value -> force first compute
+    static bool cached_mute = true;
+    if (cfg.speaker_volume != cached_speaker_volume || mute[0] != cached_mute) {
+        cached_speaker_volume = cfg.speaker_volume;
+        cached_mute = mute[0];
+        cached_audio_gain = cached_mute ? 0.0f : powf(10.0f, cached_speaker_volume / 20.0f);
+    }
+    const float audio_gain = cached_audio_gain;
+    const float haptics_gain = cfg.haptics_gain;
     for (int i = 0; i < nframes; i++) {
  #if !DISABLE_SPEAKER_PROC       
         audio_buf[audio_buf_pos++] = raw[i * INPUT_CHANNELS] / 32768.0f * audio_gain;
@@ -125,7 +136,11 @@ void audio_loop() {
         if (haptic_buf_pos != SAMPLE_SIZE) {
             continue;
         }
-        uint8_t pkt[REPORT_SIZE]{};
+        // pkt is static + zero-initialized once. All bytes we use are
+        // overwritten each iteration; trailing bytes (past pkt+343) stay
+        // zero permanently. Saves ~100 cycles of stack zero-init per
+        // packet build (398-byte fill at REPORT_SIZE).
+        static uint8_t pkt[REPORT_SIZE] = {};
         pkt[0] = REPORT_ID;
         pkt[1] = reportSeqCounter << 4;
         reportSeqCounter = (reportSeqCounter + 1) & 0x0F;
@@ -135,7 +150,7 @@ void audio_loop() {
         // mic-work commit). Was 0b11111110 — kept all other bits, flipped bit 0
         // from 0 -> 1 so DS5 begins emitting mic frames in its 0x31 input report.
         pkt[4] = 0b11111111;
-        const auto buf_len = get_config().audio_buffer_length;
+        const auto buf_len = cfg.audio_buffer_length;
         pkt[5] = buf_len;
         pkt[6] = buf_len;
         pkt[7] = buf_len;

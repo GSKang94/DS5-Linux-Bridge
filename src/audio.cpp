@@ -270,9 +270,11 @@ void core1_entry() {
         if (queue_try_remove(&audio_fifo, &audio_element)) {
             WDL_ResampleSample *in_buf;
             int nframes = resampler_audio.ResamplePrepare(512, 2, &in_buf);
-            for (int i = 0; i < nframes * 2; i++) {
-                in_buf[i] = audio_element.data[i];
-            }
+            // audio_element.data is float[1024], in_buf is WDL_ResampleSample
+            // (= float, set by WDL_RESAMPLE_TYPE=float). memcpy expresses the
+            // intent better than the per-element loop and compiles to the
+            // same or better codegen.
+            memcpy(in_buf, audio_element.data, nframes * 2 * sizeof(float));
             static WDL_ResampleSample out_buf[480 * 2];
             resampler_audio.ResampleOut(out_buf, nframes, 480, 2);
 

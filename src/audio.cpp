@@ -24,9 +24,7 @@
 #define REPORT_ID         0x36
 // #define VOLUME_GAIN       2
 // #define BUFFER_LENGTH     48 — replaced by config().audio_buffer_length
-// Mic decode runs on the same core1 as speaker encode; mono halves the
-// per-frame decode work so the loop fits within the 10 ms budget.
-#define MIC_CHANNELS      1
+#define MIC_CHANNELS      2
 #define MIC_FRAMES        480
 #define MIC_OPUS_SIZE     71
 

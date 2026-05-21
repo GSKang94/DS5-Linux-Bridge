@@ -90,8 +90,14 @@ void on_bt_data(CHANNEL_TYPE channel, uint8_t *data, uint16_t len) {
             mic_add_queue(data + 4);
             return;
         }
-        if ((data[56] & 1) != (interrupt_in_data[53] & 1)) {
-            set_headset(data[56] & 1);
+        // Track actual DS5 jack state separately — interrupt_in_data[53]
+        // has its HP_DETECT bit forced high for host UCM routing and cannot
+        // be used as the previous-state comparison here.
+        static uint8_t last_jack_state = 0xFF; // sentinel: force set_headset on first report
+        const uint8_t cur_jack_state = data[56] & 1;
+        if (cur_jack_state != last_jack_state) {
+            set_headset(cur_jack_state);
+            last_jack_state = cur_jack_state;
         }
 
         // Wake-on-PS must observe every BT input report regardless of polling
@@ -100,6 +106,15 @@ void on_bt_data(CHANNEL_TYPE channel, uint8_t *data, uint16_t len) {
         // modes silently breaks wake while the host is suspended.
         wake_on_bt_input(data + 3, len - 3);
 
+        // interrupt_in_data[53] = dualsense_input_report.status[1]:
+        //   bit 0 = HP_DETECT  (headphones plugged into DS5 3.5mm jack)
+        //   bit 1 = MIC_DETECT (headset mic plugged into DS5 3.5mm jack)
+        // hid-playstation (≥6.18) reads these and emits SW_HEADPHONE_INSERT /
+        // SW_MICROPHONE_INSERT input events. The USB audio mixer quirk (≥6.17)
+        // wires those to "Headphone Jack" / "Headset Mic Jack" ALSA controls,
+        // which alsa-ucm-conf uses to switch between mono Internal Speaker and
+        // stereo Headphones profiles. We pass the DS5's real values through
+        // unchanged — the DS5 hardware jack sensor is authoritative.
         if (get_config().polling_rate_mode != 2) {
             memcpy(interrupt_in_data, data + 3, 63);
 #if ENABLE_BATT_LED

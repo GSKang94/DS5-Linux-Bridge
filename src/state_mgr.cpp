@@ -102,11 +102,11 @@ void state_update(const uint8_t *data, const uint8_t size) {
         sizeof(update.MuteLightMode)
     );
 
-    /*copy_if_allowed(
+    copy_if_allowed(
         update.AllowAudioMute,
         kMuteControlOffset,
         sizeof(uint8_t)
-    );*/
+    );
 
     copy_if_allowed(
         update.AllowRightTriggerFFB,

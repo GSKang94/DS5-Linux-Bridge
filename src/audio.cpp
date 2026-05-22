@@ -18,11 +18,9 @@
 #include "usb.h"
 
 #define INPUT_CHANNELS    4
-#define OUTPUT_CHANNELS   2
 #define SAMPLE_SIZE       64
 #define REPORT_SIZE       398
 #define REPORT_ID         0x36
-// #define VOLUME_GAIN       2
 // #define BUFFER_LENGTH     48 — replaced by config().audio_buffer_length
 #define MIC_CHANNELS      2
 #define MIC_FRAMES        480
@@ -31,7 +29,6 @@
 using std::clamp;
 using std::max;
 
-static WDL_Resampler resampler;
 static uint8_t reportSeqCounter = 0;
 static uint8_t packetCounter = 0;
 static bool plug_headset = false;
@@ -83,12 +80,7 @@ void audio_loop() {
     // pure-overhead memcpy at 93 push/sec).
     static audio_raw_element staging{};
     static uint audio_buf_pos = 0;
-    // 2. 从4ch中提取ch3/ch4，转换为float输入重采样器
-    WDL_ResampleSample *in_buf;
-    int nframes = resampler.ResamplePrepare(frames, OUTPUT_CHANNELS, &in_buf);
 
-    // Cache powf result across audio_loop calls — volume only changes on
-    // explicit config update, but the prior code recomputed it every iter.
     const auto &cfg = get_config();
     static float cached_audio_gain = 0.0f;
     static float cached_speaker_volume = 1.0f; // impossible value -> force first compute
@@ -98,21 +90,21 @@ void audio_loop() {
         cached_mute = mute[0];
         cached_audio_gain = cached_mute ? 0.0f : powf(10.0f, cached_speaker_volume / 20.0f);
     }
-    const float audio_gain = cached_audio_gain;
-    const float haptics_gain = cfg.haptics_gain;
-    // Replace division by 32768.0f with multiplication by its reciprocal.
-    // GCC -O3 likely already constant-folds this, but being explicit is
-    // bulletproof. Pre-multiplied gains save the per-sample multiply too.
     constexpr float INV_INT16 = 1.0f / 32768.0f;
-    const float audio_scale = audio_gain * INV_INT16;
-    const float haptics_scale = haptics_gain * INV_INT16;
-    for (int i = 0; i < nframes; i++) {
- #if !DISABLE_SPEAKER_PROC
+    const float audio_scale = cached_audio_gain * INV_INT16;
+
+    // Haptic accumulator: advance at 16:1 decimation cadence (one haptic
+    // "slot" per 16 input frames) to keep packet fire rate at ~93 Hz.
+    // ch2/ch3 "feel the bass" resampling removed — DS5 firmware requires
+    // the 0x12 sub-block at its fixed offset; we send zeroed silence instead.
+    static int haptic_buf_pos = 0;
+    for (int i = 0; i < frames; i++) {
+#if !DISABLE_SPEAKER_PROC
         staging.data[audio_buf_pos++] = raw[i * INPUT_CHANNELS] * audio_scale;
         staging.data[audio_buf_pos++] = raw[i * INPUT_CHANNELS + 1] * audio_scale;
         if (audio_buf_pos == 512 * 2) {
             if (queue_is_full(&audio_fifo)) {
-                queue_try_remove(&audio_fifo,NULL);
+                queue_try_remove(&audio_fifo, NULL);
             }
             if (!queue_try_add(&audio_fifo, &staging)) {
                 printf("[Audio] Warning: audio_fifo add failed\n");
@@ -120,26 +112,7 @@ void audio_loop() {
             audio_buf_pos = 0;
         }
 #endif
-        in_buf[i * 2] = static_cast<WDL_ResampleSample>(clamp(raw[i * INPUT_CHANNELS + 2] * haptics_scale,
-                                                              -1.0f, 1.0f));
-        in_buf[i * 2 + 1] = static_cast<WDL_ResampleSample>(clamp(raw[i * INPUT_CHANNELS + 3] * haptics_scale,
-                                                                  -1.0f, 1.0f));
-    }
-
-    // 3. 48kHz -> 3kHz 重采样
-    static WDL_ResampleSample out_buf[SAMPLE_SIZE]; // 64 floats = 32帧 × 2ch
-    const int out_frames = resampler.ResampleOut(out_buf, nframes, nframes / 4, OUTPUT_CHANNELS);
-
-    static int8_t haptic_buf[SAMPLE_SIZE];
-    static int haptic_buf_pos = 0;
-
-    // 4. 转换为int8并缓冲，满64字节即组包发送
-    for (int i = 0; i < out_frames; i++) {
-        int val_l = static_cast<int>(out_buf[i * 2] * 127.0f);
-        int val_r = static_cast<int>(out_buf[i * 2 + 1] * 127.0f);
-        haptic_buf[haptic_buf_pos++] = (int8_t) clamp(val_l, -128, 127); // 似乎clamp有点多余？还是以防万一吧
-        haptic_buf[haptic_buf_pos++] = (int8_t) clamp(val_r, -128, 127);
-
+        haptic_buf_pos += 2;
         if (haptic_buf_pos != SAMPLE_SIZE) {
             continue;
         }
@@ -184,7 +157,7 @@ void audio_loop() {
         reportSeqCounter = (reportSeqCounter + 1) & 0x0F;
         pkt[10] = packetCounter++;
         state_get(pkt + 13, 63);
-        memcpy(pkt + 78, haptic_buf, SAMPLE_SIZE);
+        // pkt[78..141] = haptic sub-block payload, stays zeroed (static init)
 #if !DISABLE_SPEAKER_PROC
         critical_section_enter_blocking(&opus_cs);
         memcpy(pkt + 144, opus_buf, 200);
@@ -197,11 +170,7 @@ void audio_loop() {
 }
 
 void audio_init() {
-    resampler.SetMode(true, 0, false);
-    resampler.SetRates(48000, 3000);
-    resampler.SetFeedMode(true);
-    resampler.Prealloc(2, 24, 6);
- #if !DISABLE_SPEAKER_PROC
+#if !DISABLE_SPEAKER_PROC
     queue_init(&audio_fifo, sizeof(audio_raw_element), 2);
     critical_section_init(&opus_cs);
     queue_init(&mic_fifo, sizeof(mic_element), 2);

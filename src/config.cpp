@@ -47,10 +47,6 @@ void config_valid() {
         printf("[Config] Config Body size is invalid\n");
     }
     auto body = &config.body;
-    if (std::isnan(body->haptics_gain) || body->haptics_gain < 1.0f || body->haptics_gain > 2.0f) {
-        body->haptics_gain = 1.0f;
-        printf("[Config] Haptics Gain value is invalid\n");
-    }
     if (std::isnan(body->speaker_volume) || body->speaker_volume < -100 || body->speaker_volume > 0) {
         body->speaker_volume = -100;
         printf("[Config] Speaker Volume is invalid\n");

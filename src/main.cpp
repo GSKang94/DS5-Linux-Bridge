@@ -277,6 +277,13 @@ int main() {
     printf("Failed to initialize CYW43\n");
     return 1;
   }
+  
+  // Power-On Self Test (POST) LED pattern: 3 rapid flashes to confirm
+  // successful CPU overclocking and CYW43 Bluetooth module initialization.
+  for (int i = 0; i < 6; i++) {
+    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, i % 2 == 0);
+    sleep_ms(80);
+  }
   cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
 
 #if ENABLE_BATT_LED

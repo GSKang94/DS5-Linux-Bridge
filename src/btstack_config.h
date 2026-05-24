@@ -33,9 +33,13 @@
 #define NVM_NUM_DEVICE_DB_ENTRIES 4
 #define HAVE_EMBEDDED_TIME_MS
 
-// Logging
+// Logging — ENABLE_PRINTF_HEXDUMP must always be defined; hci_dump_embedded_stdout.c
+// is compiled unconditionally by the Pico SDK BTstack integration and #errors without it.
 #define ENABLE_PRINTF_HEXDUMP
+
+#if !defined(NDEBUG) || (defined(ENABLE_VERBOSE) && ENABLE_VERBOSE)
 #define ENABLE_LOG_INFO
 #define ENABLE_LOG_ERROR
+#endif
 
 #endif

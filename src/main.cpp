@@ -331,5 +331,7 @@ int main() {
 #if ENABLE_BATT_LED
         battery_led_tick();
 #endif
+        // Yield the memory bus and throttle polling rate to prevent bus contention
+        sleep_us(100);
     }
 }

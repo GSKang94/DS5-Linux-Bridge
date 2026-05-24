@@ -6,7 +6,6 @@
 #include "bsp/board_api.h"
 #include "bt.h"
 #include "utils.h"
-#include "resample.h"
 #include "audio.h"
 #include "wake.h"
 #include "usb.h"

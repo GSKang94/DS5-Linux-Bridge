@@ -100,28 +100,16 @@ if (ENABLE_BATT_LED)
         target_sources(ds5-bridge PRIVATE src/battery_led.cpp)
 endif ()
 
-# Cockos WDLResampler
-add_library(wdl_resampler STATIC
-        lib/WDL/WDL/resample.cpp
-)
-target_include_directories(wdl_resampler PUBLIC
-        lib/WDL/WDL
-)
 
 # Opus
 #set(OPUS_FIXED_POINT ON)
 add_subdirectory(lib/opus)
 
-target_compile_options(wdl_resampler PRIVATE -fsigned-char)
 target_compile_options(ds5-bridge PRIVATE -fsigned-char)
-target_compile_definitions(wdl_resampler PRIVATE
-        WDL_RESAMPLE_TYPE=float
-)
 target_compile_definitions(ds5-bridge PRIVATE
         CYW43_LWIP=0
         ENABLE_SERIAL=${ENABLE_SERIAL_VALUE}
         PICO_FLASH_ASSUME_CORE1_SAFE=1
-        WDL_RESAMPLE_TYPE=float
         CYW43_PIO_CLOCK_DIV_INT=${CYW43_PIO_CLOCK_DIV_VALUE}
         PICO_STDIO_USB_USE_DEFAULT_DESCRIPTORS=0
         PICO_STDIO_USB_ENABLE_RESET_VIA_BAUD_RATE=0
@@ -180,7 +168,6 @@ target_link_libraries(ds5-bridge
         pico_btstack_cyw43
         tinyusb_device
         tinyusb_board
-        wdl_resampler
         opus
 )
 

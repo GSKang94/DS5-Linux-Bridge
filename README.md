@@ -50,6 +50,16 @@ When the connected DualSense reports its battery at or below 10% (and it is not 
 
 To opt out at build time, configure with `-DENABLE_BATT_LED=OFF`. Default is ON.
 
+### Microphone Hardware Mute & OS Sync Quirks
+
+This firmware implements a driverless hardware microphone mute toggle utilizing the controller's physical Mute button.
+- **Windows Behavior:** 
+  - Pressing the controller's Mute button toggles local hardware-level muting (silences the microphone stream in the firmware and turns the orange LED on/off). 
+  - Muting/unmuting the microphone in the Windows Sound control panel will automatically synchronize and toggle the controller's physical orange LED.
+  - **OS Sync Caveat:** Because the adapter is driverless and doesn't notify the OS via a UAC status interrupt endpoint, pressing the physical button on the controller cannot force the Windows OS-level sound panel mixer to toggle. If the OS has the microphone muted, pressing the controller button to turn off the LED will unmute the hardware stream, but Windows will still discard the audio in software. To resolve this desync, ensure the OS mixer is unmuted when using the physical button.
+- **Linux Behavior:**
+  - Works natively with the kernel's `hid-playstation` driver. The driver intercepts the button presses and manages the LED state. The local UAC sync is bypassed automatically when a host driver is active, preventing any state conflicts.
+
 ### Pico W Version
 
 Pico W only has haptics support, no speaker. You can enable Pico W firmware compilation with `-DPICO_W_BUILD=ON`, or download precompiled firmware from GitHub Actions.

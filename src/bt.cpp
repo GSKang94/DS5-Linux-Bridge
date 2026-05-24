@@ -389,6 +389,7 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             device_found = false;
             new_pair = false;
             connect_attempt_started = 0; // disarm
+            state_reset_mute();
             acl_handle = HCI_CON_HANDLE_INVALID;
             bt_rssi = 0;
             hid_control_cid = 0;

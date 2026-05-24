@@ -93,6 +93,21 @@ void interrupt_loop() {
   }
 }
 
+void state_push_to_bt() {
+  if (spk_active) {
+    return;
+  }
+  uint8_t outputData[78]{};
+  outputData[0] = 0x31;
+  outputData[1] = reportSeqCounter << 4;
+  if (++reportSeqCounter == 256) {
+    reportSeqCounter = 0;
+  }
+  outputData[2] = 0x10;
+  state_get(outputData + 3, sizeof(SetStateData));
+  bt_write(outputData, sizeof(outputData));
+}
+
 void on_bt_data(CHANNEL_TYPE channel, uint8_t *data, uint16_t len) {
   // printf("[Main] BT data callback: channel=%u len=%u\n", channel, len);
   if (channel == INTERRUPT && len > 2 && data[1] == 0x31) {
@@ -100,6 +115,19 @@ void on_bt_data(CHANNEL_TYPE channel, uint8_t *data, uint16_t len) {
       mic_add_queue(data + 4);
       return;
     }
+
+    // Mute button detection (data[12] corresponds to byte 9 of input data)
+    if (!g_host_hid_manages_mute) {
+      static bool prev_mute_pressed = false;
+      bool mute_pressed = (data[12] & 0x04) != 0;
+      if (mute_pressed && !prev_mute_pressed) {
+        g_firmware_mic_muted = !g_firmware_mic_muted;
+        state_set_local_mute(g_firmware_mic_muted);
+        state_push_to_bt();
+      }
+      prev_mute_pressed = mute_pressed;
+    }
+
     // Track actual DS5 jack state separately — interrupt_in_data[53]
     // has its HP_DETECT bit forced high for host UCM routing and cannot
     // be used as the previous-state comparison here.

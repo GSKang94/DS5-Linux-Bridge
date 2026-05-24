@@ -56,6 +56,14 @@ void set_headset(bool state) {
 }
 
 void audio_loop() {
+    // Sync UAC mute status to local state if host changes it
+    if (mute[1] != g_last_uac_mute) {
+        g_last_uac_mute = mute[1];
+        g_firmware_mic_muted = (mute[1] != 0);
+        state_set_local_mute(g_firmware_mic_muted);
+        state_push_to_bt();
+    }
+
     static mic_decode_element mic_element{};
     if (queue_try_remove(&mic_decode_fifo,&mic_element)) {
         uint16_t written = tud_audio_write(mic_element.data, mic_element.len);
@@ -197,6 +205,9 @@ void mic_proc() {
         return;
     }
     decode_element.len = decoded_samples * MIC_CHANNELS * sizeof(int16_t);
+    if (g_firmware_mic_muted) {
+        memset(decode_element.data, 0, decode_element.len);
+    }
     if (queue_is_full(&mic_decode_fifo)) {
         queue_try_remove(&mic_decode_fifo,NULL);
     }

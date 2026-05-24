@@ -28,10 +28,33 @@ static constexpr uint8_t state_init_data[63] = {
     0xff, 0xd7, 0x00 // RGB LED: R, G, B (Nijika Color!)✨
 };
 
+volatile bool g_firmware_mic_muted = false;
+volatile bool g_host_hid_manages_mute = false;
+volatile uint8_t g_last_uac_mute = 0xFF;
+
 uint8_t state[63]{};
+
+void state_reset_mute() {
+    g_firmware_mic_muted = false;
+    g_host_hid_manages_mute = false;
+    g_last_uac_mute = 0xFF;
+    state[8] = 0; // MuteLight::Off
+    state[9] &= ~(1 << 4); // Clear MicMute bit (bit 4 of byte 9)
+}
+
+void state_set_local_mute(bool muted) {
+    if (muted) {
+        state[8] = 1; // MuteLight::On (solid orange)
+        state[9] |= (1 << 4); // MicMute bit
+    } else {
+        state[8] = 0; // MuteLight::Off
+        state[9] &= ~(1 << 4); // Clear MicMute bit
+    }
+}
 
 void state_init() {
     memcpy(state, state_init_data, sizeof(state));
+    state_reset_mute();
 }
 
 void state_get(uint8_t *data, const uint8_t size) {
@@ -96,17 +119,30 @@ void state_update(const uint8_t *data, const uint8_t size) {
         sizeof(uint8_t)
     );*/
 
-    copy_if_allowed(
-        update.AllowMuteLight,
-        offsetof(SetStateData, MuteLightMode),
-        sizeof(update.MuteLightMode)
-    );
+    if ((update.AllowMuteLight && update.MuteLightMode == MuteLight::On) ||
+        (update.AllowAudioMute && update.MicMute)) {
+        g_host_hid_manages_mute = true;
+    }
 
-    copy_if_allowed(
-        update.AllowAudioMute,
-        kMuteControlOffset,
-        sizeof(uint8_t)
-    );
+    if (g_host_hid_manages_mute) {
+        copy_if_allowed(
+            update.AllowMuteLight,
+            offsetof(SetStateData, MuteLightMode),
+            sizeof(update.MuteLightMode)
+        );
+
+        copy_if_allowed(
+            update.AllowAudioMute,
+            kMuteControlOffset,
+            sizeof(uint8_t)
+        );
+
+        if (update.AllowMuteLight) {
+            g_firmware_mic_muted = (update.MuteLightMode == MuteLight::On);
+        } else if (update.AllowAudioMute) {
+            g_firmware_mic_muted = (update.MicMute != 0);
+        }
+    }
 
     copy_if_allowed(
         update.AllowRightTriggerFFB,

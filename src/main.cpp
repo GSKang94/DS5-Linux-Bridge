@@ -328,6 +328,7 @@ int main() {
     watchdog_update();
 #endif
     cyw43_arch_poll();
+    bt_connection_watchdog_tick();
     bt_pump();
     tud_task();
     wake_task();

@@ -26,6 +26,12 @@
 #define MTU_CONTROL 672
 #define MTU_INTERRUPT 672
 
+// Connection-attempt watchdog: if a connection commits to a device (inquiry
+// found one / incoming request accepted) but doesn't reach USB-enumeration
+// within this window, tear down and retry. Catches the silent stalls caused by
+// USB 3.0 2.4 GHz RF interference on the CYW43 BT radio.
+#define CONNECT_WATCHDOG_TIMEOUT_US (10 * 1000 * 1000)
+
 using std::unordered_map;
 using std::vector;
 using std::queue;
@@ -42,6 +48,11 @@ static hci_con_handle_t acl_handle = HCI_CON_HANDLE_INVALID;
 static uint16_t hid_control_cid;
 static uint16_t hid_interrupt_cid;
 static bt_data_callback_t bt_data_callback = nullptr;
+
+// Connection-attempt watchdog timestamp. 0 == not armed; armed == a connection
+// attempt is in flight. Set when an attempt begins, cleared when controller is
+// identified (USB connects) or on any teardown.
+static absolute_time_t connect_attempt_started = 0;
 static bool check_dse = false;
 static int8_t bt_rssi = 0;
 unordered_map<uint8_t, vector<uint8_t> > feature_data;
@@ -78,6 +89,34 @@ bool bt_disconnect() {
     // 0x13 = remote user terminated connection
     hci_send_cmd(&hci_disconnect, acl_handle, 0x13);
     return true;
+}
+
+static void bt_restart_inquiry() {
+    device_found = false;
+    new_pair = false;
+    connect_attempt_started = 0;
+    gap_inquiry_stop();
+    gap_inquiry_start(30);
+    gap_connectable_control(1);
+    gap_discoverable_control(1);
+}
+
+void bt_connection_watchdog_tick() {
+    if (connect_attempt_started == 0) return; // not armed
+    if (absolute_time_diff_us(connect_attempt_started, get_absolute_time())
+            < CONNECT_WATCHDOG_TIMEOUT_US) {
+        return;
+    }
+    printf("[BT] Connection watchdog: attempt stalled, recovering\n");
+    connect_attempt_started = 0; // disarm; the next attempt re-arms
+
+    if (acl_handle != HCI_CON_HANDLE_INVALID) {
+        // ACL is up but setup stalled. Cleanly tear down connection.
+        bt_disconnect();
+    } else {
+        // No ACL yet — reset states and restart inquiry immediately.
+        bt_restart_inquiry();
+    }
 }
 
 void bt_get_signal_strength(int8_t *rssi) {
@@ -187,15 +226,14 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             if (device_found) {
                 printf("[HCI] Connecting to %s...\n", bd_addr_to_str(current_device_addr));
                 new_pair = true;
+                connect_attempt_started = get_absolute_time(); // arm connection watchdog
                 hci_send_cmd(&hci_create_connection, current_device_addr,
                              hci_usable_acl_packet_types(), 0, 0, 0, 1);
                 break;
             }
             if (event_type == HCI_EVENT_INQUIRY_COMPLETE) {
                 printf("[HCI] Restart inquiry\n");
-                gap_inquiry_start(30);
-                gap_connectable_control(1);
-                gap_discoverable_control(1);
+                bt_restart_inquiry();
             }
             break;
         }
@@ -204,10 +242,8 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             const uint16_t opcode = hci_event_command_status_get_command_opcode(packet);
             printf("[HCI] CmdStatus %s(0x%04X) status=0x%02X\n", opcode_to_str(opcode), opcode, status);
             if (opcode == HCI_OPCODE_HCI_CREATE_CONNECTION && status != ERROR_CODE_SUCCESS) {
-                device_found = false;
-                new_pair = false;
                 printf("[HCI] Create connection rejected, restart inquiry\n");
-                // gap_inquiry_start(30);
+                bt_restart_inquiry();
             }
             break;
         }
@@ -237,10 +273,8 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
                 printf("[HCI] Request authentication on handle=0x%04X\n", handle);
                 hci_send_cmd(&hci_authentication_requested, handle);
             } else {
-                device_found = false;
-                new_pair = false;
                 printf("[HCI] ACL connect failed status=0x%02X, restart inquiry\n", status);
-                // gap_inquiry_start(30);
+                bt_restart_inquiry();
             }
             break;
         }
@@ -290,7 +324,8 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             if (status != ERROR_CODE_SUCCESS) {
                 printf("[HCI] Authentication failed, drop stored key for %s\n", bd_addr_to_str(current_device_addr));
                 gap_drop_link_key_for_bd_addr(current_device_addr);
-                // gap_inquiry_start(30);
+                connect_attempt_started = 0; // disarm
+                bt_disconnect();
             } else {
                 hci_send_cmd(&hci_set_connection_encryption, handle, 1);
             }
@@ -327,6 +362,7 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
                 bd_addr_copy(current_device_addr, addr);
                 gap_inquiry_stop();
                 hci_send_cmd(&hci_accept_connection_request, addr, 0x01);
+                connect_attempt_started = get_absolute_time(); // arm connection watchdog (incoming path)
             }
             break;
         }
@@ -352,6 +388,7 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             const uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
             device_found = false;
             new_pair = false;
+            connect_attempt_started = 0; // disarm
             acl_handle = HCI_CON_HANDLE_INVALID;
             bt_rssi = 0;
             hid_control_cid = 0;
@@ -410,6 +447,7 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
                     printf("Connected DSE Controller\n");
                     check_dse = false;
                     is_dse = true;
+                    connect_attempt_started = 0; // fully up — disarm watchdog
 #if !ENABLE_SERIAL
 #  ifdef ENABLE_WAKE_HID
                     usb_request_variant_full();
@@ -421,6 +459,7 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
                     printf("Connected DS5 Controller\n");
                     check_dse = false;
                     is_dse = false;
+                    connect_attempt_started = 0; // fully up — disarm watchdog
 #if !ENABLE_SERIAL
 #  ifdef ENABLE_WAKE_HID
                     usb_request_variant_full();

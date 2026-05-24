@@ -33,4 +33,7 @@ void set_feature_data(uint8_t reportId, uint8_t* data,uint16_t len);
 // the controller doesn't sit awake until its idle timer fires.
 void bt_dualsense_power_off();
 
+// Tick connection watchdog. Call from main loop.
+void bt_connection_watchdog_tick();
+
 #endif //DS5_BRIDGE_BT_H

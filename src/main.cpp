@@ -253,7 +253,8 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
 }
 
 int main() {
-    vreg_set_voltage(VREG_VOLTAGE_1_30);
+    // Set core voltage to 1.20V which is stable and safe for 320 MHz
+    vreg_set_voltage(VREG_VOLTAGE_1_20);
     sleep_ms(1000);
     set_sys_clock_khz(SYS_CLOCK_KHZ, true);
 

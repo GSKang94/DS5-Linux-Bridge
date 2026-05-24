@@ -4,10 +4,10 @@
 
 #include "audio.h"
 #include "bt.h"
-#include "resample.h"
 #include "tusb.h"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cstdio>
 #include "opus.h"
 #include "utils.h"
@@ -109,8 +109,8 @@ void audio_loop() {
     }
 #endif
 
-    // Fire one BT packet per 512 input frames, matching the audio_raw_element
-    // chunk size that core1 consumes per Opus encode cycle.
+    // Fire one BT packet per 512 input frames. This intentionally slows the BT packet
+    // rate to 93.75 Hz to prevent the CYW43439 from dropping packets and crashing audio.
     static int input_frames_acc = 0;
     input_frames_acc += frames;
     if (input_frames_acc < 512) return;
@@ -180,7 +180,6 @@ void audio_init() {
 
 static OpusEncoder *encoder;
 static OpusDecoder *decoder; // mic decoder
-static WDL_Resampler resampler_audio;
 
 void mic_proc() {
     static mic_element mic_packet{};
@@ -207,6 +206,21 @@ void mic_proc() {
 // speaker_proc was awalol's helper using opus_fifo/opus_element; we keep
 // our existing opus_buf + opus_cs pipeline inline in core1_entry instead.
 
+// Fast Linear Interpolator to convert 512 frames (10.66ms) down to 480 frames (10.0ms)
+// Uses <1% of the CPU compared to WDL_Resampler
+static void fast_resample_512_to_480(const float* in, float* out) {
+    const float ratio = 512.0f / 480.0f;
+    for (int i = 0; i < 480; i++) {
+        float src_pos = i * ratio;
+        int idx = static_cast<int>(src_pos);
+        float frac = src_pos - idx;
+        int idx_next = (idx < 511) ? idx + 1 : 511;
+
+        out[i * 2 + 0] = in[idx * 2 + 0] * (1.0f - frac) + in[idx_next * 2 + 0] * frac;
+        out[i * 2 + 1] = in[idx * 2 + 1] * (1.0f - frac) + in[idx_next * 2 + 1] * frac;
+    }
+}
+
 void core1_entry() {
     int error = 0;
     encoder = opus_encoder_create(48000, 2,OPUS_APPLICATION_AUDIO, &error);
@@ -218,31 +232,17 @@ void core1_entry() {
     opus_encoder_ctl(encoder,OPUS_SET_BITRATE(200 * 8 * 100));
     opus_encoder_ctl(encoder,OPUS_SET_VBR(false));
     opus_encoder_ctl(encoder,OPUS_SET_COMPLEXITY(0)); // max 4
-    resampler_audio.SetMode(true, 0, false);
-    resampler_audio.SetRates(51200, 48000);
-    resampler_audio.SetFeedMode(true);
-    resampler_audio.Prealloc(2, 512, 480);
     decoder = opus_decoder_create(48000, MIC_CHANNELS, &error);
     if (error != 0) {
         printf("[Audio] OpusDecoder create failed\n");
     }
 
     while (true) {
-        // Speaker (host -> DS5) encode path. Was queue_remove_blocking on
-        // audio_fifo; switched to try_remove so the loop also services
-        // mic_proc when no speaker data is queued. Without this, mic decode
-        // would starve whenever the host wasn't actively pushing audio.
+        // Speaker (host -> DS5) encode path. Use try_remove so mic_proc isn't starved.
         static audio_raw_element audio_element{};
         if (queue_try_remove(&audio_fifo, &audio_element)) {
-            WDL_ResampleSample *in_buf;
-            int nframes = resampler_audio.ResamplePrepare(512, 2, &in_buf);
-            // audio_element.data is float[1024], in_buf is WDL_ResampleSample
-            // (= float, set by WDL_RESAMPLE_TYPE=float). memcpy expresses the
-            // intent better than the per-element loop and compiles to the
-            // same or better codegen.
-            memcpy(in_buf, audio_element.data, nframes * 2 * sizeof(float));
-            static WDL_ResampleSample out_buf[480 * 2];
-            resampler_audio.ResampleOut(out_buf, nframes, 480, 2);
+            static float out_buf[480 * 2];
+            fast_resample_512_to_480(audio_element.data, out_buf);
 
             static uint8_t out[200];
             (void) opus_encode_float(encoder, out_buf, 480, out, 200);
@@ -251,6 +251,8 @@ void core1_entry() {
             critical_section_exit(&opus_cs);
         }
         mic_proc();
+        // Yield the memory bus so Core 0 doesn't starve during cyw43 polling
+        sleep_us(100);
     }
 }
 

@@ -1,127 +1,86 @@
-# Pico2W DualSense 5 Bridge
+# DualSense USB-to-Bluetooth Adapter (Pico2W)
 
-[中文](./README.CN.md)
+An advanced wireless adapter firmware for the Raspberry Pi Pico 2 W that turns it into a latency-optimized Bluetooth bridge for the Sony DualSense (DS5) controller, duplicating the wired controller experience (including speaker, mic, and native HD haptic feedback) over Bluetooth.
 
-> Turn a Raspberry Pi Pico2W into a wireless adapter for the DualSense (DS5) controller.
+This project is a heavily optimized fork based on [DS5Dongle by awalol](https://github.com/awalolcn/DS5Dongle), licensed under the MIT License.
 
-## Overview
+## Core Features
 
-This project enables the Raspberry Pi Pico2W to function as a Bluetooth bridge for the DualSense controller, allowing wireless connectivity with enhanced haptics support.
+- 🎮 **Full Wireless Controller Emulation:** Converts DualSense Bluetooth reports into standard USB HID gamepad inputs. Supports both standard DualSense (DS5) and DualSense Edge (DSE) profiling.
+- 🔊 **Wireless Audio Stream (Opus):** Supports high-quality speaker and headphone audio playback directly through the controller's audio jack and speaker.
+- 🎙️ **Wireless Microphone Upload:** Decodes and streams the controller's microphone audio back to the host system via standard USB Audio Class interfaces.
+- 📳 **Native HD Haptics Restoration:** Captures the 48kHz audio waveforms played by PC games to USB channels 3 & 4 (e.g., *Hogwarts Legacy*, *Returnal*, *Spider-Man*, *Deathloop*) and downsamples them using a lightweight 16:1 boxcar decimation filter to wirelessly drive the controller's voice-coil actuators. Includes a 33.3% gain boost to match wired rumble intensity.
+- 🔇 **Hybrid Hardware Microphone Mute:** 
+  - A driverless local hardware mute toggle using the controller's physical Mute button.
+  - Automatically synchronizes with the host OS sound control panel's mute state.
+  - Dynamically yields control to active host-level drivers (like Linux's `hid-playstation`) to avoid state conflicts.
+- 🔌 **Dynamic USB Descriptors (Wake-on-PS / S3 Sleep):**
+  - Swaps USB configurations dynamically to hide audio/gamepad interfaces when the controller is disconnected, preventing "ghost" devices in the OS.
+  - Automatically registers a boot keyboard interface during host standby, enabling the controller's PS button to wake the host PC from S3 sleep (sends F15 keystroke).
+- 📡 **USB 3.0 RF Noise Watchdog:** Auto-retries Bluetooth connections when stalled due to 2.4GHz RF interference from USB 3.0 ports instead of hanging on an amber lightbar.
+- ⚡ **Low-Latency & Performance Optimizations:**
+  - CPU overclocked to 360 MHz @ 1.30V.
+  - Core 0 main loop throttled to 8kHz (125us sleep) to align with Bluetooth polling intervals and minimize bus contention.
+  - High-performance memory copies and direct-to-queue Opus audio encoding/decoding pipeline.
+- 🚨 **Visual Notifications:**
+  - Power-On Self Test (POST) LED pattern indicating successful boot.
+  - Low-battery alert (1Hz onboard LED blink when controller battery drops to <= 10%).
 
-## Features
-
-- 🎮 Full DualSense connectivity via Pico2W
-- 🔊 Supports HD haptics (advanced vibration feedback)
-- 📡 Wireless Bluetooth bridging
+---
 
 ## Getting Started
 
-### Flashing Firmware
-
-1. Hold the BOOTSEL button on the Pico2W
-2. Connect the Pico2W to your computer via USB
-3. The device will mount as a USB storage device
-4. Drag and drop the .uf2 firmware file onto the device
+### Installation / Flashing
+1. Hold the **BOOTSEL** button on your Raspberry Pi Pico 2 W.
+2. Connect it to your PC via a USB cable.
+3. Drag and drop the compiled `.uf2` firmware file onto the mounted `RP2350` USB storage volume.
 
 ### Pairing the Controller
+1. Place your DualSense controller into Bluetooth pairing mode (hold the Share + PS buttons until the lightbar double-blinks).
+2. The Pico 2 W will detect, pair, and connect to the controller. The onboard LED will turn solid to indicate a successful connection.
+3. Once paired, the adapter will dynamically enumerate the controller interfaces to the host PC.
 
-1. Put the DualSense controller into Bluetooth pairing mode
-2. Wait for the Pico2W to detect and connect
-3. Once connected, the device will appear on the host system
-
-***You may need to replug the Pico when the controller is in pairing mode.***
+---
 
 ## Configuration
 
-You can modify the Pico settings via the web config.
+You can customize the adapter's options (such as inactive timeout, LED preferences, and buffer sizing) using the web configuration tool:
+- **Official Release:** [ds5.awalol.eu.org](https://ds5.awalol.eu.org)
+- **Development Version:** [ds5-dev.awalol.eu.org](https://ds5-dev.awalol.eu.org)
 
-- For release: https://ds5.awalol.eu.org
-- For development: https://ds5-dev.awalol.eu.org
+---
 
-## Notes
+## Operating System & Driver Behavior
 
-The Pico device will only be visible to the system after the controller is connected
+### Windows 10/11
+*   **Audio & Mute Sync:** Runs driverless. Muting the mic in the Windows Sound control panel syncs to the controller's physical orange LED.
+*   **OS Sync Caveat:** Since the adapter is driverless and doesn't run a custom client or support a UAC status interrupt endpoint, pressing the physical mute button on the controller cannot force the Windows OS-level sound panel mixer to toggle. The controller mutes the stream locally in the firmware and turns on its LED. To resolve any visual desyncs, ensure the Windows Sound panel mixer is unmuted when using the physical controller button.
 
-Some behaviors depend on reconnection cycles to take effect
+### Linux / SteamOS (Bazzite)
+*   **Native Driver Integration:** Fully compatible with the official kernel `hid-playstation` driver. When the Linux driver is active, the firmware automatically yields LED and button control to the OS driver to avoid conflicts.
+*   **Jack Detection:** Verbatim `HP_DETECT` and `MIC_DETECT` events are forwarded to the host, supporting automatic profile switching in `alsa-ucm-conf`, PulseAudio, and PipeWire.
 
-### Low-battery LED indicator
-
-When the connected DualSense reports its battery at or below 10% (and it is not charging), the Pico onboard LED switches from solid-on to a 1 Hz blink so you can see the warning at a glance. The LED returns to solid-on as soon as the controller is plugged in or its reported level rises again. The blink also fires when `disable_pico_led` is set — the warning is treated as critical and overrides the LED-off preference; the LED returns to its disabled (off) state once the battery recovers or the controller starts charging.
-
-To opt out at build time, configure with `-DENABLE_BATT_LED=OFF`. Default is ON.
-
-### Microphone Hardware Mute & OS Sync Quirks
-
-This firmware implements a driverless hardware microphone mute toggle utilizing the controller's physical Mute button.
-- **Windows Behavior:** 
-  - Pressing the controller's Mute button toggles local hardware-level muting (silences the microphone stream in the firmware and turns the orange LED on/off). 
-  - Muting/unmuting the microphone in the Windows Sound control panel will automatically synchronize and toggle the controller's physical orange LED.
-  - **OS Sync Caveat:** Because the adapter is driverless and doesn't notify the OS via a UAC status interrupt endpoint, pressing the physical button on the controller cannot force the Windows OS-level sound panel mixer to toggle. If the OS has the microphone muted, pressing the controller button to turn off the LED will unmute the hardware stream, but Windows will still discard the audio in software. To resolve this desync, ensure the OS mixer is unmuted when using the physical button.
-- **Linux Behavior:**
-  - Works natively with the kernel's `hid-playstation` driver. The driver intercepts the button presses and manages the LED state. The local UAC sync is bypassed automatically when a host driver is active, preventing any state conflicts.
-
-### Pico W Version
-
-Pico W only has haptics support, no speaker. You can enable Pico W firmware compilation with `-DPICO_W_BUILD=ON`, or download precompiled firmware from GitHub Actions.
-
-### USB Wake Feature
-
-This feature is experimental. If you need this functionality, please check out the feat/usb-wake branch to compile it, or use the precompiled firmware from GitHub Actions under that branch. The `ds5-bridge-wake.uf2` is the firmware with this feature enabled.
-
-It is recommended to read #60 and #61 before using this feature.
-
-### Community Fork
-https://github.com/MarcelineVPQ/DS5Dongle-OLED-Edition
-https://github.com/zurce/DS5Dongle-OLED
-
-## Known Issues
-
-- ⚠️ Audio may experience slight stuttering
-- ⚠️ Overclocking is required for proper performance
-
-## Performance / Overclocking
-
-Due to encoding requirements, the Pico2W must be overclocked:
-
-Current settings:
-
-- Voltage: 1.2V
-- Frequency: 320 MHz
-
-If your device fails to boot:
-
-- Increase voltage slightly or Reduce CPU frequency
+---
 
 ## Build Instructions
 
-To build the project from source:
+To compile the project from source:
+1. Ensure the Pico SDK is configured and its `tinyusb` library is updated to the latest release.
+2. Compile using the standard Pico CMake configuration:
+   ```bash
+   mkdir build
+   cd build
+   cmake -DCMAKE_BUILD_TYPE=Release ..
+   make
+   ```
+3. To disable the low-battery warning LED blink at build time, configure with `-DENABLE_BATT_LED=OFF`.
 
-1. ***Update TinyUSB in the Pico SDK to the latest version***
-2. Compile using standard Pico SDK toolchain
+---
 
-## Wake-on-PS (optional)
+## License & Acknowledgement
 
-A `-DENABLE_WAKE_HID=ON` build adds a second HID interface (a boot keyboard) that injects an **F15** keypress when any controller button is pressed while the host is suspended, waking the PC from **S3 sleep**. F15 was chosen because it has no default Windows or app binding — a stray fire never inserts characters or triggers shortcuts.
+This project is licensed under the **MIT License**.
 
-Scope: **S3 only.** Modern Standby (S0ix) is not supported. To check your machine, run `powercfg /a` — you need "Standby (S3)" listed under available sleep states.
+This firmware is a fork and continuation of the original [DS5Dongle](https://github.com/awalolcn/DS5Dongle) project created by **awalol**. We acknowledge and credit the original work under the terms of the MIT license.
 
-After flashing the wake build:
-
-1. Open Device Manager → the new **HID Keyboard Device** (and its parent **USB Composite Device**) → Properties → Power Management → tick **"Allow this device to wake the computer."**
-2. Verify with `powercfg /devicequery wake_armed`.
-3. Sleep the PC; press any button on the controller; the PC should wake within ~1 s.
-4. After a wake, `powercfg /lastwake` should attribute the wake to the HID Keyboard Device.
-
-## Roadmap
-- Please check out [DS5Dongle plan](https://github.com/users/awalol/projects/5)
-
-## Community
-- Join the Discord server: [Discord Server](https://discord.gg/hM4ntchGCa)
-- If you have a bug, please open an issue instead.
-
-## References
-
-- [rafaelvaloto/Pico_W-Dualsense](https://github.com/rafaelvaloto/Pico_W-Dualsense) — Project inspiration
-- [egormanga/SAxense](https://github.com/egormanga/SAxense) — Bluetooth Haptics POC
-- [https://controllers.fandom.com/wiki/Sony_DualSense](https://controllers.fandom.com/wiki/Sony_DualSense) - DualSense data report structure documentation
-- [Paliverse/DualSenseX](https://github.com/Paliverse/DualSenseX) — Speaker report packet
+For a full copy of the license, see the [LICENSE](file:///c:/Users/mkung/Documents/GitHub/DS5Dongle/LICENSE) file.

@@ -138,8 +138,8 @@ void audio_loop() {
                 sum_l += haptic_staging[(k * 16 + j) * 2 + 0];
                 sum_r += haptic_staging[(k * 16 + j) * 2 + 1];
             }
-            int32_t val_l = sum_l / 4096;
-            int32_t val_r = sum_r / 4096;
+            int32_t val_l = sum_l / 3072;
+            int32_t val_r = sum_r / 3072;
             if (val_l < -128) val_l = -128;
             else if (val_l > 127) val_l = 127;
             if (val_r < -128) val_r = -128;

@@ -117,13 +117,41 @@ void audio_loop() {
     }
 #endif
 
-    // Fire one BT packet per 512 input frames. This intentionally slows the BT packet
-    // rate to 93.75 Hz to prevent the CYW43439 from dropping packets and crashing audio.
+    // Accumulate haptic samples (channels 3 & 4) into a staging buffer
+    static int16_t haptic_staging[(512 + 64) * 2] = {};
     static int input_frames_acc = 0;
+    for (int i = 0; i < frames; i++) {
+        haptic_staging[(input_frames_acc + i) * 2 + 0] = raw[i * INPUT_CHANNELS + 2];
+        haptic_staging[(input_frames_acc + i) * 2 + 1] = raw[i * INPUT_CHANNELS + 3];
+    }
+
     input_frames_acc += frames;
     if (input_frames_acc < 512) return;
     input_frames_acc -= 512;
     {
+        // 16:1 Decimation filter: average 16 samples of 48kHz to produce 1 sample of 3kHz
+        static int8_t haptic_buf[SAMPLE_SIZE];
+        for (int k = 0; k < 32; k++) {
+            int32_t sum_l = 0;
+            int32_t sum_r = 0;
+            for (int j = 0; j < 16; j++) {
+                sum_l += haptic_staging[(k * 16 + j) * 2 + 0];
+                sum_r += haptic_staging[(k * 16 + j) * 2 + 1];
+            }
+            int32_t val_l = sum_l / 4096;
+            int32_t val_r = sum_r / 4096;
+            if (val_l < -128) val_l = -128;
+            else if (val_l > 127) val_l = 127;
+            if (val_r < -128) val_r = -128;
+            else if (val_r > 127) val_r = 127;
+            haptic_buf[k * 2 + 0] = static_cast<int8_t>(val_l);
+            haptic_buf[k * 2 + 1] = static_cast<int8_t>(val_r);
+        }
+
+        if (input_frames_acc > 0) {
+            memmove(haptic_staging, haptic_staging + 512 * 2, input_frames_acc * 2 * sizeof(int16_t));
+        }
+
         // pkt is static. Constant fields (type/length bytes) are written
         // once on first call; only per-packet-varying bytes are touched
         // in the hot path. Variable rare-change bytes (buf_len, headset
@@ -165,7 +193,7 @@ void audio_loop() {
         reportSeqCounter = (reportSeqCounter + 1) & 0x0F;
         pkt[10] = packetCounter++;
         state_get(pkt + 13, 63);
-        // pkt[78..141] haptic sub-block stays zeroed (static init)
+        memcpy(pkt + 78, haptic_buf, SAMPLE_SIZE);
 #if !DISABLE_SPEAKER_PROC
         critical_section_enter_blocking(&opus_cs);
         memcpy(pkt + 144, opus_buf, 200);

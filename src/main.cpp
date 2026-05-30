@@ -27,6 +27,7 @@
 
 // Pico SDK speciifically for waiting on conditions
 #include "pico/critical_section.h"
+#include "pico/time.h"
 
 int reportSeqCounter = 0;
 uint8_t packetCounter = 0;
@@ -305,7 +306,7 @@ int main() {
     printf("Failed to initialize CYW43\n");
     return 1;
   }
-  
+
   // Power-On Self Test (POST) LED pattern: 3 rapid flashes to confirm
   // successful CPU overclocking and CYW43 Bluetooth module initialization.
   for (int i = 0; i < 6; i++) {
@@ -369,6 +370,6 @@ int main() {
     battery_led_tick();
 #endif
     // Yield the memory bus and throttle polling rate to prevent bus contention
-    sleep_us(125);
+    sleep_us(250);
   }
 }

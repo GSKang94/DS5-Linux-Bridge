@@ -70,7 +70,7 @@ if (PICO_W_BUILD)
         set(SYS_CLOCK_KHZ_VALUE 200000)
         set(DISABLE_SPEAKER_PROC_VALUE 1)
 else ()
-        set(CYW43_PIO_CLOCK_DIV_VALUE 4)
+        set(CYW43_PIO_CLOCK_DIV_VALUE 5)
         set(SYS_CLOCK_KHZ_VALUE 320000)
 endif ()
 
@@ -173,4 +173,6 @@ target_link_libraries(ds5-bridge
 )
 
 pico_add_extra_outputs(ds5-bridge)
+pico_set_linker_script(ds5-bridge ${CMAKE_CURRENT_SOURCE_DIR}/memmap_custom.ld)
+
 

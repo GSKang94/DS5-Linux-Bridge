@@ -112,6 +112,7 @@ void audio_loop() {
             if (!queue_try_add(&audio_fifo, &staging)) {
                 printf("[Audio] Warning: audio_fifo add failed\n");
             }
+            __sev(); // Notify Core 1
             audio_buf_pos = 0;
         }
     }
@@ -207,7 +208,7 @@ void audio_loop() {
 
 void audio_init() {
 #if !DISABLE_SPEAKER_PROC
-    queue_init(&audio_fifo, sizeof(audio_raw_element), 2);
+    queue_init(&audio_fifo, sizeof(audio_raw_element), 6);
     critical_section_init(&opus_cs);
     queue_init(&mic_fifo, sizeof(mic_element), 2);
     queue_init(&mic_decode_fifo, sizeof(mic_decode_element), 2);
@@ -278,9 +279,11 @@ void core1_entry() {
     }
 
     while (true) {
+        bool worked = false;
         // Speaker (host -> DS5) encode path. Use try_remove so mic_proc isn't starved.
         static audio_raw_element audio_element{};
         if (queue_try_remove(&audio_fifo, &audio_element)) {
+            worked = true;
             static float out_buf[480 * 2];
             fast_resample_512_to_480(audio_element.data, out_buf);
 
@@ -290,9 +293,14 @@ void core1_entry() {
             memcpy(opus_buf, out, 200);
             critical_section_exit(&opus_cs);
         }
-        mic_proc();
-        // Yield the memory bus so Core 0 doesn't starve during cyw43 polling
-        sleep_us(100);
+        if (!queue_is_empty(&mic_fifo)) {
+            mic_proc();
+            worked = true;
+        }
+        if (!worked) {
+            // Clear event register and sleep until the next __sev() event
+            __wfe();
+        }
     }
 }
 
@@ -309,4 +317,5 @@ void mic_add_queue(uint8_t *data) {
         queue_try_remove(&mic_fifo,NULL);
     }
     queue_try_add(&mic_fifo,&mic_packet);
+    __sev(); // Notify Core 1
 }

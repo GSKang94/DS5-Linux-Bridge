@@ -67,11 +67,6 @@ static bool audio10_set_req_entity(tusb_control_request_t const *p_request, uint
                         TU_VERIFY(p_request->wLength == 2);
 
                         volume[index] = static_cast<float>(*reinterpret_cast<int16_t const *>(pBuff)) / 256;
-                        if (entityID == UAC1_ENTITY_SPK_FEATURE_UNIT) {
-                            auto config = get_config();
-                            config.speaker_volume = volume[index];
-                            set_config(config);
-                        }
 
                         TU_LOG2("    Set Volume: %d dB of entity: %u\r\n", volume[index], entityID);
                         return true;
@@ -109,9 +104,6 @@ static bool audio10_get_req_entity(uint8_t rhport, tusb_control_request_t const 
                 switch (p_request->bRequest) {
                     case AUDIO10_CS_REQ_GET_CUR:
                         TU_LOG2("    Get Volume of entity: %u\r\n", entityID); {
-                            if (entityID == UAC1_ENTITY_SPK_FEATURE_UNIT) {
-                                volume[index] = get_config().speaker_volume;
-                            }
                             int16_t vol = volume[index] * 256; // convert to 1/256 dB units
                             return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &vol, sizeof(vol));
                         }

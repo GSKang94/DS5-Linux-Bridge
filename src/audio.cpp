@@ -90,12 +90,12 @@ void audio_loop() {
     static audio_raw_element staging{};
     static uint audio_buf_pos = 0;
 
-    const auto &cfg = get_config();
+    extern float volume[2];
     static float cached_audio_gain = 0.0f;
     static float cached_speaker_volume = 1.0f; // impossible value -> force first compute
     static bool cached_mute = true;
-    if (cfg.speaker_volume != cached_speaker_volume || mute[0] != cached_mute) {
-        cached_speaker_volume = cfg.speaker_volume;
+    if (volume[0] != cached_speaker_volume || mute[0] != cached_mute) {
+        cached_speaker_volume = volume[0];
         cached_mute = mute[0];
         cached_audio_gain = cached_mute ? 0.0f : powf(10.0f, cached_speaker_volume / 20.0f);
     }
@@ -175,6 +175,7 @@ void audio_loop() {
         }
         // buf_len: refresh only when config value changes (writes to pkt[5..9]).
         static uint8_t cached_buf_len = 0xFF;
+        const auto &cfg = get_config();
         const auto buf_len = cfg.audio_buffer_length;
         if (buf_len != cached_buf_len) {
             pkt[5] = pkt[6] = pkt[7] = pkt[8] = pkt[9] = buf_len;

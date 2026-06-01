@@ -52,6 +52,12 @@ else()
     set(ENABLE_VERBOSE_VALUE 0)
 endif ()
 add_compile_definitions(ENABLE_VERBOSE=${ENABLE_VERBOSE_VALUE})
+option(ENABLE_DIAG "Enable HID diagnostic counters and timing probes" OFF)
+if(ENABLE_DIAG)
+    set(ENABLE_DIAG_VALUE 1)
+else()
+    set(ENABLE_DIAG_VALUE 0)
+endif()
 option(ENABLE_BATT_LED "Blink Pico LED when DualSense battery is low (<=10%)" ON)
 if (ENABLE_BATT_LED)
         set(ENABLE_BATT_LED_VALUE 1)
@@ -116,6 +122,7 @@ target_compile_definitions(ds5-bridge PRIVATE
         PICO_STDIO_USB_ENABLE_RESET_VIA_BAUD_RATE=0
         PICO_STDIO_USB_ENABLE_RESET_VIA_VENDOR_INTERFACE=0
         ENABLE_VERBOSE=${ENABLE_VERBOSE_VALUE}
+        ENABLE_DIAG=${ENABLE_DIAG_VALUE}
         ENABLE_BATT_LED=${ENABLE_BATT_LED_VALUE}
         SYS_CLOCK_KHZ=${SYS_CLOCK_KHZ_VALUE}
         DISABLE_SPEAKER_PROC=${DISABLE_SPEAKER_PROC_VALUE}

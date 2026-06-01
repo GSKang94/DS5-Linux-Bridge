@@ -12,6 +12,9 @@
 #include "opus.h"
 #include "utils.h"
 #include "pico/multicore.h"
+#if ENABLE_DIAG
+#include "pico/time.h"
+#endif
 #include "pico/util/queue.h"
 #include "config.h"
 #include "state_mgr.h"
@@ -36,9 +39,31 @@ static bool plug_headset = false;
 alignas(8) static uint32_t audio_core1_stack[8192];
 queue_t audio_fifo;
 static uint8_t opus_buf[200];
+#if ENABLE_DIAG
+static volatile uint32_t opus_generation = 0;
+#endif
 critical_section_t opus_cs;
 queue_t mic_fifo;        // BT-encoded mic frames pending Opus decode (core0 -> core1)
 queue_t mic_decode_fifo; // PCM mic frames pending USB write (core1 -> core0)
+#if ENABLE_DIAG
+static volatile uint32_t audio_fifo_drop_count = 0;
+static volatile uint32_t mic_fifo_drop_count = 0;
+static volatile uint32_t mic_decode_fifo_drop_count = 0;
+static volatile uint32_t mic_usb_partial_write_count = 0;
+static volatile uint32_t speaker_opus_reuse_count = 0;
+static volatile uint32_t audio_report_gap_max_us = 0;
+static volatile uint32_t opus_encode_max_us = 0;
+
+static inline void bump_counter(volatile uint32_t &counter) {
+    counter = counter + 1;
+}
+
+static inline void update_max(volatile uint32_t &current_max, uint32_t value) {
+    if (value > current_max) {
+        current_max = value;
+    }
+}
+#endif
 
 struct audio_raw_element {
     float data[512 * 2];
@@ -77,6 +102,11 @@ void audio_loop() {
         const auto *data = reinterpret_cast<const uint8_t *>(mic_element.data);
         const uint16_t remaining = mic_write_len - mic_write_pos;
         const uint16_t written = tud_audio_write(data + mic_write_pos, remaining);
+#if ENABLE_DIAG
+        if (written != remaining) {
+            bump_counter(mic_usb_partial_write_count);
+        }
+#endif
         mic_write_pos += written;
     }
 
@@ -116,6 +146,9 @@ void audio_loop() {
         if (audio_buf_pos == 512 * 2) {
             if (queue_is_full(&audio_fifo)) {
                 queue_try_remove(&audio_fifo, NULL);
+#if ENABLE_DIAG
+                bump_counter(audio_fifo_drop_count);
+#endif
             }
             if (!queue_try_add(&audio_fifo, &staging)) {
                 printf("[Audio] Warning: audio_fifo add failed\n");
@@ -199,15 +232,38 @@ void audio_loop() {
         }
 #endif
         // Per-packet variable fields.
+#if ENABLE_DIAG
+        static uint64_t last_audio_report_us = 0;
+        const uint64_t audio_report_us = time_us_64();
+        if (last_audio_report_us != 0) {
+            update_max(audio_report_gap_max_us,
+                       static_cast<uint32_t>(audio_report_us - last_audio_report_us));
+        }
+        last_audio_report_us = audio_report_us;
+#endif
+
         pkt[1] = reportSeqCounter << 4;
         reportSeqCounter = (reportSeqCounter + 1) & 0x0F;
         pkt[10] = packetCounter++;
         state_get(pkt + 13, 63);
         memcpy(pkt + 78, haptic_buf, SAMPLE_SIZE);
 #if !DISABLE_SPEAKER_PROC
+#if ENABLE_DIAG
+        static uint32_t last_report_opus_generation = UINT32_MAX;
+        uint32_t copied_opus_generation = 0;
+#endif
         critical_section_enter_blocking(&opus_cs);
         memcpy(pkt + 144, opus_buf, 200);
+#if ENABLE_DIAG
+        copied_opus_generation = opus_generation;
+#endif
         critical_section_exit(&opus_cs);
+#if ENABLE_DIAG
+        if (copied_opus_generation == last_report_opus_generation) {
+            bump_counter(speaker_opus_reuse_count);
+        }
+        last_report_opus_generation = copied_opus_generation;
+#endif
 #endif
 
         bt_write(pkt, sizeof(pkt), /*kick=*/false);
@@ -248,6 +304,9 @@ void mic_proc() {
     }
     if (queue_is_full(&mic_decode_fifo)) {
         queue_try_remove(&mic_decode_fifo,NULL);
+#if ENABLE_DIAG
+        bump_counter(mic_decode_fifo_drop_count);
+#endif
     }
     queue_try_add(&mic_decode_fifo,&decode_element);
 }
@@ -296,9 +355,19 @@ void core1_entry() {
             fast_resample_512_to_480(audio_element.data, out_buf);
 
             static uint8_t out[200];
+#if ENABLE_DIAG
+            const uint64_t encode_start_us = time_us_64();
+#endif
             (void) opus_encode_float(encoder, out_buf, 480, out, 200);
+#if ENABLE_DIAG
+            update_max(opus_encode_max_us,
+                       static_cast<uint32_t>(time_us_64() - encode_start_us));
+#endif
             critical_section_enter_blocking(&opus_cs);
             memcpy(opus_buf, out, 200);
+#if ENABLE_DIAG
+            opus_generation = opus_generation + 1;
+#endif
             critical_section_exit(&opus_cs);
         }
         if (!queue_is_empty(&mic_fifo)) {
@@ -323,7 +392,33 @@ void mic_add_queue(uint8_t *data) {
     memcpy(mic_packet.data,data,MIC_OPUS_SIZE);
     if (queue_is_full(&mic_fifo)) {
         queue_try_remove(&mic_fifo,NULL);
+#if ENABLE_DIAG
+        bump_counter(mic_fifo_drop_count);
+#endif
     }
     queue_try_add(&mic_fifo,&mic_packet);
     __sev(); // Notify Core 1
 }
+
+#if ENABLE_DIAG
+void audio_get_diag(AudioDiag *out) {
+    if (out == nullptr) return;
+    out->audio_fifo_drops = audio_fifo_drop_count;
+    out->mic_fifo_drops = mic_fifo_drop_count;
+    out->mic_decode_fifo_drops = mic_decode_fifo_drop_count;
+    out->mic_usb_partial_writes = mic_usb_partial_write_count;
+    out->speaker_opus_reuses = speaker_opus_reuse_count;
+    out->audio_report_gap_max_us = audio_report_gap_max_us;
+    out->opus_encode_max_us = opus_encode_max_us;
+}
+
+void audio_reset_diag() {
+    audio_fifo_drop_count = 0;
+    mic_fifo_drop_count = 0;
+    mic_decode_fifo_drop_count = 0;
+    mic_usb_partial_write_count = 0;
+    speaker_opus_reuse_count = 0;
+    audio_report_gap_max_us = 0;
+    opus_encode_max_us = 0;
+}
+#endif

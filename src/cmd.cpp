@@ -8,6 +8,9 @@
 #include <cstdio>
 #include <cstring>
 
+#if ENABLE_DIAG
+#include "audio.h"
+#endif
 #include "bt.h"
 #include "config.h"
 #include "device/usbd.h"
@@ -53,6 +56,23 @@ uint16_t pico_cmd_get(uint8_t report_id, uint8_t *buffer, uint16_t reqlen) {
 #endif
         return 1;
     }
+#if ENABLE_DIAG
+    if (report_id == 0xf6) {
+        struct DiagReport {
+            AudioDiag audio;
+            BtDiag bt;
+            TimingDiag timing;
+            int8_t rssi;
+        } report{};
+        audio_get_diag(&report.audio);
+        bt_get_diag(&report.bt);
+        timing_get_diag(&report.timing);
+        bt_get_signal_strength(&report.rssi);
+        const auto len = std::min(sizeof(report), static_cast<size_t>(reqlen));
+        memcpy(buffer, &report, len);
+        return len;
+    }
+#endif
     return 0;
 }
 
@@ -78,5 +98,12 @@ void pico_cmd_set(uint8_t report_id, uint8_t const *buffer, uint16_t bufsize) {
         tud_disconnect();
         sleep_ms(150);
         tud_connect();
+    }
+    if (buffer[0] == 0x04) {
+#if ENABLE_DIAG
+        audio_reset_diag();
+        bt_reset_diag();
+        timing_reset_diag();
+#endif
     }
 }

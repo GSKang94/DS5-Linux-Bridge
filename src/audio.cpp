@@ -358,7 +358,13 @@ void core1_entry() {
 #if ENABLE_DIAG
             const uint64_t encode_start_us = time_us_64();
 #endif
-            (void) opus_encode_float(encoder, out_buf, 480, out, 200);
+            const opus_int32 encoded = opus_encode_float(encoder, out_buf, 480, out, sizeof(out));
+            if (encoded < 0) {
+                continue;
+            }
+            if (static_cast<size_t>(encoded) < sizeof(out)) {
+                memset(out + encoded, 0, sizeof(out) - static_cast<size_t>(encoded));
+            }
 #if ENABLE_DIAG
             update_max(opus_encode_max_us,
                        static_cast<uint32_t>(time_us_64() - encode_start_us));

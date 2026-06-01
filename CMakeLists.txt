@@ -180,6 +180,4 @@ target_link_libraries(ds5-bridge
 )
 
 pico_add_extra_outputs(ds5-bridge)
-pico_set_linker_script(ds5-bridge ${CMAKE_CURRENT_SOURCE_DIR}/memmap_custom.ld)
-
 

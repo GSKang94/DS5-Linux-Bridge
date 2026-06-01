@@ -1,4 +1,5 @@
 build
+build-diag
 .vscode
 .idea
 example

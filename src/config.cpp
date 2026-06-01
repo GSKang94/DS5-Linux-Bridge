@@ -13,7 +13,7 @@
 #include "utils.h"
 
 constexpr uint32_t CONFIG_MAGIC = 0x66ccff00;
-constexpr uint16_t CONFIG_VERSION = 1;
+constexpr uint16_t CONFIG_VERSION = 2;
 constexpr uint32_t CONFIG_FLASH_OFFSET =
     PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE;
 static Config config{};
@@ -67,7 +67,7 @@ void config_valid() {
     printf("[Config] disable_pico_led is invalid\n");
   }
   if (body->polling_rate_mode > 2) {
-    body->polling_rate_mode = 1;
+    body->polling_rate_mode = 2;
     printf("[Config] polling_rate_mode is invalid\n");
   }
   if (body->audio_buffer_length < 16 || body->audio_buffer_length > 128) {

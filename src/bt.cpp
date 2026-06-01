@@ -58,9 +58,11 @@ static int8_t bt_rssi = 0;
 unordered_map<uint8_t, vector<uint8_t> > feature_data;
 queue_t send_fifo;
 
+constexpr size_t BT_SEND_MAX_PACKET_SIZE = 400; // 0xA2 header + 398-byte audio report + slack
+
 struct send_element {
-    uint8_t data[512];
-    size_t len;
+    uint8_t data[BT_SEND_MAX_PACKET_SIZE];
+    uint16_t len;
 };
 
 absolute_time_t inactive_time = 0; // 手柄长时间静默
@@ -575,15 +577,29 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
 
         case L2CAP_EVENT_CAN_SEND_NOW: {
             // printf("[L2CAP] L2CAP_EVENT_CAN_SEND_NOW\n");
+            const uint16_t local_cid = l2cap_event_can_send_now_get_local_cid(packet);
+            if (local_cid != hid_interrupt_cid) {
+                break;
+            }
 
-            send_element send_packet{};
-            if (queue_try_remove(&send_fifo, &send_packet)) {
+            static send_element retry_packet;
+            static bool retry_pending = false;
+            send_element send_packet;
+            if (retry_pending || queue_try_remove(&send_fifo, &send_packet)) {
+                if (retry_pending) {
+                    send_packet = retry_packet;
+                }
                 const uint8_t status = l2cap_send(hid_interrupt_cid, send_packet.data, send_packet.len);
                 if (status != 0) {
-                    printf("[L2CAP] L2CAP Send Error, Status: 0x%02X\n", status);
+                    retry_packet = send_packet;
+                    retry_pending = true;
+                    extern volatile bool send_chain_active;
+                    send_chain_active = false;
+                    break;
                 }
+                retry_pending = false;
             }
-            if (!queue_is_empty(&send_fifo)) {
+            if (retry_pending || !queue_is_empty(&send_fifo)) {
                 // Self-chain: still have data, keep chain active.
                 l2cap_request_can_send_now_event(hid_interrupt_cid);
             } else {
@@ -599,14 +615,20 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
 
 void bt_write(const uint8_t *data, const uint16_t len, bool kick) {
     if (hid_interrupt_cid == 0) return;
+    if (static_cast<size_t>(len) + 1 > BT_SEND_MAX_PACKET_SIZE) {
+        printf("[L2CAP bt_write] Error: packet too large: %u\n", len);
+        return;
+    }
     static send_element packet{};
-    memset(packet.data, 0, 512);
     packet.len = len + 1;
     packet.data[0] = 0xA2;
     memcpy(packet.data + 1, data, len);
     fill_output_report_checksum(packet.data + 1, len);
 
     if (!queue_try_add(&send_fifo, &packet)) {
+        if (!kick) {
+            return;
+        }
         printf("[L2CAP bt_write] Error: Failed to add packet to send FIFO\n");
         return;
     }
@@ -640,6 +662,10 @@ void bt_pump() {
     if (queue_is_empty(&send_fifo)) return;
     send_chain_active = true;
     l2cap_request_can_send_now_event(hid_interrupt_cid);
+}
+
+bool bt_send_pending() {
+    return !queue_is_empty(&send_fifo) || send_chain_active;
 }
 
 vector<uint8_t> get_feature_data(uint8_t reportId, uint16_t len) {

@@ -65,11 +65,19 @@ void audio_loop() {
     }
 
     static mic_decode_element mic_element{};
-    if (queue_try_remove(&mic_decode_fifo,&mic_element)) {
-        uint16_t written = tud_audio_write(mic_element.data, mic_element.len);
-        if (written != mic_element.len) {
-            printf("[Audio] Warning: USB mic FIFO wrote %u/%u bytes\n", written, mic_element.len);
+    static uint16_t mic_write_pos = 0;
+    static uint16_t mic_write_len = 0;
+    if (mic_write_pos == mic_write_len) {
+        if (queue_try_remove(&mic_decode_fifo, &mic_element)) {
+            mic_write_pos = 0;
+            mic_write_len = mic_element.len;
         }
+    }
+    if (mic_write_pos < mic_write_len) {
+        const auto *data = reinterpret_cast<const uint8_t *>(mic_element.data);
+        const uint16_t remaining = mic_write_len - mic_write_pos;
+        const uint16_t written = tud_audio_write(data + mic_write_pos, remaining);
+        mic_write_pos += written;
     }
 
     // 1. 读取 USB 音频数据

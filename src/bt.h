@@ -23,6 +23,7 @@ void bt_write(const uint8_t *data, uint16_t len, bool kick = true);
 // Kick the BT send chain if pending. Called from main loop after
 // cyw43_arch_poll() so the kick cost is paid outside audio_loop.
 void bt_pump();
+bool bt_send_pending();
 void bt_get_signal_strength(int8_t *rssi);
 std::vector<uint8_t> get_feature_data(uint8_t reportId,uint16_t len);
 void init_feature();

@@ -369,7 +369,11 @@ int main() {
 #if ENABLE_BATT_LED
     battery_led_tick();
 #endif
-    // Yield the memory bus and throttle polling rate to prevent bus contention
-    sleep_us(250);
+    // Yield only when the hot paths are idle; otherwise keep draining USB/BT.
+    if (!tud_audio_available() && !bt_send_pending()) {
+      sleep_us(250);
+    } else {
+      tight_loop_contents();
+    }
   }
 }

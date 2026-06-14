@@ -20,6 +20,7 @@
 #endif
 #include "cmd.h"
 #include "config.h"
+#include "dse.h"
 
 #if ENABLE_BATT_LED
 #include "battery_led.h"
@@ -218,6 +219,14 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id,
     return pico_cmd_get(report_id, buffer, reqlen);
   }
 
+  // DSE profiles: while the unlock + prefetch is still in progress, return 0
+  // (NAK) for profile reads so the PS app retries rather than caching an
+  // empty snapshot. Still kick off the background BT fetch.
+  if (dse_is_profile_report(report_id) && !dse_profiles_ready()) {
+    get_feature_data(report_id, reqlen);
+    return 0;
+  }
+
   std::vector<uint8_t> feature_data = get_feature_data(report_id, reqlen);
   if (!feature_data.empty()) {
     memcpy(buffer, feature_data.data() + 1, feature_data.size() - 1);
@@ -414,6 +423,8 @@ int main() {
     timing_update_max(interrupt_loop_max_us,
                       static_cast<uint32_t>(time_us_64() - section_start_us));
 #endif
+    // DSE Edge profile snapshot prefetch/unlock state machine.
+    dse_task();
 #if ENABLE_BATT_LED
     battery_led_tick();
 #endif

@@ -89,11 +89,20 @@ void state_update(const uint8_t *data, const uint8_t size) {
         byte = (byte & ~(1 << bit)) | (value << bit);
     };
 
+    // Some games (e.g. Ninja Gaiden 4) send non-zero rumble values without
+    // setting UseRumbleNotHaptics/EnableRumbleEmulation. Force rumble mode on
+    // in that case so the emulation values below aren't gated out and dropped.
+    // (Ported from upstream awalol/DS5Dongle 45b5a4f.)
+    if (update.RumbleEmulationLeft > 0 || update.RumbleEmulationRight > 0) {
+        update.UseRumbleNotHaptics = true;
+    }
     set_bit(state[0], 0, update.EnableRumbleEmulation);
     set_bit(state[0], 1, update.UseRumbleNotHaptics);
     set_bit(state[38], 2, update.EnableImprovedRumbleEmulation);
     copy_if_allowed(
-        update.UseRumbleNotHaptics || update.EnableRumbleEmulation,
+        update.UseRumbleNotHaptics ||
+            update.EnableRumbleEmulation ||
+            update.EnableImprovedRumbleEmulation,
         offsetof(SetStateData, RumbleEmulationRight),
         2
     );

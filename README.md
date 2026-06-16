@@ -22,11 +22,9 @@ about *direction*, not "things upstream gets wrong.")
 
 - 🎚️ **Boxcar / linear resampler instead of WDL.** The haptic decimation and the
   512→480 speaker resample use a lightweight boxcar + linear interpolator
-  rather than the WDL resampler — far cheaper on CPU and tuned for a punchier,
-  more "wired-DualSense-like" haptic feel.
+  rather than the WDL resampler — far cheaper on CPU and tuned to better match cabled intensity.
 - 🔈 **Volume fully yielded to the host.** Speaker/headset volume is owned by the
   host OS mixer and held in RAM only — no volume state is written to flash.
-- 🎛️ **Haptic intensity boost** to better match cabled intensity.
 - 🐧 **Linux-first integration & documentation.** Development and testing target
   Linux / SteamOS (Bazzite, CachyOS) first. This includes `hid-playstation`
   jack-detection wiring and documented, kernel-version-aware notes for getting
@@ -60,8 +58,7 @@ about *direction*, not "things upstream gets wrong.")
 - 🔌 **Wake from S3 Sleep and Dynamic USB Descriptors:**
   - Swaps USB configurations dynamically to hide audio/gamepad interfaces when
     the controller is disconnected, preventing "ghost" devices in the OS.
-  - Wake the host from S3 sleep by pressing any button after turning on the
-    controller.
+  - Wake the host(S3) by turning on the controller.
   - Wake from S5 is available on compatible motherboards (check that yours can
     be woken from S5 by a USB **keyboard**, not just a mouse).
   - Automatically powers off the DualSense after 10s of inactivity when the host
@@ -114,8 +111,7 @@ about *direction*, not "things upstream gets wrong.")
 > distros/kernels it lands on a mono profile (audio in one earphone only). This
 > is kernel- and UCM-version dependent rather than a firmware fault — stereo
 > generally needs a recent kernel (≥6.18) with the jack-detect mixer quirk.
-> Confirmed working on Ubuntu; confirmed mono on CachyOS. Note that
-> bleeding-edge / rolling distros (e.g. CachyOS, Arch) can also *regress* here:
+> Note that bleeding-edge / rolling distros (e.g. CachyOS, Arch) can also *regress* here:
 > a newer kernel or updated `alsa-ucm-conf` can change the routing behavior and
 > break a setup that previously worked. Investigation is ongoing.
 
@@ -158,12 +154,13 @@ required step.
 
 ## License & Acknowledgement
 
-This project is licensed under the **MIT License**.
+This project is licensed under the **GNU General Public License v3.0** — see
+[LICENSE](LICENSE).
 
 DS5-Linux-Bridge is a fork and continuation of the original
-[DS5Dongle](https://github.com/awalol/DS5Dongle) project created by **awalol**.
-The original work is credited under the terms of the MIT license, and this fork
-continues to track upstream improvements (such as the RAM-relocation
+[DS5Dongle](https://github.com/awalol/DS5Dongle) project created by **awalol**,
+which is MIT-licensed. Portions of this source originate from that MIT work;
+the original MIT notice is preserved in [LICENSE-MIT](LICENSE-MIT) as that
+license requires. The project as a whole is now distributed under GPLv3. This
+fork continues to track upstream improvements (such as the RAM-relocation
 infrastructure and DualSense Edge profile support).
-
-For the full license text, see the [LICENSE](LICENSE) file.

@@ -115,7 +115,7 @@ about *direction*, not "things upstream gets wrong.")
 > a newer kernel or updated `alsa-ucm-conf` can change the routing behavior and
 > break a setup that previously worked. Investigation is ongoing.
 
-### Windows 10/11
+### Windows 11
 - **Audio & Mute Sync:** Runs driverless. The physical Mute button operates at
   the hardware level, muting the mic stream in firmware and lighting the
   controller's orange LED. Muting/unmuting via the Windows Sound panel also
@@ -150,8 +150,6 @@ internet. It enumerates as a **USB network adapter** (CDC-NCM) alongside the
 controller, and serves the page over a tiny onboard HTTP server.
 
 1. With the controller connected, open **http://10.55.55.105/** in any browser.
-   (`http://ds5config.local/` may also work, but mDNS resolution is unreliable —
-   prefer the IP.)
 2. Adjust settings — controller mode, polling rate, audio buffer length,
    inactivity timeout, auto-disconnect, onboard LED — and click **Save**.
    Settings are written to the adapter's flash.
@@ -166,14 +164,30 @@ This replaces the old WebHID approach, which didn't work in Firefox. The
 embedded page works in any browser on any OS.
 
 > **Notes:**
-> - The config interface reuses the USB endpoints the debug serial would take,
->   so it is present in normal (release) builds and disabled when building with
->   `-DENABLE_SERIAL=ON`. It can also be turned off explicitly with
+> - The config web UI is on by default in release builds. Turn it off with
 >   `-DENABLE_WEBCONFIG=OFF`.
 > - The page is reachable while a controller is **connected** (the adapter
 >   presents its full USB interface set then). With no controller connected the
 >   adapter falls back to a minimal descriptor and the network interface is not
 >   exposed.
+
+---
+
+## Debugging
+
+There is **no USB serial port**. USB-CDC serial was removed because it shares the
+USB stack with the audio isochronous endpoints and perturbs the very timing you
+need to measure — it made performance problems impossible to diagnose reliably.
+
+Diagnostic output goes to **UART0** instead, which is independent of USB:
+
+- **Pico GP0 (pin 1)** = UART TX → connect to your USB-serial adapter's **RX**
+- **Pico GND (pin 3)** → adapter **GND**
+- Settings: **115200 baud, 8N1**, no flow control (3.3 V logic — do not feed 5 V
+  into GP0)
+
+For louder logs, build the verbose variant with `-DENABLE_VERBOSE=ON` (the CI
+also publishes a `ds5-bridge-debug.uf2` built this way).
 
 ---
 

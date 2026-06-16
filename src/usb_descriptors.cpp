@@ -27,10 +27,6 @@
 #include "tusb.h"
 #include "config.h"
 
-#ifndef ENABLE_SERIAL
-#define ENABLE_SERIAL 0
-#endif
-
 bool ds_mode() {
     if (get_config().controller_mode == 2) {
         return !is_dse;
@@ -43,10 +39,6 @@ enum {
     ITF_NUM_AUDIO_STREAMING_OUT,
     ITF_NUM_AUDIO_STREAMING_IN,
     ITF_NUM_HID,
-#if ENABLE_SERIAL
-    ITF_NUM_CDC,
-    ITF_NUM_CDC_DATA,
-#endif
 #ifdef ENABLE_WEBCONFIG
     ITF_NUM_NET,       // CDC-NCM control (IAD spans control + data)
     ITF_NUM_NET_DATA,
@@ -57,10 +49,10 @@ enum {
     ITF_NUM_TOTAL,
 
     // The audio function uses an IAD; the device-class triple must be the
-    // misc/common/IAD combo whenever any IAD-using function (CDC serial or
-    // CDC-NCM) is present. The 8-byte audio IAD is only emitted in those builds.
+    // misc/common/IAD combo whenever the IAD-using CDC-NCM function is present.
+    // The 8-byte audio IAD is only emitted in webconfig builds.
     CONFIG_DESC_LEN_AUDIO_IAD =
-#if ENABLE_SERIAL || defined(ENABLE_WEBCONFIG)
+#if defined(ENABLE_WEBCONFIG)
         8,
 #else
         0,
@@ -82,9 +74,6 @@ enum {
 #endif
     CONFIG_DESC_LEN_TOTAL = CONFIG_DESC_LEN_BASE + CONFIG_DESC_LEN_WAKE_KBD
         + CONFIG_DESC_LEN_NET
-#if ENABLE_SERIAL
-        + TUD_CDC_DESC_LEN
-#endif
 };
 
 // String Descriptor Index
@@ -93,9 +82,6 @@ enum {
     STRID_MANUFACTURER,
     STRID_PRODUCT,
     STRID_SERIAL,
-#if ENABLE_SERIAL
-    STRID_CDC,
-#endif
 #ifdef ENABLE_WEBCONFIG
     STRID_NET,
     STRID_MAC,
@@ -115,9 +101,11 @@ tusb_desc_device_t desc_device =
     .bcdUSB = 0x0200,
 #endif
 
-    // Use Interface Association Descriptor (IAD) for Audio
-    // As required by USB Specs IAD's subclass must be common class (2) and protocol must be IAD (1)
-#if ENABLE_SERIAL || defined(ENABLE_WEBCONFIG)
+    // Use Interface Association Descriptor (IAD) for Audio.
+    // As required by USB Specs IAD's subclass must be common class (2) and protocol must be IAD (1).
+    // The FULL variant carries the audio + CDC-NCM IADs, so webconfig builds need
+    // the Misc/common/IAD device class.
+#if defined(ENABLE_WEBCONFIG)
     .bDeviceClass = TUSB_CLASS_MISC,
     .bDeviceSubClass = MISC_SUBCLASS_COMMON,
     .bDeviceProtocol = MISC_PROTOCOL_IAD,
@@ -165,10 +153,10 @@ uint8_t descriptor_configuration[] = {
 #endif
     0xFA, // bMaxPower: 500mA (250 * 2mA)
 
-#if ENABLE_SERIAL || defined(ENABLE_WEBCONFIG)
+#if defined(ENABLE_WEBCONFIG)
     // --- INTERFACE ASSOCIATION DESCRIPTOR: Audio function (interfaces 0-2) ---
-    // Required whenever another IAD-using function (CDC serial or CDC-NCM) is
-    // present, so the audio function is properly grouped.
+    // Required because the CDC-NCM function (also IAD) is present, so the audio
+    // function must be properly grouped under its own IAD.
     0x08, // bLength
     TUSB_DESC_INTERFACE_ASSOCIATION, // bDescriptorType
     ITF_NUM_AUDIO_CONTROL, // bFirstInterface
@@ -420,14 +408,9 @@ uint8_t descriptor_configuration[] = {
     0x40, 0x00, // wMaxPacketSize: 64
     0x01, // bInterval: 1 (polling every 4ms -> 1ms)
 
-#if ENABLE_SERIAL
-    // --- CDC ACM (USB Serial) ---
-    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, STRID_CDC, 0x85, 0x08, 0x06, 0x86, 0x40),
-#endif
 #ifdef ENABLE_WEBCONFIG
     // --- CDC-NCM (config web UI network interface) ---
-    // Reuses the endpoint budget the CDC serial would take (mutually
-    // exclusive with ENABLE_SERIAL): notif IN 0x85, bulk OUT 0x05, bulk IN 0x86.
+    // Endpoints: notif IN 0x85, bulk OUT 0x05, bulk IN 0x86.
     //
     // Hand-emitted (not TUD_CDC_NCM_DESCRIPTOR) so BOTH the IAD iFunction and
     // the control-interface iInterface strings are 0. Windows builds the Net
@@ -469,8 +452,7 @@ uint8_t descriptor_configuration[] = {
 #endif
 #ifdef ENABLE_WAKE_HID
     // --- INTERFACE DESCRIPTOR (HID Boot Keyboard, wake key only) ---
-    // EP IN 0x87 (chosen to avoid collision with CDC notification EP 0x85
-    // when ENABLE_SERIAL is also defined).
+    // EP IN 0x87.
     0x09, // bLength
     0x04, // bDescriptorType (INTERFACE)
     ITF_NUM_HID_KBD, // bInterfaceNumber
@@ -1135,9 +1117,6 @@ static char const *string_desc_arr[] =
     "Sony Interactive Entertainment", // 1: Manufacturer
     NULL, // 2: Product
     NULL, // 3: Serials will use unique ID if possible
-#if ENABLE_SERIAL
-    "USB Serial", // 4: CDC interface
-#endif
 #ifdef ENABLE_WEBCONFIG
     NULL, // STRID_NET: intentionally no string -- a function/interface name
           //   only makes Windows show "<manufacturer> <name>", and the Sony

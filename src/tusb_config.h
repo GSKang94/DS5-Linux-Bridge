@@ -30,10 +30,6 @@
  extern "C" {
 #endif
 
-#ifndef ENABLE_SERIAL
-#define ENABLE_SERIAL 0
-#endif
-
 //--------------------------------------------------------------------+
 // Board Specific Configuration
 //--------------------------------------------------------------------+
@@ -101,10 +97,10 @@
 #else
 #define CFG_TUD_HID               1
 #endif
-#define CFG_TUD_CDC               ENABLE_SERIAL
-// CDC-NCM network interface carrying the onboard config web UI. Reuses the
-// endpoint budget the CDC debug serial would otherwise take, so it is only
-// available in non-serial builds (ENABLE_WEBCONFIG, default on in release).
+#define CFG_TUD_CDC               0
+// CDC-NCM network interface carrying the onboard config web UI (ENABLE_WEBCONFIG,
+// default on in release). Diagnostics go over UART0 (GP0 TX, 115200 8N1), never
+// USB-CDC -- USB serial perturbed the very USB timing we needed to measure.
 #ifdef ENABLE_WEBCONFIG
 #define CFG_TUD_NCM               1
 #else

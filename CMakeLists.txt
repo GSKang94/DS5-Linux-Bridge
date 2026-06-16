@@ -39,21 +39,12 @@ endif ()
 #set(PICO_CYW43_SUPPORTED 1)
 #set(PICO_CYW43_ARCH_THREADSAFE_BACKGROUND 1)
 
-option(ENABLE_SERIAL "Enable USB CDC serial printf output" OFF)
-if (ENABLE_SERIAL)
-        set(ENABLE_SERIAL_VALUE 1)
-else ()
-        set(ENABLE_SERIAL_VALUE 0)
-endif ()
+# Diagnostics go over UART0 (GP0 TX, 115200 8N1), always available -- there is
+# no USB-CDC serial. USB serial was removed because it perturbed the very USB
+# timing it was meant to diagnose (and was unreliable). See README "Debugging".
 
-# Onboard web config UI over a USB CDC-NCM network interface. Reuses the
-# endpoint budget the CDC debug serial would take, so it is mutually exclusive
-# with ENABLE_SERIAL. Default ON; force OFF for serial-debug builds.
+# Onboard web config UI over a USB CDC-NCM network interface. Default ON.
 option(ENABLE_WEBCONFIG "Serve the config web page over a USB network interface" ON)
-if (ENABLE_SERIAL AND ENABLE_WEBCONFIG)
-        message(STATUS "ENABLE_SERIAL is on; disabling ENABLE_WEBCONFIG (they share endpoints)")
-        set(ENABLE_WEBCONFIG OFF)
-endif ()
 option(ENABLE_VERBOSE "Enable Log Verbose" OFF)
 if(ENABLE_VERBOSE)
     set(ENABLE_VERBOSE_VALUE 1)
@@ -172,12 +163,8 @@ add_dependencies(ds5-bridge opus_ram_relocate)
 target_compile_options(ds5-bridge PRIVATE -fsigned-char)
 target_compile_definitions(ds5-bridge PRIVATE
         CYW43_LWIP=0
-        ENABLE_SERIAL=${ENABLE_SERIAL_VALUE}
         PICO_FLASH_ASSUME_CORE1_SAFE=1
         CYW43_PIO_CLOCK_DIV_INT=${CYW43_PIO_CLOCK_DIV_VALUE}
-        PICO_STDIO_USB_USE_DEFAULT_DESCRIPTORS=0
-        PICO_STDIO_USB_ENABLE_RESET_VIA_BAUD_RATE=0
-        PICO_STDIO_USB_ENABLE_RESET_VIA_VENDOR_INTERFACE=0
         ENABLE_VERBOSE=${ENABLE_VERBOSE_VALUE}
         ENABLE_DIAG=${ENABLE_DIAG_VALUE}
         ENABLE_BATT_LED=${ENABLE_BATT_LED_VALUE}
@@ -207,9 +194,10 @@ set(VERSION "dev" CACHE STRING "Program version string")
 pico_set_program_name(ds5-bridge "ds5-bridge")
 pico_set_program_version(ds5-bridge "${VERSION}")
 
-# Modify the below lines to enable/disable output over UART/USB
+# Diagnostics go over UART0 only (GP0 TX, 115200 8N1). No USB stdio: USB-CDC
+# serial perturbed the USB audio timing it was meant to diagnose.
 pico_enable_stdio_uart(ds5-bridge 1)
-pico_enable_stdio_usb(ds5-bridge ${ENABLE_SERIAL_VALUE})
+pico_enable_stdio_usb(ds5-bridge 0)
 
 # Add the standard include files to the build
 #target_include_directories(ds5-bridge PRIVATE

@@ -177,21 +177,6 @@ int bt_init() {
     return 0;
 }
 
-/*int main() {
-    stdio_init_all();
-
-    /*while (!stdio_usb_connected()) {
-        sleep_ms(100);
-    }
-    printf("USB Serial connected!\n");#1#
-
-    bt_init();
-
-    while (1) {
-        sleep_ms(10);
-    }
-}*/
-
 static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
     (void) channel;
 
@@ -382,8 +367,7 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
         }
 
         case HCI_EVENT_DISCONNECTION_COMPLETE: {
-#if !ENABLE_SERIAL
-#  ifdef ENABLE_WAKE_HID
+#ifdef ENABLE_WAKE_HID
             // With ENABLE_WAKE_HID we stay enumerated for remote-wakeup,
             // but switch to the minimal descriptor variant so the host
             // no longer sees audio/gamepad ghosts. The variant-swap
@@ -391,11 +375,10 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             // tud_connect bounce on the main loop (gated on host
             // not-suspended).
             usb_request_variant_minimal();
-#  else
+#else
             // Without ENABLE_WAKE_HID we hide the USB device whenever no
             // controller is paired (upstream behavior).
             tud_disconnect();
-#  endif
 #endif
             gap_connectable_control(1);
             gap_discoverable_control(1);
@@ -470,12 +453,10 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
                     // when the host is awake; the variant swap stays deferred
                     // until the wake lands.
                     wake_on_bt_connect();
-#if !ENABLE_SERIAL
-#  ifdef ENABLE_WAKE_HID
+#ifdef ENABLE_WAKE_HID
                     usb_request_variant_full();
-#  else
+#else
                     tud_connect();
-#  endif
 #endif
                 } else if (packet[0] == 0x02) {
                     printf("Connected DS5 Controller\n");
@@ -486,12 +467,10 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
                     // when the host is awake; the variant swap stays deferred
                     // until the wake lands.
                     wake_on_bt_connect();
-#if !ENABLE_SERIAL
-#  ifdef ENABLE_WAKE_HID
+#ifdef ENABLE_WAKE_HID
                     usb_request_variant_full();
-#  else
+#else
                     tud_connect();
-#  endif
 #endif
                 }
             }

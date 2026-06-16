@@ -14,26 +14,24 @@ priority is getting the experience right on Linux / SteamOS (Bazzite).
 
 ---
 
-## Why this fork? (Linux differences vs upstream)
+## What's different in this fork
 
-- 🎧 **`hid-playstation` jack-detection integration for correct stereo routing.**
-  The DS5's real `HP_DETECT` / `MIC_DETECT` jack bits are passed through to the
-  host so `hid-playstation` (kernel ≥6.18) emits `SW_HEADPHONE_INSERT` /
-  `SW_MICROPHONE_INSERT`; the ≥6.17 USB-audio mixer quirk wires these to the
-  ALSA "Headphone Jack" / "Headset Mic Jack" controls that `alsa-ucm-conf` uses
-  to switch between the mono Internal Speaker and the **stereo Headphones**
-  profiles. The firmware also forces the HP_DETECT bit high in the report it
-  presents to the host so the stereo profile is selected for headphone output.
-  (Note: on some distros/kernels PipeWire/ALSA may still land on a mono profile
-  and play in one earphone only — this is host-side UCM/kernel behavior; see
-  the kernel-version notes below.)
+These are the deliberate, code-level departures from upstream that define this
+fork's character. (Upstream is actively developed and excellent; this list is
+about *direction*, not "things upstream gets wrong.")
+
 - 🎚️ **Boxcar / linear resampler instead of WDL.** The haptic decimation and the
   512→480 speaker resample use a lightweight boxcar + linear interpolator
-  rather than the WDL resampler. This is far cheaper on CPU and tuned for a
-  punchier, more "wired-DualSense-like" haptic feel.
+  rather than the WDL resampler — far cheaper on CPU and tuned for a punchier,
+  more "wired-DualSense-like" haptic feel.
 - 🔈 **Volume fully yielded to the host.** Speaker/headset volume is owned by the
   host OS mixer and held in RAM only — no volume state is written to flash.
 - 🎛️ **Haptic intensity boost** to better match cabled intensity.
+- 🐧 **Linux-first integration & documentation.** Development and testing target
+  Linux / SteamOS (Bazzite, CachyOS) first. This includes `hid-playstation`
+  jack-detection wiring and documented, kernel-version-aware notes for getting
+  stereo audio routing working (see
+  [OS & driver behavior](#operating-system--driver-behavior)).
 
 ---
 
@@ -98,15 +96,25 @@ priority is getting the experience right on Linux / SteamOS (Bazzite).
 
 ## Operating System & Driver Behavior
 
-### Linux / SteamOS (Bazzite)
+### Linux / SteamOS (Bazzite, CachyOS)
 - **Native Driver Integration:** Compatible with the kernel `hid-playstation`
   driver. When the Linux driver is active, the firmware yields LED and button
   control to the OS driver to avoid conflicts.
-- **Jack Detection:** `HP_DETECT` and `MIC_DETECT` events are forwarded to the
-  host for automatic profile switching in `alsa-ucm-conf`, PulseAudio, and
-  PipeWire.
-- **Stereo audio:** Plays correctly in both earphones (see
-  [Why this fork?](#why-this-fork-linux-differences-vs-upstream)).
+- **Jack Detection:** The DS5's real `HP_DETECT` / `MIC_DETECT` jack bits are
+  passed through to the host so `hid-playstation` (kernel ≥6.18) emits
+  `SW_HEADPHONE_INSERT` / `SW_MICROPHONE_INSERT`. The ≥6.17 USB-audio mixer
+  quirk wires these to the ALSA "Headphone Jack" / "Headset Mic Jack" controls
+  that `alsa-ucm-conf` uses to switch between the mono Internal Speaker and the
+  stereo Headphones profiles. The firmware also forces the HP_DETECT bit high in
+  the report it presents to the host to bias toward the stereo Headphones
+  profile for headphone output.
+
+> **Known issue — one-earphone / mono audio on some setups.** Audio routing is
+> ultimately decided host-side by PipeWire/ALSA via `alsa-ucm-conf`, and on some
+> distros/kernels it lands on a mono profile (audio in one earphone only). This
+> is kernel- and UCM-version dependent rather than a firmware fault — stereo
+> generally needs a recent kernel (≥6.18) with the jack-detect mixer quirk.
+> Investigation is ongoing.
 
 ### Windows 10/11
 - **Audio & Mute Sync:** Runs driverless. The physical Mute button operates at

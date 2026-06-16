@@ -54,29 +54,49 @@ static struct netif netif_data;
 
 #define INIT_IP4(a, b, c, d) {PP_HTONL(LWIP_MAKEU32(a, b, c, d))}
 
-// 10.55.55.104/29: an obscure corner of RFC 1918 space (homes mostly use
-// 192.168.x or 10.0.0.x). The dongle lives at .105; the host PC gets .106 by
-// DHCP. The /29 (.104-.111) is small, so it shadows little even if a LAN
-// happens to overlap. Distinct from the PC-wake-dongle (10.7.7.107) so both
-// can be plugged in at once.
-static const ip4_addr_t ipaddr  = INIT_IP4(10, 55, 55, 105);
-static const ip4_addr_t netmask = INIT_IP4(255, 255, 255, 248);
-static const ip4_addr_t gateway = INIT_IP4(0, 0, 0, 0);
-
-static dhcp_entry_t dhcp_entries[] = {
-    {{0}, INIT_IP4(10, 55, 55, 106), 24 * 60 * 60},
-    {{0}, INIT_IP4(10, 55, 55, 107), 24 * 60 * 60},
-    {{0}, INIT_IP4(10, 55, 55, 108), 24 * 60 * 60},
+// Vetted /29 subnets selectable from the web UI (Config_body.webconfig_subnet).
+// Each is an obscure corner of RFC 1918 space (homes mostly use 192.168.0/1.x
+// or 10.0.0.x), spread across all three private blocks so if one ever collides
+// with the user's real LAN, another almost certainly won't. The dongle takes
+// .105; the host PC gets .106 by DHCP. Because this is an *index* into a fixed
+// table (not a free-form IP), a "wrong" choice still lands on a valid, reachable
+// subnet -- there is no way to type yourself into an unreachable state.
+//
+// IMPORTANT: keep this table, WEBCONFIG_SUBNET_COUNT, the web page <select> and
+// the config_valid() bound in sync.
+struct subnet_def { uint8_t a, b, c; };
+static const subnet_def kSubnets[] = {
+    {10,  55,  55},   // 0: 10.55.55.105   (default; distinct from PC-wake-dongle)
+    {172, 31,  55},   // 1: 172.31.55.105  (top of 172.16/12, almost never used)
+    {192, 168, 137},  // 2: 192.168.137.105 (Windows ICS default range)
 };
+#define WEBCONFIG_SUBNET_COUNT (sizeof(kSubnets) / sizeof(kSubnets[0]))
 
-static const dhcp_config_t dhcp_config = {
-    INIT_IP4(0, 0, 0, 0),          // router: none -- link-local only
-    67,                            // listen port
-    INIT_IP4(0, 0, 0, 0),          // dns: none -- never hijack host lookups
-    nullptr,                       // domain
-    sizeof(dhcp_entries) / sizeof(dhcp_entries[0]),
-    dhcp_entries,
-};
+// Resolved at init from the config index.
+static ip4_addr_t ipaddr;
+static ip4_addr_t netmask;
+static ip4_addr_t gateway;
+static dhcp_entry_t dhcp_entries[3];
+static dhcp_config_t dhcp_config;
+
+// Populate ipaddr/netmask/dhcp from the selected subnet (called in usb_net_init).
+static void build_subnet(uint8_t idx) {
+    if (idx >= WEBCONFIG_SUBNET_COUNT) idx = 0;
+    const subnet_def &s = kSubnets[idx];
+    IP4_ADDR(&ipaddr,  s.a, s.b, s.c, 105);
+    IP4_ADDR(&netmask, 255, 255, 255, 248); // /29
+    IP4_ADDR(&gateway, 0, 0, 0, 0);         // link-local only, no routing
+    for (int i = 0; i < 3; i++) {
+        IP4_ADDR(&dhcp_entries[i].addr, s.a, s.b, s.c, 106 + i);
+        dhcp_entries[i].lease = 24 * 60 * 60;
+    }
+    IP4_ADDR(&dhcp_config.router, 0, 0, 0, 0); // none
+    dhcp_config.port = 67;
+    IP4_ADDR(&dhcp_config.dns, 0, 0, 0, 0);    // none -- never hijack host lookups
+    dhcp_config.domain = nullptr;
+    dhcp_config.num_entry = 3;
+    dhcp_config.entries = dhcp_entries;
+}
 
 static err_t linkoutput_fn(struct netif *netif, struct pbuf *p) {
     (void) netif;
@@ -171,14 +191,16 @@ static int json_config(char *out, size_t cap) {
                     "\"disable_pico_led\":%u,"
                     "\"polling_rate_mode\":%u,"
                     "\"audio_buffer_length\":%u,"
-                    "\"controller_mode\":%u}",
+                    "\"controller_mode\":%u,"
+                    "\"webconfig_subnet\":%u}",
                     PICO_PROGRAM_VERSION_STRING,
                     c.inactive_time,
                     c.disable_inactive_disconnect,
                     c.disable_pico_led,
                     c.polling_rate_mode,
                     c.audio_buffer_length,
-                    c.controller_mode);
+                    c.controller_mode,
+                    c.webconfig_subnet);
 }
 
 extern "C" int fs_open_custom(struct fs_file *file, const char *name) {
@@ -247,6 +269,8 @@ static void apply_post(char *body) {
             c.audio_buffer_length = (uint8_t) clampi(val, 16, 128);
         } else if (strcmp(tok, "controller_mode") == 0) {
             c.controller_mode = (uint8_t) clampi(val, 0, 2);
+        } else if (strcmp(tok, "webconfig_subnet") == 0) {
+            c.webconfig_subnet = (uint8_t) clampi(val, 0, (int) WEBCONFIG_SUBNET_COUNT - 1);
         }
     }
 
@@ -301,6 +325,9 @@ void usb_net_init() {
     tud_network_mac_address[0] = 0x02;
     memcpy(tud_network_mac_address + 1, board_id.id + 3, 5);
 
+    // Resolve the selected subnet (web-UI configurable) before bringing up lwIP.
+    build_subnet(get_config().webconfig_subnet);
+
     lwip_init();
 
     netif_data.hwaddr_len = 6;
@@ -323,7 +350,8 @@ void usb_net_init() {
     mdns_resp_add_netif(&netif_data, "ds5config");
     httpd_init();
 
-    printf("[NET] config UI at http://10.55.55.105/ (ds5config.local best-effort)\n");
+    printf("[NET] config UI at http://%s/ (ds5config.local best-effort)\n",
+           ip4addr_ntoa(&ipaddr));
 }
 
 void usb_net_task() {

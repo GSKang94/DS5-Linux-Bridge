@@ -13,7 +13,7 @@
 #include "utils.h"
 
 constexpr uint32_t CONFIG_MAGIC = 0x66ccff00;
-constexpr uint16_t CONFIG_VERSION = 2;
+constexpr uint16_t CONFIG_VERSION = 3;
 constexpr uint32_t CONFIG_FLASH_OFFSET =
     PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE;
 static Config config{};
@@ -77,6 +77,10 @@ void config_valid() {
   if (body->controller_mode > 2) {
     body->controller_mode = 2;
     printf("[Config] controller_mode is invalid\n");
+  }
+  if (body->webconfig_subnet > 2) {
+    body->webconfig_subnet = 0; // default: 10.55.55.x
+    printf("[Config] webconfig_subnet is invalid\n");
   }
   if (body->config_version != CONFIG_VERSION) {
     body->config_version = CONFIG_VERSION;

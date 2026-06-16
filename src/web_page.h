@@ -72,6 +72,18 @@ button:disabled{background:#333;color:#777;cursor:default}
   <label for="disable_pico_led">Disable the onboard Pico LED</label>
 </div>
 
+<div class="field">
+  <label class="lbl">Config page address</label>
+  <select id="webconfig_subnet">
+    <option value="0">10.55.55.105 (default)</option>
+    <option value="1">172.31.55.105</option>
+    <option value="2">192.168.137.105</option>
+  </select>
+  <div class="hint">Where this page is served. Change only if it collides with
+  your network. Takes effect after you unplug and replug the adapter — then
+  browse to the new address.</div>
+</div>
+
 <div>
   <button id="save">Save</button>
   <span id="status"></span>
@@ -85,7 +97,7 @@ function bindRange(id,out){const el=$(id);const fn=()=>$(out).textContent=el.val
 const upd=[bindRange('audio_buffer_length','ab_val'),bindRange('inactive_time','it_val')];
 
 function markDirty(){$('save').disabled=false;setStatus('unsaved changes','dirty')}
-['controller_mode','polling_rate_mode','disable_inactive_disconnect','disable_pico_led']
+['controller_mode','polling_rate_mode','disable_inactive_disconnect','disable_pico_led','webconfig_subnet']
   .forEach(id=>$(id).onchange=markDirty);
 
 async function load(){
@@ -98,6 +110,7 @@ async function load(){
     $('inactive_time').value=c.inactive_time;
     $('disable_inactive_disconnect').checked=!!c.disable_inactive_disconnect;
     $('disable_pico_led').checked=!!c.disable_pico_led;
+    $('webconfig_subnet').value=c.webconfig_subnet;
     upd.forEach(f=>f());
     $('save').disabled=true;setStatus('');
   }catch(e){setStatus('load failed','err')}
@@ -110,7 +123,8 @@ async function save(){
     'audio_buffer_length='+$('audio_buffer_length').value,
     'inactive_time='+$('inactive_time').value,
     'disable_inactive_disconnect='+($('disable_inactive_disconnect').checked?1:0),
-    'disable_pico_led='+($('disable_pico_led').checked?1:0)
+    'disable_pico_led='+($('disable_pico_led').checked?1:0),
+    'webconfig_subnet='+$('webconfig_subnet').value
   ].join('&');
   setStatus('saving…','dirty');
   try{

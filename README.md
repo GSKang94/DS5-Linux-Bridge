@@ -152,9 +152,15 @@ controller, and serves the page over a tiny onboard HTTP server.
 1. With the controller connected, open **http://10.55.55.105/** in any browser.
    (`http://ds5config.local/` may also work, but mDNS resolution is unreliable —
    prefer the IP.)
-2. Adjust settings — controller mode, polling rate, speaker volume, audio buffer
-   length, inactivity timeout, auto-disconnect, onboard LED — and click **Save**.
+2. Adjust settings — controller mode, polling rate, audio buffer length,
+   inactivity timeout, auto-disconnect, onboard LED — and click **Save**.
    Settings are written to the adapter's flash.
+
+The config page address itself is selectable (default `10.55.55.105`, with
+`172.31.55.105` and `192.168.137.105` alternatives) in case the default subnet
+collides with your network. Changing it requires unplugging and replugging the
+adapter, after which you browse to the new address. (It's a fixed list, not a
+free-form IP — you can't lock yourself out.)
 
 This replaces the old WebHID approach, which didn't work in Firefox. The
 embedded page works in any browser on any OS.

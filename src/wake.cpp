@@ -74,6 +74,43 @@ static void enter_state(wake_state_t s) {
     state_entered_us = time_us_64();
 }
 
+// Issue a USB remote-wakeup to the host and, on success, advance the wake FSM
+// to WAKE_REQUESTED so wake_task() drives the follow-up keystroke sequence.
+// Shared by the button-event path (wake_on_bt_input) and the connect path
+// (wake_on_bt_connect). Callers are responsible for the gating checks
+// (armable state, !variant-swap, etc.) before calling.
+static void request_host_wake(const char *reason) {
+    (void)reason;
+    bool ok = tud_remote_wakeup();
+
+    // Linux quirk: Sometimes Linux fails to set the REMOTE_WAKEUP feature
+    // flag before the second suspend, causing TinyUSB to refuse to wake.
+    // If we are suspended but ok is false, we force the wake signal.
+    if (!ok && host_suspended) {
+        WAKE_DBG("%s: tud_remote_wakeup()=0 but suspended. Forcing DCD wake.", reason);
+        dcd_remote_wakeup(0);
+        ok = true;
+    }
+
+    if (ok) {
+        critical_section_enter_blocking(&wake_cs);
+        state = WAKE_REQUESTED;
+        state_entered_us = time_us_64();
+        critical_section_exit(&wake_cs);
+        WAKE_DBG("%s -> REQUESTED, tud_remote_wakeup()=1", reason);
+    }
+#ifdef WAKE_DEBUG
+    else {
+        static uint64_t last_log = 0;
+        const uint64_t now = time_us_64();
+        if (now - last_log > 5000000) {
+            WAKE_DBG("%s, tud_remote_wakeup()=0 (USB bus not in suspend) -- 5s heartbeat", reason);
+            last_log = now;
+        }
+    }
+#endif
+}
+
 void wake_init(void) {
     critical_section_init(&wake_cs);
 }
@@ -178,34 +215,28 @@ void wake_on_bt_input(const uint8_t *hid_input, uint16_t len) {
     // tud_remote_wakeup() and our subsequent F15 keystrokes would race
     // the re-enumeration the swap is doing.
     if (changed && armable && !usb_variant_swap_in_progress()) {
-        bool ok = tud_remote_wakeup();
-        
-        // Linux quirk: Sometimes Linux fails to set the REMOTE_WAKEUP feature
-        // flag before the second suspend, causing TinyUSB to refuse to wake.
-        // If we are suspended but ok is false, we force the wake signal.
-        if (!ok && host_suspended) {
-            WAKE_DBG("tud_remote_wakeup()=0 but suspended. Forcing DCD wake.");
-            dcd_remote_wakeup(0);
-            ok = true;
-        }
+        request_host_wake("button event");
+    }
+}
 
-        if (ok) {
-            critical_section_enter_blocking(&wake_cs);
-            state = WAKE_REQUESTED;
-            state_entered_us = time_us_64();
-            critical_section_exit(&wake_cs);
-            WAKE_DBG("button event -> REQUESTED, tud_remote_wakeup()=1");
-        }
-#ifdef WAKE_DEBUG
-        else {
-            static uint64_t last_log = 0;
-            const uint64_t now = time_us_64();
-            if (now - last_log > 5000000) {
-                WAKE_DBG("button event, tud_remote_wakeup()=0 (USB bus not in suspend) -- 5s heartbeat");
-                last_log = now;
-            }
-        }
-#endif
+// Wake the host when the DualSense establishes its BT connection while the
+// host is suspended (turn-on-controller-to-wake, no button press needed).
+//
+// Safe vs the S5 churn that the power-off debounce guards against: on connect
+// we call usb_request_variant_full(), but the variant-swap state machine is
+// gated on !host_suspended (usb_variant_task returns early while suspended),
+// so the re-enumeration is DEFERRED until the host actually wakes. That means
+// usb_variant_swap_in_progress() is still false here, and waking the host is
+// exactly what lets the deferred swap proceed. We additionally require
+// host_suspended so a normal (host-awake) reconnect never triggers a wake.
+void wake_on_bt_connect(void) {
+    critical_section_enter_blocking(&wake_cs);
+    const bool armable = (state == WAKE_IDLE || state == WAKE_DONE ||
+                          state == WAKE_PENDING_PRESS);
+    critical_section_exit(&wake_cs);
+
+    if (host_suspended && armable && !usb_variant_swap_in_progress()) {
+        request_host_wake("BT connect while suspended");
     }
 }
 

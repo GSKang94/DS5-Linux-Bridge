@@ -19,6 +19,7 @@
 #include "config.h"
 #include "state_mgr.h"
 #include "dse.h"
+#include "wake.h"
 #include "pico/util/queue.h"
 #if ENABLE_BATT_LED
 #include "battery_led.h"
@@ -465,6 +466,10 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
                     // Unlock Edge profiles; USB connects immediately, profile
                     // reads are gated until the snapshot is prepared.
                     dse_on_connect();
+                    // Wake the host if it's suspended (turn-on-to-wake). No-op
+                    // when the host is awake; the variant swap stays deferred
+                    // until the wake lands.
+                    wake_on_bt_connect();
 #if !ENABLE_SERIAL
 #  ifdef ENABLE_WAKE_HID
                     usb_request_variant_full();
@@ -477,6 +482,10 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
                     check_dse = false;
                     is_dse = false;
                     connect_attempt_started = 0; // fully up — disarm watchdog
+                    // Wake the host if it's suspended (turn-on-to-wake). No-op
+                    // when the host is awake; the variant swap stays deferred
+                    // until the wake lands.
+                    wake_on_bt_connect();
 #if !ENABLE_SERIAL
 #  ifdef ENABLE_WAKE_HID
                     usb_request_variant_full();

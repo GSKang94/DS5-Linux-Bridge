@@ -335,6 +335,11 @@ int main() {
     return 1;
   }
 
+  // Load persisted config from flash BEFORE usb_net_init(): the web server
+  // picks its subnet from get_config().webconfig_subnet, so the saved value
+  // must be in place first (otherwise it always reads the default).
+  config_load();
+
   // Bring up the onboard config web server (USB CDC-NCM + lwIP). No-op when
   // ENABLE_WEBCONFIG is off. lwIP is ours alone here (CYW43_LWIP=0).
   usb_net_init();
@@ -371,8 +376,6 @@ int main() {
   // Initialize the critical section for the report buffer
   critical_section_init(&report_cs);
   wake_init();
-
-  config_load();
 
   bt_init();
   bt_register_data_callback(on_bt_data);

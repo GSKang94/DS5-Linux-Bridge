@@ -428,8 +428,42 @@ uint8_t descriptor_configuration[] = {
     // --- CDC-NCM (config web UI network interface) ---
     // Reuses the endpoint budget the CDC serial would take (mutually
     // exclusive with ENABLE_SERIAL): notif IN 0x85, bulk OUT 0x05, bulk IN 0x86.
-    TUD_CDC_NCM_DESCRIPTOR(ITF_NUM_NET, STRID_NET, STRID_MAC, 0x85, 64,
-                           0x05, 0x86, 64, CFG_TUD_NET_MTU, 50, 0),
+    //
+    // Hand-emitted (not TUD_CDC_NCM_DESCRIPTOR) so the IAD's iFunction string is
+    // set to STRID_NET. Windows uses the IAD function name directly for the
+    // grouped function; with iFunction=0 (the macro default) it instead composes
+    // "<iManufacturer> <interface-string>" -> "Sony Interactive Entertainment
+    // DS5 Config Network". Setting iFunction gives just "DS5 Config Network".
+    // Byte layout matches the macro exactly (TUD_CDC_NCM_DESC_LEN), so the
+    // descriptor-length static_assert still holds.
+
+    // Interface Association: control + data, iFunction = STRID_NET
+    8, TUSB_DESC_INTERFACE_ASSOCIATION, ITF_NUM_NET, 2, TUSB_CLASS_CDC,
+        CDC_COMM_SUBCLASS_NETWORK_CONTROL_MODEL, 0, STRID_NET,
+    // CDC Control Interface (iInterface = 0 to avoid a second composed name)
+    9, TUSB_DESC_INTERFACE, ITF_NUM_NET, 0, 1, TUSB_CLASS_CDC,
+        CDC_COMM_SUBCLASS_NETWORK_CONTROL_MODEL, 0, 0,
+    // CDC Header
+    5, TUSB_DESC_CS_INTERFACE, CDC_FUNC_DESC_HEADER, U16_TO_U8S_LE(0x0110),
+    // CDC Union
+    5, TUSB_DESC_CS_INTERFACE, CDC_FUNC_DESC_UNION, ITF_NUM_NET, (uint8_t)(ITF_NUM_NET + 1),
+    // CDC Ethernet Networking (iMacAddress = STRID_MAC)
+    13, TUSB_DESC_CS_INTERFACE, CDC_FUNC_DESC_ETHERNET_NETWORKING, STRID_MAC, 0, 0, 0, 0,
+        U16_TO_U8S_LE(CFG_TUD_NET_MTU), U16_TO_U8S_LE(0), 0,
+    // CDC-NCM Functional Descriptor
+    6, TUSB_DESC_CS_INTERFACE, CDC_FUNC_DESC_NCM, U16_TO_U8S_LE(0x0100), 0,
+    // Endpoint Notification (IN 0x85)
+    7, TUSB_DESC_ENDPOINT, 0x85, TUSB_XFER_INTERRUPT, U16_TO_U8S_LE(64), 50,
+    // CDC Data Interface (default, inactive)
+    9, TUSB_DESC_INTERFACE, (uint8_t)(ITF_NUM_NET + 1), 0, 0, TUSB_CLASS_CDC_DATA, 0,
+        NCM_DATA_PROTOCOL_NETWORK_TRANSFER_BLOCK, 0,
+    // CDC Data Interface (alternative, active)
+    9, TUSB_DESC_INTERFACE, (uint8_t)(ITF_NUM_NET + 1), 1, 2, TUSB_CLASS_CDC_DATA, 0,
+        NCM_DATA_PROTOCOL_NETWORK_TRANSFER_BLOCK, 0,
+    // Endpoint In (bulk 0x86)
+    7, TUSB_DESC_ENDPOINT, 0x86, TUSB_XFER_BULK, U16_TO_U8S_LE(64), 0,
+    // Endpoint Out (bulk 0x05)
+    7, TUSB_DESC_ENDPOINT, 0x05, TUSB_XFER_BULK, U16_TO_U8S_LE(64), 0,
 #endif
 #ifdef ENABLE_WAKE_HID
     // --- INTERFACE DESCRIPTOR (HID Boot Keyboard, wake key only) ---

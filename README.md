@@ -16,11 +16,17 @@ priority is getting the experience right on Linux / SteamOS (Bazzite).
 
 ## Why this fork? (Linux differences vs upstream)
 
-- 🔊 **Fixes stereo speaker audio on Linux.** Upstream's speaker-capture loop
-  couples the host PCM copy to the haptic resampler's frame count, which
-  desyncs the FL/FR interleave on Linux and collapses playback to one earphone
-  ("right channel only"). This fork decouples the speaker copy from the haptic
-  path so stereo stays in phase.
+- 🎧 **`hid-playstation` jack-detection integration for correct stereo routing.**
+  The DS5's real `HP_DETECT` / `MIC_DETECT` jack bits are passed through to the
+  host so `hid-playstation` (kernel ≥6.18) emits `SW_HEADPHONE_INSERT` /
+  `SW_MICROPHONE_INSERT`; the ≥6.17 USB-audio mixer quirk wires these to the
+  ALSA "Headphone Jack" / "Headset Mic Jack" controls that `alsa-ucm-conf` uses
+  to switch between the mono Internal Speaker and the **stereo Headphones**
+  profiles. The firmware also forces the HP_DETECT bit high in the report it
+  presents to the host so the stereo profile is selected for headphone output.
+  (Note: on some distros/kernels PipeWire/ALSA may still land on a mono profile
+  and play in one earphone only — this is host-side UCM/kernel behavior; see
+  the kernel-version notes below.)
 - 🎚️ **Boxcar / linear resampler instead of WDL.** The haptic decimation and the
   512→480 speaker resample use a lightweight boxcar + linear interpolator
   rather than the WDL resampler. This is far cheaper on CPU and tuned for a

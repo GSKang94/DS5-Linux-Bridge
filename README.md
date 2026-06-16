@@ -114,7 +114,10 @@ about *direction*, not "things upstream gets wrong.")
 > distros/kernels it lands on a mono profile (audio in one earphone only). This
 > is kernel- and UCM-version dependent rather than a firmware fault — stereo
 > generally needs a recent kernel (≥6.18) with the jack-detect mixer quirk.
-> Investigation is ongoing.
+> Confirmed working on Ubuntu; confirmed mono on CachyOS. Note that
+> bleeding-edge / rolling distros (e.g. CachyOS, Arch) can also *regress* here:
+> a newer kernel or updated `alsa-ucm-conf` can change the routing behavior and
+> break a setup that previously worked. Investigation is ongoing.
 
 ### Windows 10/11
 - **Audio & Mute Sync:** Runs driverless. The physical Mute button operates at

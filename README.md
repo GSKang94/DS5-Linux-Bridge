@@ -143,12 +143,31 @@ crackling — only do so when actually debugging.
 
 ---
 
-## Configuration (planned)
+## Configuration
 
-A WebHID-based configuration tool (inactivity timeout, LED preferences, buffer
-sizing) is planned. WebHID is not supported in Firefox, so this is treated as a
-Linux-oriented convenience feature served from a local page rather than a
-required step.
+The adapter serves its own configuration web page — no app, no browser API, no
+internet. It enumerates as a **USB network adapter** (CDC-NCM) alongside the
+controller, and serves the page over a tiny onboard HTTP server.
+
+1. With the controller connected, open **http://10.7.7.107/** in any browser.
+   (`http://ds5config.local/` may also work, but mDNS resolution is unreliable —
+   prefer the IP.)
+2. Adjust settings — controller mode, polling rate, speaker volume, audio buffer
+   length, inactivity timeout, auto-disconnect, onboard LED — and click **Save**.
+   Settings are written to the adapter's flash.
+
+This replaces the old WebHID approach, which didn't work in Firefox. The
+embedded page works in any browser on any OS.
+
+> **Notes:**
+> - The config interface reuses the USB endpoints the debug serial would take,
+>   so it is present in normal (release) builds and disabled when building with
+>   `-DENABLE_SERIAL=ON`. It can also be turned off explicitly with
+>   `-DENABLE_WEBCONFIG=OFF`.
+> - The page is reachable while a controller is **connected** (the adapter
+>   presents its full USB interface set then). With no controller connected the
+>   adapter falls back to a minimal descriptor and the network interface is not
+>   exposed.
 
 ---
 

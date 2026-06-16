@@ -21,6 +21,7 @@
 #include "cmd.h"
 #include "config.h"
 #include "dse.h"
+#include "usb_net.h"
 
 #if ENABLE_BATT_LED
 #include "battery_led.h"
@@ -334,6 +335,10 @@ int main() {
     return 1;
   }
 
+  // Bring up the onboard config web server (USB CDC-NCM + lwIP). No-op when
+  // ENABLE_WEBCONFIG is off. lwIP is ours alone here (CYW43_LWIP=0).
+  usb_net_init();
+
   // Power-On Self Test (POST) LED pattern: 3 rapid flashes to confirm
   // successful CPU overclocking and CYW43 Bluetooth module initialization.
   for (int i = 0; i < 6; i++) {
@@ -414,6 +419,9 @@ int main() {
 #ifdef ENABLE_WAKE_HID
     usb_variant_task();
 #endif
+    // Service lwIP timers for the onboard config web server (no-op when
+    // ENABLE_WEBCONFIG is off). Cheap; not in the audio hot path.
+    usb_net_task();
 #if ENABLE_DIAG
     section_start_us = time_us_64();
 #endif

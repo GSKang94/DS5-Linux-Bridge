@@ -47,13 +47,20 @@ enum {
     ITF_NUM_CDC,
     ITF_NUM_CDC_DATA,
 #endif
+#ifdef ENABLE_WEBCONFIG
+    ITF_NUM_NET,       // CDC-NCM control (IAD spans control + data)
+    ITF_NUM_NET_DATA,
+#endif
 #ifdef ENABLE_WAKE_HID
     ITF_NUM_HID_KBD,
 #endif
     ITF_NUM_TOTAL,
 
+    // The audio function uses an IAD; the device-class triple must be the
+    // misc/common/IAD combo whenever any IAD-using function (CDC serial or
+    // CDC-NCM) is present. The 8-byte audio IAD is only emitted in those builds.
     CONFIG_DESC_LEN_AUDIO_IAD =
-#if ENABLE_SERIAL
+#if ENABLE_SERIAL || defined(ENABLE_WEBCONFIG)
         8,
 #else
         0,
@@ -67,7 +74,14 @@ enum {
 #else
         0,
 #endif
+    CONFIG_DESC_LEN_NET =
+#ifdef ENABLE_WEBCONFIG
+        TUD_CDC_NCM_DESC_LEN,
+#else
+        0,
+#endif
     CONFIG_DESC_LEN_TOTAL = CONFIG_DESC_LEN_BASE + CONFIG_DESC_LEN_WAKE_KBD
+        + CONFIG_DESC_LEN_NET
 #if ENABLE_SERIAL
         + TUD_CDC_DESC_LEN
 #endif
@@ -81,6 +95,10 @@ enum {
     STRID_SERIAL,
 #if ENABLE_SERIAL
     STRID_CDC,
+#endif
+#ifdef ENABLE_WEBCONFIG
+    STRID_NET,
+    STRID_MAC,
 #endif
 };
 
@@ -99,7 +117,7 @@ tusb_desc_device_t desc_device =
 
     // Use Interface Association Descriptor (IAD) for Audio
     // As required by USB Specs IAD's subclass must be common class (2) and protocol must be IAD (1)
-#if ENABLE_SERIAL
+#if ENABLE_SERIAL || defined(ENABLE_WEBCONFIG)
     .bDeviceClass = TUSB_CLASS_MISC,
     .bDeviceSubClass = MISC_SUBCLASS_COMMON,
     .bDeviceProtocol = MISC_PROTOCOL_IAD,
@@ -147,8 +165,10 @@ uint8_t descriptor_configuration[] = {
 #endif
     0xFA, // bMaxPower: 500mA (250 * 2mA)
 
-#if ENABLE_SERIAL
+#if ENABLE_SERIAL || defined(ENABLE_WEBCONFIG)
     // --- INTERFACE ASSOCIATION DESCRIPTOR: Audio function (interfaces 0-2) ---
+    // Required whenever another IAD-using function (CDC serial or CDC-NCM) is
+    // present, so the audio function is properly grouped.
     0x08, // bLength
     TUSB_DESC_INTERFACE_ASSOCIATION, // bDescriptorType
     ITF_NUM_AUDIO_CONTROL, // bFirstInterface
@@ -404,6 +424,13 @@ uint8_t descriptor_configuration[] = {
     // --- CDC ACM (USB Serial) ---
     TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, STRID_CDC, 0x85, 0x08, 0x06, 0x86, 0x40),
 #endif
+#ifdef ENABLE_WEBCONFIG
+    // --- CDC-NCM (config web UI network interface) ---
+    // Reuses the endpoint budget the CDC serial would take (mutually
+    // exclusive with ENABLE_SERIAL): notif IN 0x85, bulk OUT 0x05, bulk IN 0x86.
+    TUD_CDC_NCM_DESCRIPTOR(ITF_NUM_NET, STRID_NET, STRID_MAC, 0x85, 64,
+                           0x05, 0x86, 64, CFG_TUD_NET_MTU, 50, 0),
+#endif
 #ifdef ENABLE_WAKE_HID
     // --- INTERFACE DESCRIPTOR (HID Boot Keyboard, wake key only) ---
     // EP IN 0x87 (chosen to avoid collision with CDC notification EP 0x85
@@ -436,6 +463,12 @@ uint8_t descriptor_configuration[] = {
     0x0A, // bInterval: 10ms
 #endif
 };
+
+// Lock the hand-computed wTotalLength against the actual emitted bytes. A
+// mismatch (e.g. CONFIG_DESC_LEN_NET not matching the NCM descriptor) would
+// silently break enumeration of the trailing interfaces.
+static_assert(sizeof(descriptor_configuration) == CONFIG_DESC_LEN_TOTAL,
+              "descriptor_configuration size != CONFIG_DESC_LEN_TOTAL");
 
 #ifdef ENABLE_WAKE_HID
 // Minimal config descriptor used when no DualSense is connected.
@@ -1069,6 +1102,10 @@ static char const *string_desc_arr[] =
 #if ENABLE_SERIAL
     "USB Serial", // 4: CDC interface
 #endif
+#ifdef ENABLE_WEBCONFIG
+    "DS5 Config Network", // NCM interface (STRID_NET)
+    NULL,                 // MAC (STRID_MAC) -- generated in the callback
+#endif
 };
 
 static uint16_t _desc_str[60 + 1];
@@ -1094,6 +1131,19 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
         case STRID_SERIAL:
             chr_count = board_usb_get_serial(_desc_str + 1, 32);
             break;
+
+#ifdef ENABLE_WEBCONFIG
+        case STRID_MAC: {
+            // MAC the host NIC should use, 12 hex chars (CDC-ECM/NCM convention).
+            extern uint8_t tud_network_mac_address[6];
+            chr_count = 0;
+            for (int i = 0; i < 6; i++) {
+                _desc_str[1 + chr_count++] = "0123456789ABCDEF"[(tud_network_mac_address[i] >> 4) & 0xf];
+                _desc_str[1 + chr_count++] = "0123456789ABCDEF"[tud_network_mac_address[i] & 0xf];
+            }
+            break;
+        }
+#endif
 
         default:
             // Note: the 0xEE index string is a Microsoft OS 1.0 Descriptors.

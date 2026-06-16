@@ -45,6 +45,15 @@ if (ENABLE_SERIAL)
 else ()
         set(ENABLE_SERIAL_VALUE 0)
 endif ()
+
+# Onboard web config UI over a USB CDC-NCM network interface. Reuses the
+# endpoint budget the CDC debug serial would take, so it is mutually exclusive
+# with ENABLE_SERIAL. Default ON; force OFF for serial-debug builds.
+option(ENABLE_WEBCONFIG "Serve the config web page over a USB network interface" ON)
+if (ENABLE_SERIAL AND ENABLE_WEBCONFIG)
+        message(STATUS "ENABLE_SERIAL is on; disabling ENABLE_WEBCONFIG (they share endpoints)")
+        set(ENABLE_WEBCONFIG OFF)
+endif ()
 option(ENABLE_VERBOSE "Enable Log Verbose" OFF)
 if(ENABLE_VERBOSE)
     set(ENABLE_VERBOSE_VALUE 1)
@@ -113,6 +122,25 @@ add_executable(ds5-bridge
 # lower the word-copy loops back into calls to memcpy/memset (self-recursion).
 set_source_files_properties(src/ram_mem.c PROPERTIES COMPILE_OPTIONS
         "-fno-builtin;-fno-tree-loop-distribute-patterns")
+
+if (ENABLE_WEBCONFIG)
+    target_sources(ds5-bridge PRIVATE
+            src/usb_net.cpp
+            # TinyUSB's tiny DHCP server, used to hand the host an address on
+            # the USB NCM link.
+            ${PICO_TINYUSB_PATH}/lib/networking/dhserver.c
+    )
+    target_include_directories(ds5-bridge PRIVATE
+            ${PICO_TINYUSB_PATH}/lib/networking
+    )
+    target_compile_definitions(ds5-bridge PRIVATE ENABLE_WEBCONFIG)
+    target_link_libraries(ds5-bridge
+            pico_unique_id
+            pico_lwip_nosys
+            pico_lwip_http
+            pico_lwip_mdns
+    )
+endif ()
 
 if (ENABLE_BATT_LED)
         target_sources(ds5-bridge PRIVATE src/battery_led.cpp)

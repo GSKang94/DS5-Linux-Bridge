@@ -102,6 +102,15 @@
 #define CFG_TUD_HID               1
 #endif
 #define CFG_TUD_CDC               ENABLE_SERIAL
+// CDC-NCM network interface carrying the onboard config web UI. Reuses the
+// endpoint budget the CDC debug serial would otherwise take, so it is only
+// available in non-serial builds (ENABLE_WEBCONFIG, default on in release).
+#ifdef ENABLE_WEBCONFIG
+#define CFG_TUD_NCM               1
+#else
+#define CFG_TUD_NCM               0
+#endif
+#define CFG_TUD_ECM_RNDIS         0
 #define CFG_TUD_MSC               0
 #define CFG_TUD_MIDI              0
 #ifdef ENABLE_WAKE_HID

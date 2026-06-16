@@ -429,18 +429,20 @@ uint8_t descriptor_configuration[] = {
     // Reuses the endpoint budget the CDC serial would take (mutually
     // exclusive with ENABLE_SERIAL): notif IN 0x85, bulk OUT 0x05, bulk IN 0x86.
     //
-    // Hand-emitted (not TUD_CDC_NCM_DESCRIPTOR) so the IAD's iFunction string is
-    // set to STRID_NET. Windows uses the IAD function name directly for the
-    // grouped function; with iFunction=0 (the macro default) it instead composes
-    // "<iManufacturer> <interface-string>" -> "Sony Interactive Entertainment
-    // DS5 Config Network". Setting iFunction gives just "DS5 Config Network".
-    // Byte layout matches the macro exactly (TUD_CDC_NCM_DESC_LEN), so the
+    // Hand-emitted (not TUD_CDC_NCM_DESCRIPTOR) so BOTH the IAD iFunction and
+    // the control-interface iInterface strings are 0. Windows builds the Net
+    // adapter's FriendlyName as "<iManufacturer> <function/interface string>".
+    // The manufacturer ("Sony Interactive Entertainment") must stay for
+    // DualSense driver matching and cannot be removed; setting a function string
+    // only makes it worse ("Sony Interactive Entertainment DS5 Config Network").
+    // With no strings, Windows shows just the manufacturer-derived name. Byte
+    // layout matches the macro exactly (TUD_CDC_NCM_DESC_LEN), so the
     // descriptor-length static_assert still holds.
 
-    // Interface Association: control + data, iFunction = STRID_NET
+    // Interface Association: control + data, iFunction = 0 (no string)
     8, TUSB_DESC_INTERFACE_ASSOCIATION, ITF_NUM_NET, 2, TUSB_CLASS_CDC,
-        CDC_COMM_SUBCLASS_NETWORK_CONTROL_MODEL, 0, STRID_NET,
-    // CDC Control Interface (iInterface = 0 to avoid a second composed name)
+        CDC_COMM_SUBCLASS_NETWORK_CONTROL_MODEL, 0, 0,
+    // CDC Control Interface (iInterface = 0, no string)
     9, TUSB_DESC_INTERFACE, ITF_NUM_NET, 0, 1, TUSB_CLASS_CDC,
         CDC_COMM_SUBCLASS_NETWORK_CONTROL_MODEL, 0, 0,
     // CDC Header
@@ -1137,8 +1139,10 @@ static char const *string_desc_arr[] =
     "USB Serial", // 4: CDC interface
 #endif
 #ifdef ENABLE_WEBCONFIG
-    "DS5 Config Network", // NCM interface (STRID_NET)
-    NULL,                 // MAC (STRID_MAC) -- generated in the callback
+    NULL, // STRID_NET: intentionally no string -- a function/interface name
+          //   only makes Windows show "<manufacturer> <name>", and the Sony
+          //   manufacturer prefix is unavoidable. Slot kept to align STRID_MAC.
+    NULL, // STRID_MAC: generated in the callback (required by NCM)
 #endif
 };
 
@@ -1186,6 +1190,7 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
             if (!(index < sizeof(string_desc_arr) / sizeof(string_desc_arr[0]))) return NULL;
 
             const char *str = string_desc_arr[index];
+            if (str == nullptr) return NULL; // unused/placeholder slot (e.g. STRID_NET)
 
             // Cap at max char
             chr_count = strlen(str);

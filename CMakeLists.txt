@@ -76,8 +76,11 @@ if (PICO_W_BUILD)
         set(SYS_CLOCK_KHZ_VALUE 200000)
         set(DISABLE_SPEAKER_PROC_VALUE 1)
 else ()
-        set(CYW43_PIO_CLOCK_DIV_VALUE 5)
-        set(SYS_CLOCK_KHZ_VALUE 320000)
+        # Stock RP2350 clock. Selective RAM relocation (relocate_to_ram) keeps the
+        # hot paths out of flash XIP, so no overclock is needed for stable audio +
+        # 1000Hz polling. PIO div 2 matches the 150 MHz system clock.
+        set(CYW43_PIO_CLOCK_DIV_VALUE 2)
+        set(SYS_CLOCK_KHZ_VALUE 150000)
 endif ()
 
 

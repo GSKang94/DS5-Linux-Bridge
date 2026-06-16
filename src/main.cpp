@@ -306,10 +306,15 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id,
 }
 
 int main() {
-  // Set core voltage to 1.20V which is stable and safe for 320 MHz
+#if SYS_CLOCK_KHZ != 150000
+  // Overclock path: raise core voltage before bumping the system clock.
+  // (1.20V is stable/safe for 320 MHz.) At the stock 150 MHz this is skipped —
+  // RAM-relocated hot paths make the overclock unnecessary, and the SDK's
+  // default clock init handles the stock case.
   vreg_set_voltage(VREG_VOLTAGE_1_20);
   sleep_ms(1000);
   set_sys_clock_khz(SYS_CLOCK_KHZ, true);
+#endif
 
   board_init();
   tusb_rhport_init_t dev_init = {.role = TUSB_ROLE_DEVICE,

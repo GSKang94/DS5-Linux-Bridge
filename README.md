@@ -149,7 +149,7 @@ The adapter serves its own configuration web page — no app, no browser API, no
 internet. It enumerates as a **USB network adapter** (CDC-NCM) alongside the
 controller, and serves the page over a tiny onboard HTTP server.
 
-1. With the controller connected, open **http://10.7.7.107/** in any browser.
+1. With the controller connected, open **http://10.55.55.105/** in any browser.
    (`http://ds5config.local/` may also work, but mDNS resolution is unreliable —
    prefer the IP.)
 2. Adjust settings — controller mode, polling rate, speaker volume, audio buffer

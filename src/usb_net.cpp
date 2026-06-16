@@ -54,17 +54,19 @@ static struct netif netif_data;
 
 #define INIT_IP4(a, b, c, d) {PP_HTONL(LWIP_MAKEU32(a, b, c, d))}
 
-// 10.7.7.104/29: an obscure corner of RFC 1918 space (homes mostly use
-// 192.168.x). The dongle lives at .107; the host PC gets .108 by DHCP. The /29
-// (.104-.111) is small, so it shadows little even if a LAN happens to overlap.
-static const ip4_addr_t ipaddr  = INIT_IP4(10, 7, 7, 107);
+// 10.55.55.104/29: an obscure corner of RFC 1918 space (homes mostly use
+// 192.168.x or 10.0.0.x). The dongle lives at .105; the host PC gets .106 by
+// DHCP. The /29 (.104-.111) is small, so it shadows little even if a LAN
+// happens to overlap. Distinct from the PC-wake-dongle (10.7.7.107) so both
+// can be plugged in at once.
+static const ip4_addr_t ipaddr  = INIT_IP4(10, 55, 55, 105);
 static const ip4_addr_t netmask = INIT_IP4(255, 255, 255, 248);
 static const ip4_addr_t gateway = INIT_IP4(0, 0, 0, 0);
 
 static dhcp_entry_t dhcp_entries[] = {
-    {{0}, INIT_IP4(10, 7, 7, 108), 24 * 60 * 60},
-    {{0}, INIT_IP4(10, 7, 7, 109), 24 * 60 * 60},
-    {{0}, INIT_IP4(10, 7, 7, 110), 24 * 60 * 60},
+    {{0}, INIT_IP4(10, 55, 55, 106), 24 * 60 * 60},
+    {{0}, INIT_IP4(10, 55, 55, 107), 24 * 60 * 60},
+    {{0}, INIT_IP4(10, 55, 55, 108), 24 * 60 * 60},
 };
 
 static const dhcp_config_t dhcp_config = {
@@ -164,7 +166,6 @@ static int json_config(char *out, size_t cap) {
     const Config_body &c = get_config();
     return snprintf(out, cap,
                     "{\"version\":\"%s\","
-                    "\"speaker_volume\":%d,"
                     "\"inactive_time\":%u,"
                     "\"disable_inactive_disconnect\":%u,"
                     "\"disable_pico_led\":%u,"
@@ -172,7 +173,6 @@ static int json_config(char *out, size_t cap) {
                     "\"audio_buffer_length\":%u,"
                     "\"controller_mode\":%u}",
                     PICO_PROGRAM_VERSION_STRING,
-                    (int) c.speaker_volume,
                     c.inactive_time,
                     c.disable_inactive_disconnect,
                     c.disable_pico_led,
@@ -235,9 +235,7 @@ static void apply_post(char *body) {
         if (!eq) continue;
         *eq++ = 0;
         const int val = atoi(eq);
-        if (strcmp(tok, "speaker_volume") == 0) {
-            c.speaker_volume = (float) clampi(val, -100, 0);
-        } else if (strcmp(tok, "inactive_time") == 0) {
+        if (strcmp(tok, "inactive_time") == 0) {
             c.inactive_time = (uint8_t) clampi(val, 5, 60);
         } else if (strcmp(tok, "disable_inactive_disconnect") == 0) {
             c.disable_inactive_disconnect = val ? 1 : 0;
@@ -325,7 +323,7 @@ void usb_net_init() {
     mdns_resp_add_netif(&netif_data, "ds5config");
     httpd_init();
 
-    printf("[NET] config UI at http://10.7.7.107/ (ds5config.local best-effort)\n");
+    printf("[NET] config UI at http://10.55.55.105/ (ds5config.local best-effort)\n");
 }
 
 void usb_net_task() {

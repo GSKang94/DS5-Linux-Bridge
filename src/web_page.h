@@ -37,6 +37,7 @@ button:disabled{background:#333;color:#777;cursor:default}
     <option value="0">DualSense (DS5)</option>
     <option value="1">DualSense Edge (DSE)</option>
   </select>
+  <div class="hint">Takes effect after reconnecting the controller.</div>
 </div>
 
 <div class="field">
@@ -46,12 +47,7 @@ button:disabled{background:#333;color:#777;cursor:default}
     <option value="1">500 Hz</option>
     <option value="2">Real-time (1000 Hz)</option>
   </select>
-</div>
-
-<div class="field">
-  <label class="lbl">Speaker volume: <span id="sv_val"></span> dB</label>
-  <input type="range" id="speaker_volume" min="-100" max="0" step="1">
-  <div class="hint">-100 = muted, 0 = full.</div>
+  <div class="hint">Takes effect after reconnecting the controller.</div>
 </div>
 
 <div class="field">
@@ -86,7 +82,7 @@ const $=id=>document.getElementById(id);
 function setStatus(msg,cls){const s=$('status');s.className=cls||'';s.textContent=msg}
 
 function bindRange(id,out){const el=$(id);const fn=()=>$(out).textContent=el.value;el.oninput=()=>{fn();markDirty()};return fn}
-const upd=[bindRange('speaker_volume','sv_val'),bindRange('audio_buffer_length','ab_val'),bindRange('inactive_time','it_val')];
+const upd=[bindRange('audio_buffer_length','ab_val'),bindRange('inactive_time','it_val')];
 
 function markDirty(){$('save').disabled=false;setStatus('unsaved changes','dirty')}
 ['controller_mode','polling_rate_mode','disable_inactive_disconnect','disable_pico_led']
@@ -98,7 +94,6 @@ async function load(){
     $('ver').textContent=c.version;
     $('controller_mode').value=c.controller_mode;
     $('polling_rate_mode').value=c.polling_rate_mode;
-    $('speaker_volume').value=c.speaker_volume;
     $('audio_buffer_length').value=c.audio_buffer_length;
     $('inactive_time').value=c.inactive_time;
     $('disable_inactive_disconnect').checked=!!c.disable_inactive_disconnect;
@@ -112,7 +107,6 @@ async function save(){
   const body=[
     'controller_mode='+$('controller_mode').value,
     'polling_rate_mode='+$('polling_rate_mode').value,
-    'speaker_volume='+$('speaker_volume').value,
     'audio_buffer_length='+$('audio_buffer_length').value,
     'inactive_time='+$('inactive_time').value,
     'disable_inactive_disconnect='+($('disable_inactive_disconnect').checked?1:0),

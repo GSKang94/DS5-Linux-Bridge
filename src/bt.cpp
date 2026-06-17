@@ -615,7 +615,12 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
             if (bt_data_callback) bt_data_callback(INTERRUPT, packet, size);
 
             // 静默检测
-            if (get_config().disable_inactive_disconnect) {
+            // Skip the inactivity watchdog while the controller mic is streaming
+            // (packet[2] bit 0 set): mic-active input reports carry Opus frames
+            // instead of the idle stick/button pattern this check expects, so the
+            // watchdog mis-measures and could disconnect an actively-used headset.
+            // (Ported from upstream awalol/DS5Dongle d7fb163.)
+            if (!(packet[2] & 1) || get_config().disable_inactive_disconnect) {
                 return;
             }
             if (packet[3] < 120 || packet[3] > 140 ||

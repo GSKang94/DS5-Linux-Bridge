@@ -186,17 +186,29 @@ add_subdirectory(lib/opus)
 # called => never XIP-fetched), ~21 KB of heap reclaimed. (Upstream relocated the
 # whole library wholesale via one objcopy for submodule-pristine convenience, not
 # because all of it is per-frame hot; this fork has heap pressure they did not.)
+# NOTE: `ar x` extracts members into the process's working directory, and the
+# subsequent objcopy/`ar r`/rm must all agree on that directory. add_custom_command
+# does not guarantee a stable CWD (it differs between an in-source `build/` and an
+# out-of-tree dir like the release CI's `build/standard`), which made objcopy fail
+# with "analysis.c.obj: No such file". Pin an explicit scratch dir and reference the
+# extracted members by absolute path so the sequence is build-dir-independent.
+set(OPUS_RELOC_DIR ${CMAKE_BINARY_DIR}/opus_reloc)
+# Create the scratch dir at CONFIGURE time so WORKING_DIRECTORY below can cd into
+# it on the very first command (a build-time `make_directory` would be too late --
+# the shell cd's before running it).
+file(MAKE_DIRECTORY ${OPUS_RELOC_DIR})
 add_custom_command(
     OUTPUT ${CMAKE_BINARY_DIR}/opus_ram_relocate.stamp
     COMMAND ${CMAKE_OBJCOPY} --rename-section .text=.time_critical.opus_text --rename-section .rodata=.time_critical.opus_rodata --rename-section .rodata.str1.4=.time_critical.opus_strings $<TARGET_FILE:opus>
     # Un-relocate the never-executed analysis path back to flash. Extract the two
-    # members, reverse the section renames, and replace them in the archive.
+    # members into OPUS_RELOC_DIR, reverse the section renames, replace them.
     COMMAND ${CMAKE_AR} x $<TARGET_FILE:opus> analysis.c.obj mlp_data.c.obj
     COMMAND ${CMAKE_OBJCOPY} --rename-section .time_critical.opus_text=.text --rename-section .time_critical.opus_rodata=.rodata --rename-section .time_critical.opus_strings=.rodata.str1.4 analysis.c.obj
     COMMAND ${CMAKE_OBJCOPY} --rename-section .time_critical.opus_text=.text --rename-section .time_critical.opus_rodata=.rodata --rename-section .time_critical.opus_strings=.rodata.str1.4 mlp_data.c.obj
     COMMAND ${CMAKE_AR} r $<TARGET_FILE:opus> analysis.c.obj mlp_data.c.obj
     COMMAND ${CMAKE_COMMAND} -E rm -f analysis.c.obj mlp_data.c.obj
     COMMAND ${CMAKE_COMMAND} -E touch ${CMAKE_BINARY_DIR}/opus_ram_relocate.stamp
+    WORKING_DIRECTORY ${OPUS_RELOC_DIR}
     DEPENDS $<TARGET_FILE:opus>
     COMMENT "Relocating libopus to RAM (tonality analyzer kept in flash)"
     VERBATIM

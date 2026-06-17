@@ -30,12 +30,31 @@ if (EXISTS ${picoVscode})
 endif ()
 # ====================================================================================
 
+option(PICO_W_BUILD "Build for Rasberry Pi Pico W (RP2040, audio is missing)" OFF)
+option(WAVESHARE_RP2350B_PLUS_W_BUILD "Build for Waveshare RP2350B-Plus-W (USB-C, 16MB flash, RM2 wireless)" OFF)
+
+if (PICO_W_BUILD AND WAVESHARE_RP2350B_PLUS_W_BUILD)
+        message(FATAL_ERROR "PICO_W_BUILD and WAVESHARE_RP2350B_PLUS_W_BUILD are mutually exclusive")
+endif ()
+
 if (PICO_W_BUILD)
         set(PICO_BOARD pico_w CACHE STRING "Board type")
         set(PICO_RP2350 OFF CACHE BOOL "Not using RP2350")
+elseif (WAVESHARE_RP2350B_PLUS_W_BUILD)
+        set(PICO_BOARD waveshare_rp2350b_plus_w CACHE STRING "Board type")
+        # The Waveshare board header is not in upstream pico-sdk; ship it here
+        # and tell the SDK to search this directory when resolving PICO_BOARD.
+        # It wires the RM2/CYW43 module to different RP2350 GPIOs than the Pico 2 W
+        # (WL_REG_ON GP36, WL_DATA GP37, WL_CS GP38, WL_CLOCK GP39), so a stock
+        # pico2_w build can't drive the radio on this board.
+        list(APPEND PICO_BOARD_HEADER_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/boards/headers")
 else ()
         set(PICO_BOARD pico2_w CACHE STRING "Board type")
 endif ()
+
+message(STATUS "DS5-Linux-Bridge build target -- PICO_BOARD=${PICO_BOARD}")
+message(STATUS "DS5-Linux-Bridge build target -- PICO_W_BUILD=${PICO_W_BUILD}")
+message(STATUS "DS5-Linux-Bridge build target -- WAVESHARE_RP2350B_PLUS_W_BUILD=${WAVESHARE_RP2350B_PLUS_W_BUILD}")
 #set(PICO_CYW43_SUPPORTED 1)
 #set(PICO_CYW43_ARCH_THREADSAFE_BACKGROUND 1)
 
@@ -70,13 +89,14 @@ if (DISABLE_SPEAKER_PROC)
 else ()
         set(DISABLE_SPEAKER_PROC_VALUE 0)
 endif ()
-option(PICO_W_BUILD "Build for Rasberry Pi Pico W, audio is missing" OFF)
+# Per-board clock / PIO config (PICO_W_BUILD declared near the top).
 if (PICO_W_BUILD)
         set(CYW43_PIO_CLOCK_DIV_VALUE 3)
         set(SYS_CLOCK_KHZ_VALUE 200000)
         set(DISABLE_SPEAKER_PROC_VALUE 1)
 else ()
-        # Stock RP2350 clock. Selective RAM relocation (relocate_to_ram) keeps the
+        # Both RP2350 targets (Pico 2 W and Waveshare RP2350B-Plus-W) run the
+        # stock 150 MHz clock. Selective RAM relocation (relocate_to_ram) keeps the
         # hot paths out of flash XIP, so no overclock is needed for stable audio +
         # 1000Hz polling. PIO div 2 matches the 150 MHz system clock.
         set(CYW43_PIO_CLOCK_DIV_VALUE 2)
@@ -185,6 +205,27 @@ add_custom_target(opus_ram_relocate ALL DEPENDS ${CMAKE_BINARY_DIR}/opus_ram_rel
 add_dependencies(ds5-bridge opus_ram_relocate)
 
 target_compile_options(ds5-bridge PRIVATE -fsigned-char)
+
+# Flash XIP timing. boot2 (w25q080) applies PICO_FLASH_SPI_CLKDIV; div 2 gives a
+# safe flash SPI clock at our stock 150 MHz system clock (a higher overclock
+# would need div 4). On RP2350 boot2 only runs when PICO_EMBED_XIP_SETUP=1.
+if (${SYS_CLOCK_KHZ_VALUE} GREATER 266000)
+        set(PICO_FLASH_SPI_CLKDIV 4)
+else ()
+        set(PICO_FLASH_SPI_CLKDIV 2)
+endif ()
+target_compile_definitions(bs2_default PRIVATE PICO_FLASH_SPI_CLKDIV=${PICO_FLASH_SPI_CLKDIV})
+
+if (WAVESHARE_RP2350B_PLUS_W_BUILD)
+        # The Waveshare board ships a Puya PY25Q128HA flash (not the schematic's
+        # Winbond). Without forcing boot2 to run, the bootrom auto-detects from
+        # SFDP and leaves XIP at CLKDIV=3 + Fast Read Dual I/O, which exceeds
+        # Puya's dual-mode spec and intermittently corrupts XIP reads (choppy
+        # audio). PICO_EMBED_XIP_SETUP=1 makes boot2_w25q080 actually run and
+        # apply our PICO_FLASH_SPI_CLKDIV above + Fast Read Quad I/O.
+        target_compile_definitions(ds5-bridge PRIVATE PICO_EMBED_XIP_SETUP=1)
+endif ()
+
 target_compile_definitions(ds5-bridge PRIVATE
         CYW43_LWIP=0
         # 0 (not 1): flash_safe_execute() must really park core1 while flash is

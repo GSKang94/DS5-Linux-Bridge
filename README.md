@@ -167,6 +167,20 @@ crackling — only do so when actually debugging.
 3. To disable the low-battery warning LED blink, configure with
    `-DENABLE_BATT_LED=OFF`.
 
+### Board targets
+
+The default build targets the **Raspberry Pi Pico 2 W** (RP2350). Two other
+boards are supported via CMake options (mutually exclusive):
+
+| Board | Configure with | Notes |
+| --- | --- | --- |
+| Raspberry Pi Pico 2 W (RP2350) | *(default)* | Full feature set. |
+| Waveshare RP2350B-Plus-W | `-DWAVESHARE_RP2350B_PLUS_W_BUILD=ON` | USB-C, 16 MB flash, RM2 wireless. Ships its own board header (the RM2 module is on different GPIOs than the Pico 2 W) and forces boot2 XIP setup for its Puya flash. A convenience script lives at `boards/build_waveshare_rp2350b_plus_w.sh`. |
+| Raspberry Pi Pico W (RP2040) | `-DPICO_W_BUILD=ON` | Legacy RP2040; **no audio** (gamepad + haptics only). |
+
+The release builds publish UF2s for the Pico 2 W (standard + verbose) and the
+Waveshare board.
+
 ---
 
 ## Configuration

@@ -105,6 +105,18 @@ jobs:
           cmake --build build/debug --target ds5-bridge
           cp build/debug/ds5-bridge.uf2 "artifacts/ds5-bridge-debug-${{ github.event.release.tag_name }}.uf2"
 
+      - name: Build Waveshare RP2350B-Plus-W firmware
+        # USB-C / 16MB-flash Pico 2 W alternative. Different RM2 GPIO wiring +
+        # forced boot2 XIP setup for its Puya flash (see CMakeLists.txt).
+        run: |
+          cmake -S . -B build/waveshare -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPICO_SDK_PATH="$PICO_SDK_PATH" \
+            -DWAVESHARE_RP2350B_PLUS_W_BUILD=ON \
+            -DVERSION="$FIRMWARE_VERSION"
+          cmake --build build/waveshare --target ds5-bridge
+          cp build/waveshare/ds5-bridge.uf2 "artifacts/ds5-bridge-waveshare-${{ github.event.release.tag_name }}.uf2"
+
       - name: Upload UF2 files to release
         env:
           GH_TOKEN: ${{ github.token }}

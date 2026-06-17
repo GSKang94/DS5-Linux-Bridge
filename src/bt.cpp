@@ -319,6 +319,31 @@ bool bt_connected_addr(uint8_t *addr_out) {
     return true;
 }
 
+// The latest gamepad input report; byte 52 carries the DualSense battery state
+// (same byte battery_led.cpp watches). Defined in main.cpp.
+extern uint8_t interrupt_in_data[63];
+
+void bt_get_status(BtStatus *out) {
+    if (!out) return;
+    out->connected = (acl_handle != HCI_CON_HANDLE_INVALID);
+    out->is_dse = is_dse;
+
+    // DS5 battery byte: low nibble = level (0-10 -> 0-100% in 10% steps),
+    // high nibble = power state (0 discharging, 1 charging, 2 full).
+    const uint8_t b   = interrupt_in_data[52];
+    const uint8_t lvl = b & 0x0F;
+    const uint8_t st  = (b >> 4) & 0x0F;
+    // The byte is 0 before any report arrives; treat a connected controller with
+    // a non-zero byte as valid. (A genuinely 0%/discharging pad reads 0x00 too,
+    // but that is the critical-low case the LED already flags, so reporting it as
+    // "unknown" briefly until the next report is harmless.)
+    out->battery_valid = out->connected && (b != 0);
+    uint16_t pct = (uint16_t) lvl * 10;
+    if (pct > 100) pct = 100;
+    out->battery_pct = (uint8_t) pct;
+    out->charging = (st == 0x1 || st == 0x2); // charging or full
+}
+
 void bt_l2cap_init() {
     l2cap_event_callback_registration.callback = &l2cap_packet_handler;
     l2cap_add_event_handler(&l2cap_event_callback_registration);

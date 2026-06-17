@@ -287,6 +287,25 @@ static int json_bonds(char *out, size_t cap) {
     return w;
 }
 
+// GET /api/status -- live controller health for the web UI and the Decky
+// plugin (read-only; no config side effects). Cheap snapshot of state the
+// firmware already tracks.
+static int json_status(char *out, size_t cap) {
+    BtStatus s;
+    bt_get_status(&s);
+    return snprintf(out, cap,
+                    "{\"connected\":%s,"
+                    "\"model\":\"%s\","
+                    "\"battery_valid\":%s,"
+                    "\"battery_pct\":%u,"
+                    "\"charging\":%s}",
+                    s.connected ? "true" : "false",
+                    s.is_dse ? "DSE" : "DS5",
+                    s.battery_valid ? "true" : "false",
+                    s.battery_pct,
+                    s.charging ? "true" : "false");
+}
+
 extern "C" int fs_open_custom(struct fs_file *file, const char *name) {
     if (strcmp(name, "/") == 0 || strcmp(name, "/index.html") == 0) {
         return make_file(file, "200 OK", "text/html; charset=utf-8",
@@ -302,6 +321,10 @@ extern "C" int fs_open_custom(struct fs_file *file, const char *name) {
     }
     if (strcmp(name, "/api/bonds") == 0) {
         const int len = json_bonds(body, sizeof(body));
+        return make_file(file, "200 OK", "application/json", body, len);
+    }
+    if (strcmp(name, "/api/status") == 0) {
+        const int len = json_status(body, sizeof(body));
         return make_file(file, "200 OK", "application/json", body, len);
     }
     if (strcmp(name, "/404.html") == 0) {

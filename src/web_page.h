@@ -36,9 +36,29 @@ h2{font-size:1.1rem;margin-bottom:.3rem}
 .bond button.fg{background:#7f1d1d}
 .btns{display:flex;gap:.5rem;align-items:center}
 #bonds_empty{color:#888;font-size:.9rem}
+#statuscard{display:flex;align-items:center;gap:1rem;flex-wrap:wrap;background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:.7rem 1rem;margin:1rem 0}
+#statuscard .dot{width:.6rem;height:.6rem;border-radius:50%;background:#555;flex:none}
+#statuscard.on .dot{background:#4ade80}
+#statuscard .s{font-size:.9rem}
+#statuscard .s b{color:#fff}
+#statuscard .muted{color:#888}
+.batt{display:inline-flex;align-items:center;gap:.35rem}
+.batt .bar{width:34px;height:14px;border:1px solid #888;border-radius:2px;position:relative;padding:1px}
+.batt .bar::after{content:"";position:absolute;right:-3px;top:4px;width:2px;height:6px;background:#888}
+.batt .fill{height:100%;background:#4ade80;border-radius:1px}
+.batt.low .fill{background:#f87171}
 </style></head><body>
 <h1>DS5-Linux-Bridge <small id="ver"></small></h1>
 <p>Adapter configuration. Changes are saved to the adapter's flash.</p>
+
+<div id="statuscard">
+  <span class="dot"></span>
+  <span class="s" id="st_conn">Checking…</span>
+  <span class="s batt" id="st_batt" style="display:none">
+    <span class="bar"><span class="fill" id="st_fill"></span></span>
+    <span id="st_pct"></span>
+  </span>
+</div>
 
 <div class="field">
   <label class="lbl">Controller mode</label>
@@ -211,8 +231,31 @@ $('forgetall').onclick=()=>{
   postBonds('action=forgetall','forgetting all…');
 };
 
+// ----- Live status (GET /api/status) -----
+async function loadStatus(){
+  try{
+    const s=await (await fetch('/api/status')).json();
+    const card=$('statuscard');
+    card.className=s.connected?'on':'';
+    if(s.connected){
+      $('st_conn').innerHTML='<b>'+(s.model==='DSE'?'DualSense Edge':'DualSense')+'</b> connected';
+      if(s.battery_valid){
+        $('st_batt').style.display='';
+        $('st_pct').textContent=s.battery_pct+'%'+(s.charging?' ⚡':'');
+        const f=$('st_fill');f.style.width=s.battery_pct+'%';
+        $('st_batt').className='s batt'+((s.battery_pct<=20&&!s.charging)?' low':'');
+      }else{$('st_batt').style.display='none'}
+    }else{
+      $('st_conn').textContent='No controller connected';
+      $('st_batt').style.display='none';
+    }
+  }catch(e){$('st_conn').textContent='status unavailable'}
+}
+
 load();
 loadBonds();
+loadStatus();
+setInterval(loadStatus,4000);
 </script></body></html>
 )rawhtml";
 

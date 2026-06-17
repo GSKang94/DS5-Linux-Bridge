@@ -36,6 +36,21 @@ void bt_get_diag(BtDiag *out);
 void bt_reset_diag();
 #endif
 void bt_get_signal_strength(int8_t *rssi);
+
+// Live controller status for the web UI / Decky plugin (GET /api/status).
+// All fields are cheap reads of data the firmware already tracks. battery_pct
+// and charging are only meaningful when connected (and after the first 0x31
+// report). (RSSI was intentionally omitted: BR/EDR HCI_Read_RSSI is relative to
+// the Golden Receive Power Range and reads ~0 in normal use -- not a useful
+// signal-strength number to surface.)
+struct BtStatus {
+    bool    connected;
+    bool    is_dse;       // true = DualSense Edge, false = standard DualSense
+    uint8_t battery_pct;  // 0-100 (DS5 reports in 10% steps); 0 if unknown
+    bool    charging;     // true while the controller is charging or full
+    bool    battery_valid;// false until a fresh input report has been seen
+};
+void bt_get_status(BtStatus *out);
 std::vector<uint8_t> get_feature_data(uint8_t reportId,uint16_t len);
 void init_feature();
 void set_feature_data(uint8_t reportId, uint8_t* data,uint16_t len);

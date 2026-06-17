@@ -48,4 +48,33 @@ void bt_dualsense_power_off();
 // Tick connection watchdog. Call from main loop.
 void bt_connection_watchdog_tick();
 
+//--------------------------------------------------------------------+
+// Paired-device (bond) management, exposed to the web config UI.
+// Bonds are BR/EDR link keys persisted by BTstack in its flash TLV bank
+// (capacity NVM_NUM_LINK_KEYS). These wrap the BTstack gap_* link-key API so
+// usb_net.cpp doesn't pull in btstack headers. All run on the core0 main-loop
+// context (same as the btstack run loop), so no extra locking is needed.
+//--------------------------------------------------------------------+
+
+// Number of bytes in a Bluetooth address (matches btstack bd_addr_t).
+#define BT_ADDR_LEN 6
+
+// Copy up to `max` stored bond addresses into addrs (each BT_ADDR_LEN bytes).
+// Returns the number written.
+int bt_bond_list(uint8_t (*addrs)[BT_ADDR_LEN], int max);
+
+// Forget a single bond by address (6 bytes). Returns true if it was issued.
+bool bt_bond_forget(const uint8_t *addr);
+
+// Forget every stored bond.
+void bt_bond_forget_all();
+
+// If a controller is currently connected, copy its address into addr_out
+// (BT_ADDR_LEN bytes) and return true; otherwise return false.
+bool bt_connected_addr(uint8_t *addr_out);
+
+// Flush the forgotten-controller blacklist to flash if it changed (deferred
+// from the HID-open hot path). Call every main-loop iteration.
+void bt_blacklist_persist_if_dirty();
+
 #endif //DS5_BRIDGE_BT_H

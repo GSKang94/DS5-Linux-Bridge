@@ -10,10 +10,11 @@
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 #include "pico/cyw43_arch.h"
+#include "pico/flash.h" // flash_safe_execute(): park core1 during the flash op
 #include "utils.h"
 
 constexpr uint32_t CONFIG_MAGIC = 0x66ccff00;
-constexpr uint16_t CONFIG_VERSION = 3;
+constexpr uint16_t CONFIG_VERSION = 4; // v4 added Config_body.bond_names
 constexpr uint32_t CONFIG_FLASH_OFFSET =
     PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE;
 static Config config{};
@@ -86,12 +87,37 @@ void config_valid() {
     body->config_version = CONFIG_VERSION;
     printf("[Config] Warning: Config may breaking change\n");
   }
+  // Defensive: guarantee every bond name is NUL-terminated so corrupt flash
+  // can never yield an unbounded C string when the web UI reads it.
+  for (auto &b : body->bond_names) {
+    b.name[CONFIG_BOND_NAME_LEN - 1] = '\0';
+  }
 }
 
 void config_load() {
   memcpy(&config, flash_config(), sizeof(Config));
 
+  // Migration: bond_names was added in config v4. If the flash holds an older
+  // (or uninitialized/0xFF) config, that region is garbage -- zero it so we
+  // start with no nicknames rather than random bytes. config_valid() (below)
+  // bumps the version field afterwards.
+  if (config.version != CONFIG_VERSION) {
+    memset(config.body.bond_names, 0, sizeof(config.body.bond_names));
+  }
+
   config_valid();
+}
+
+// Runs with core1 parked (flash_safe_execute) and core0 interrupts disabled, so
+// neither core touches XIP flash while the sector is erased/programmed. Without
+// the core1 park this races the audio core and corrupts audio (buzzing) -- or
+// faults -- when saving during playback (e.g. bond rename while connected).
+static void config_save_flash_op(void *param) {
+  const uint8_t *page = static_cast<const uint8_t *>(param);
+  const uint32_t interrupts = save_and_disable_interrupts();
+  flash_range_erase(CONFIG_FLASH_OFFSET, FLASH_SECTOR_SIZE);
+  flash_range_program(CONFIG_FLASH_OFFSET, page, FLASH_PAGE_SIZE);
+  restore_interrupts(interrupts);
 }
 
 bool config_save() {
@@ -100,10 +126,11 @@ bool config_save() {
   memset(page, 0xff, sizeof(page));
   memcpy(page, &config, sizeof(Config));
 
-  const uint32_t interrupts = save_and_disable_interrupts();
-  flash_range_erase(CONFIG_FLASH_OFFSET, FLASH_SECTOR_SIZE);
-  flash_range_program(CONFIG_FLASH_OFFSET, page, sizeof(page));
-  restore_interrupts(interrupts);
+  const int rc = flash_safe_execute(config_save_flash_op, page, 1000);
+  if (rc != PICO_OK) {
+    printf("[Config] config_save flash_safe_execute failed: %d\n", rc);
+    return false;
+  }
 
   Config verify{};
   memcpy(&verify, flash_config(), sizeof(verify));
@@ -127,6 +154,67 @@ void set_config(const uint8_t *new_config, const uint16_t len) {
   } else {
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, true);
   }
+}
+
+//--------------------------------------------------------------------+
+// Bond-name table helpers. An all-zero addr marks an empty slot.
+//--------------------------------------------------------------------+
+
+static bool addr_is_zero(const uint8_t *a) {
+  for (int i = 0; i < CONFIG_BOND_ADDR_LEN; i++)
+    if (a[i]) return false;
+  return true;
+}
+
+static bool addr_eq(const uint8_t *a, const uint8_t *b) {
+  return memcmp(a, b, CONFIG_BOND_ADDR_LEN) == 0;
+}
+
+const char *config_bond_name(const uint8_t *addr) {
+  if (!addr) return nullptr;
+  for (auto &b : config.body.bond_names) {
+    if (!addr_is_zero(b.addr) && addr_eq(b.addr, addr)) return b.name;
+  }
+  return nullptr;
+}
+
+void config_clear_bond_name(const uint8_t *addr) {
+  if (!addr) return;
+  for (auto &b : config.body.bond_names) {
+    if (!addr_is_zero(b.addr) && addr_eq(b.addr, addr)) {
+      memset(&b, 0, sizeof(b));
+    }
+  }
+}
+
+bool config_set_bond_name(const uint8_t *addr, const char *name) {
+  if (!addr || addr_is_zero(addr)) return false;
+  if (!name) name = "";
+
+  // Blank/whitespace-only name clears the slot instead of storing it.
+  bool blank = true;
+  for (const char *p = name; *p; p++)
+    if (*p != ' ' && *p != '\t') { blank = false; break; }
+  if (blank) {
+    config_clear_bond_name(addr);
+    return true;
+  }
+
+  BondName *slot = nullptr;
+  for (auto &b : config.body.bond_names) {
+    if (!addr_is_zero(b.addr) && addr_eq(b.addr, addr)) { slot = &b; break; }
+  }
+  if (!slot) {
+    for (auto &b : config.body.bond_names) {
+      if (addr_is_zero(b.addr)) { slot = &b; break; }
+    }
+  }
+  if (!slot) return false; // table full
+
+  memcpy(slot->addr, addr, CONFIG_BOND_ADDR_LEN);
+  strncpy(slot->name, name, CONFIG_BOND_NAME_LEN - 1);
+  slot->name[CONFIG_BOND_NAME_LEN - 1] = '\0';
+  return true;
 }
 
 void set_config(const Config_body &new_config) {

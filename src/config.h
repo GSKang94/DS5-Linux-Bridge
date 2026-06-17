@@ -7,6 +7,18 @@
 
 #include <cstdint>
 
+// User-assignable nicknames for paired controllers, shown in the web UI.
+// Keyed by Bluetooth address; capacity mirrors btstack's NVM_NUM_LINK_KEYS (4).
+// Kept small so the whole Config still fits in one 256-byte flash page.
+#define CONFIG_MAX_BOND_NAMES 4
+#define CONFIG_BOND_ADDR_LEN  6
+#define CONFIG_BOND_NAME_LEN  16 // 15 chars + NUL
+
+struct __attribute__((packed)) BondName {
+    uint8_t addr[CONFIG_BOND_ADDR_LEN]; // all-zero == empty slot
+    char    name[CONFIG_BOND_NAME_LEN]; // NUL-terminated; "" == unnamed
+};
+
 struct __attribute__((packed)) Config_body {
     uint8_t config_version; // Config Version
     float speaker_volume; // [-100,0]
@@ -17,6 +29,7 @@ struct __attribute__((packed)) Config_body {
     uint8_t audio_buffer_length; // [16,128]
     uint8_t controller_mode; // 0: DS5, 1: DSE, 2: Auto
     uint8_t webconfig_subnet; // index into the vetted /29 subnet table [0,2]
+    BondName bond_names[CONFIG_MAX_BOND_NAMES]; // nicknames for paired controllers
 };
 
 struct __attribute__((packed)) Config {
@@ -34,6 +47,22 @@ const Config_body& get_config();
 void set_config(const uint8_t *new_config, const uint16_t len);
 void config_valid();
 void set_config(const Config_body &new_config);
+
+// Bond-name table (nicknames keyed by Bluetooth address). These mutate the
+// in-RAM config; the caller persists with config_save() when ready.
+
+// Look up the nickname for `addr` (CONFIG_BOND_ADDR_LEN bytes). Returns the
+// stored name (may be "") if a slot matches, or nullptr if none does.
+const char *config_bond_name(const uint8_t *addr);
+
+// Assign `name` to `addr`, reusing an existing slot for that address or the
+// first empty slot. An empty/blank name clears the slot. Returns false if
+// there was no slot free for a new address. Does NOT call config_save().
+bool config_set_bond_name(const uint8_t *addr, const char *name);
+
+// Clear the name slot for `addr` (e.g. when its bond is forgotten).
+void config_clear_bond_name(const uint8_t *addr);
+
 extern bool is_dse;
 
 #endif //DS5_BRIDGE_CONFIG_H

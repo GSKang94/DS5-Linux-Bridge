@@ -12,6 +12,7 @@
 #include "opus.h"
 #include "utils.h"
 #include "pico/multicore.h"
+#include "pico/flash.h" // flash_safe_execute_core_init(): park core1 during config_save
 #if ENABLE_DIAG
 #include "pico/time.h"
 #endif
@@ -330,6 +331,10 @@ static void fast_resample_512_to_480(const float* in, float* out) {
 }
 
 void core1_entry() {
+    // Register core1 as a flash-safe victim so core0's flash_safe_execute()
+    // (config_save) actually parks this core while flash is erased/programmed,
+    // instead of letting it fault on XIP. Requires PICO_FLASH_ASSUME_CORE1_SAFE=0.
+    flash_safe_execute_core_init();
     int error = 0;
     encoder = opus_encoder_create(48000, 2,OPUS_APPLICATION_AUDIO, &error);
     if (error != 0) {

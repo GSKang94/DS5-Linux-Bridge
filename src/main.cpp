@@ -404,6 +404,7 @@ int main() {
                       static_cast<uint32_t>(time_us_64() - section_start_us));
 #endif
     bt_connection_watchdog_tick();
+    bt_blacklist_persist_if_dirty();
     bt_pump();
 #if ENABLE_DIAG
     section_start_us = time_us_64();

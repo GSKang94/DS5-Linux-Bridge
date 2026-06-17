@@ -36,6 +36,7 @@
 #include "pico/time.h"
 #include "pico/unique_id.h"
 
+#include "bt.h"
 #include "config.h"
 #include "web_page.h"
 
@@ -199,14 +200,108 @@ static int json_config(char *out, size_t cap) {
                     c.webconfig_subnet);
 }
 
+//--------------------------------------------------------------------+
+// Paired-controller (bond) management API: GET /api/bonds (list) and
+// POST /api/bonds (forget / forgetall / rename). Bonds live in BTstack's
+// flash; nicknames live in our Config flash, reconciled here by address.
+//--------------------------------------------------------------------+
+
+// "AABBCCDDEEFF" (12 hex, no separators -- compact and trivial to parse).
+static void addr_to_hex(const uint8_t *a, char out[13]) {
+    static const char h[] = "0123456789ABCDEF";
+    for (int i = 0; i < 6; i++) {
+        out[i * 2]     = h[(a[i] >> 4) & 0xf];
+        out[i * 2 + 1] = h[a[i] & 0xf];
+    }
+    out[12] = '\0';
+}
+
+// Parse exactly 12 hex chars into a[6]. Returns true on success.
+static bool hex_to_addr(const char *s, uint8_t a[6]) {
+    if (!s) return false;
+    uint8_t bytes[6];
+    for (int i = 0; i < 6; i++) {
+        char c = s[i * 2], d = s[i * 2 + 1];
+        if (!c || !d) return false;
+        auto nib = [](char x) -> int {
+            if (x >= '0' && x <= '9') return x - '0';
+            if (x >= 'a' && x <= 'f') return x - 'a' + 10;
+            if (x >= 'A' && x <= 'F') return x - 'A' + 10;
+            return -1;
+        };
+        int hi = nib(c), lo = nib(d);
+        if (hi < 0 || lo < 0) return false;
+        bytes[i] = (uint8_t) ((hi << 4) | lo);
+    }
+    if (s[12] != '\0') return false; // trailing junk
+    memcpy(a, bytes, 6);
+    return true;
+}
+
+// Append a JSON string literal (with quotes) for `s`, escaping " and \.
+// Returns chars written (0 if it wouldn't fit).
+static int json_str(char *out, size_t cap, const char *s) {
+    size_t i = 0;
+    if (cap < 3) return 0;
+    out[i++] = '"';
+    for (const char *p = s; *p; p++) {
+        char c = *p;
+        if (c == '"' || c == '\\') {
+            if (i + 2 >= cap - 1) break;
+            out[i++] = '\\';
+            out[i++] = c;
+        } else if ((unsigned char) c < 0x20) {
+            continue; // drop control chars
+        } else {
+            if (i + 1 >= cap - 1) break;
+            out[i++] = c;
+        }
+    }
+    out[i++] = '"';
+    out[i] = '\0';
+    return (int) i;
+}
+
+static int json_bonds(char *out, size_t cap) {
+    uint8_t list[CONFIG_MAX_BOND_NAMES][BT_ADDR_LEN];
+    const int n = bt_bond_list(list, CONFIG_MAX_BOND_NAMES);
+
+    uint8_t conn[BT_ADDR_LEN];
+    const bool have_conn = bt_connected_addr(conn);
+    char conn_hex[13] = "";
+    if (have_conn) addr_to_hex(conn, conn_hex);
+
+    int w = snprintf(out, cap, "{\"connected\":\"%s\",\"max\":%d,\"bonds\":[",
+                     conn_hex, CONFIG_MAX_BOND_NAMES);
+    for (int i = 0; i < n && w < (int) cap; i++) {
+        char hex[13];
+        addr_to_hex(list[i], hex);
+        const char *nm = config_bond_name(list[i]);
+        if (!nm) nm = "";
+        w += snprintf(out + w, cap - w, "%s{\"addr\":\"%s\",\"name\":",
+                      i ? "," : "", hex);
+        if (w < (int) cap) w += json_str(out + w, cap - w, nm);
+        if (w < (int) cap) w += snprintf(out + w, cap - w, "}");
+    }
+    if (w < (int) cap) w += snprintf(out + w, cap - w, "]}");
+    return w;
+}
+
 extern "C" int fs_open_custom(struct fs_file *file, const char *name) {
     if (strcmp(name, "/") == 0 || strcmp(name, "/index.html") == 0) {
         return make_file(file, "200 OK", "text/html; charset=utf-8",
                          WEB_PAGE, sizeof(WEB_PAGE) - 1);
     }
+    // Shared JSON scratch: make_file() copies the body into its own malloc'd
+    // buffer before returning, and httpd serves one custom file at a time, so a
+    // single static buffer is safe for both JSON routes (saves BSS -> heap).
+    static char body[512];
     if (strcmp(name, "/api/config") == 0) {
-        static char body[512];
         const int len = json_config(body, sizeof(body));
+        return make_file(file, "200 OK", "application/json", body, len);
+    }
+    if (strcmp(name, "/api/bonds") == 0) {
+        const int len = json_bonds(body, sizeof(body));
         return make_file(file, "200 OK", "application/json", body, len);
     }
     if (strcmp(name, "/404.html") == 0) {
@@ -242,8 +337,32 @@ extern "C" int fs_read_custom(struct fs_file *file, char *buffer, int count) {
 static char post_buf[POST_BUFSIZE];
 static u16_t post_pos;
 static void *post_conn;
+static bool post_is_bonds; // which endpoint the in-flight POST targets
 
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+// In-place URL-decode (%XX and '+' -> space) of a form field value.
+static void url_decode(char *s) {
+    char *w = s;
+    for (char *r = s; *r; r++) {
+        if (*r == '+') {
+            *w++ = ' ';
+        } else if (*r == '%' && r[1] && r[2]) {
+            auto nib = [](char x) -> int {
+                if (x >= '0' && x <= '9') return x - '0';
+                if (x >= 'a' && x <= 'f') return x - 'a' + 10;
+                if (x >= 'A' && x <= 'F') return x - 'A' + 10;
+                return -1;
+            };
+            int hi = nib(r[1]), lo = nib(r[2]);
+            if (hi >= 0 && lo >= 0) { *w++ = (char) ((hi << 4) | lo); r += 2; }
+            else *w++ = *r;
+        } else {
+            *w++ = *r;
+        }
+    }
+    *w = '\0';
+}
 
 static void apply_post(char *body) {
     Config_body c = get_config(); // start from current, overwrite parsed fields
@@ -277,6 +396,63 @@ static void apply_post(char *body) {
     printf("[NET] config saved via web UI\n");
 }
 
+// POST /api/bonds -- form fields:
+//   action = forget | forgetall | rename
+//   addr   = 12 hex chars (forget, rename)
+//   name   = nickname (rename; URL-encoded, clamped to CONFIG_BOND_NAME_LEN-1)
+// Forgetting also clears any stored nickname so the name table can't outlive
+// the bond. Everything is reconciled against the live BTstack bond list.
+static void apply_bonds_post(char *body) {
+    char action[16] = "";
+    char addr_hex[16] = "";
+    char name[CONFIG_BOND_NAME_LEN] = "";
+
+    for (char *tok = strtok(body, "&"); tok; tok = strtok(nullptr, "&")) {
+        char *eq = strchr(tok, '=');
+        if (!eq) continue;
+        *eq++ = 0;
+        if (strcmp(tok, "action") == 0) {
+            strncpy(action, eq, sizeof(action) - 1);
+        } else if (strcmp(tok, "addr") == 0) {
+            strncpy(addr_hex, eq, sizeof(addr_hex) - 1);
+        } else if (strcmp(tok, "name") == 0) {
+            url_decode(eq);
+            strncpy(name, eq, sizeof(name) - 1);
+        }
+    }
+
+    if (strcmp(action, "forgetall") == 0) {
+        bt_bond_forget_all();
+        // Wipe all nicknames too (no bonds left to name).
+        Config_body c = get_config();
+        memset(c.bond_names, 0, sizeof(c.bond_names));
+        set_config(c);
+        watchdog_update();
+        config_save();
+        printf("[NET] forget all bonds via web UI\n");
+        return;
+    }
+
+    uint8_t addr[6];
+    if (!hex_to_addr(addr_hex, addr)) {
+        printf("[NET] bonds POST: bad addr '%s'\n", addr_hex);
+        return;
+    }
+
+    if (strcmp(action, "forget") == 0) {
+        bt_bond_forget(addr);
+        config_clear_bond_name(addr);
+        watchdog_update();
+        config_save();
+        printf("[NET] forget bond via web UI\n");
+    } else if (strcmp(action, "rename") == 0) {
+        config_set_bond_name(addr, name);
+        watchdog_update();
+        config_save();
+        printf("[NET] rename bond via web UI\n");
+    }
+}
+
 extern "C" err_t httpd_post_begin(void *connection, const char *uri, const char *http_request,
                                   u16_t http_request_len, int content_len, char *response_uri,
                                   u16_t response_uri_len, u8_t *post_auto_wnd) {
@@ -285,10 +461,13 @@ extern "C" err_t httpd_post_begin(void *connection, const char *uri, const char 
     (void) response_uri;
     (void) response_uri_len;
     (void) post_auto_wnd;
-    if (strcmp(uri, "/api/config") != 0 || content_len >= POST_BUFSIZE) return ERR_VAL;
+    const bool is_config = strcmp(uri, "/api/config") == 0;
+    const bool is_bonds  = strcmp(uri, "/api/bonds") == 0;
+    if ((!is_config && !is_bonds) || content_len >= POST_BUFSIZE) return ERR_VAL;
     if (post_conn) return ERR_USE; // one POST at a time
     post_conn = connection;
     post_pos = 0;
+    post_is_bonds = is_bonds;
     return ERR_OK;
 }
 
@@ -306,8 +485,13 @@ extern "C" err_t httpd_post_receive_data(void *connection, struct pbuf *p) {
 extern "C" void httpd_post_finished(void *connection, char *response_uri, u16_t response_uri_len) {
     if (connection != post_conn) return;
     post_conn = nullptr;
-    apply_post(post_buf);
-    snprintf(response_uri, response_uri_len, "/api/config");
+    if (post_is_bonds) {
+        apply_bonds_post(post_buf);
+        snprintf(response_uri, response_uri_len, "/api/bonds");
+    } else {
+        apply_post(post_buf);
+        snprintf(response_uri, response_uri_len, "/api/config");
+    }
 }
 
 //--------------------------------------------------------------------+

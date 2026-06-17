@@ -26,6 +26,16 @@ button:disabled{background:#333;color:#777;cursor:default}
 .dirty{color:#facc15}
 .ok{color:#4ade80}
 .err{color:#f87171}
+hr{border:0;border-top:1px solid #333;margin:2rem 0}
+h2{font-size:1.1rem;margin-bottom:.3rem}
+.bond{display:flex;align-items:center;gap:.5rem;padding:.5rem 0;border-bottom:1px solid #222}
+.bond .nm{flex:1;background:#222;border:1px solid #444;color:#eee;padding:.35rem;border-radius:4px;font-size:.9rem}
+.bond .addr{color:#888;font-size:.78rem;font-family:monospace}
+.bond .dot{color:#4ade80;font-size:.78rem}
+.bond button{margin:0;padding:.35rem .7rem;font-size:.85rem;background:#3a3a3a}
+.bond button.fg{background:#7f1d1d}
+.btns{display:flex;gap:.5rem;align-items:center}
+#bonds_empty{color:#888;font-size:.9rem}
 </style></head><body>
 <h1>DS5-Linux-Bridge <small id="ver"></small></h1>
 <p>Adapter configuration. Changes are saved to the adapter's flash.</p>
@@ -89,6 +99,19 @@ button:disabled{background:#333;color:#777;cursor:default}
   <span id="status"></span>
 </div>
 
+<hr>
+
+<h2>Paired controllers</h2>
+<div class="hint">Controllers the adapter remembers. The adapter holds up to
+  <span id="bond_max">4</span>. Forgetting one frees a slot; you'll re-pair with
+  Share + PS next time.</div>
+<div id="bonds"></div>
+<div id="bonds_empty" style="display:none">No paired controllers stored.</div>
+<div class="btns">
+  <button id="forgetall" class="fg">Forget all</button>
+  <span id="bstatus"></span>
+</div>
+
 <script>
 const $=id=>document.getElementById(id);
 function setStatus(msg,cls){const s=$('status');s.className=cls||'';s.textContent=msg}
@@ -135,7 +158,61 @@ async function save(){
 }
 
 $('save').onclick=save;
+
+// ----- Paired controllers -----
+function fmtAddr(h){return h.match(/.{2}/g).join(':')}
+function bstatus(msg,cls){const s=$('bstatus');s.className=cls||'';s.textContent=msg}
+
+async function loadBonds(){
+  try{
+    const d=await (await fetch('/api/bonds')).json();
+    $('bond_max').textContent=d.max;
+    const box=$('bonds');box.innerHTML='';
+    const bonds=d.bonds||[];
+    $('bonds_empty').style.display=bonds.length?'none':'block';
+    bonds.forEach(b=>{
+      const connected=d.connected&&d.connected===b.addr;
+      const row=document.createElement('div');row.className='bond';
+      const nm=document.createElement('input');
+      nm.className='nm';nm.maxLength=15;nm.value=b.name;
+      nm.placeholder=connected?'(connected)':'unnamed';
+      const meta=document.createElement('span');meta.className='addr';
+      meta.textContent=fmtAddr(b.addr);
+      const dot=document.createElement('span');dot.className='dot';
+      dot.textContent=connected?'● connected':'';
+      const ren=document.createElement('button');ren.textContent='Rename';
+      ren.onclick=()=>renameBond(b.addr,nm.value);
+      const fg=document.createElement('button');fg.className='fg';fg.textContent='Forget';
+      fg.onclick=()=>forgetBond(b.addr,nm.value||fmtAddr(b.addr));
+      row.append(nm,meta,dot,ren,fg);
+      box.appendChild(row);
+    });
+    bstatus('');
+  }catch(e){bstatus('load failed','err')}
+}
+
+async function postBonds(body,msg){
+  bstatus(msg,'dirty');
+  try{
+    const r=await fetch('/api/bonds',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});
+    if(r.ok){bstatus('Done ✓','ok');loadBonds()}
+    else bstatus('failed','err');
+  }catch(e){bstatus('failed','err')}
+}
+function renameBond(addr,name){
+  postBonds('action=rename&addr='+addr+'&name='+encodeURIComponent(name),'saving…');
+}
+function forgetBond(addr,label){
+  if(!confirm('Forget "'+label+'"?\nYou will need to re-pair it (Share + PS).'))return;
+  postBonds('action=forget&addr='+addr,'forgetting…');
+}
+$('forgetall').onclick=()=>{
+  if(!confirm('Forget ALL paired controllers?\nEach will need to be re-paired.'))return;
+  postBonds('action=forgetall','forgetting all…');
+};
+
 load();
+loadBonds();
 </script></body></html>
 )rawhtml";
 

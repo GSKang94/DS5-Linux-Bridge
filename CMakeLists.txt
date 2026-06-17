@@ -187,7 +187,11 @@ add_dependencies(ds5-bridge opus_ram_relocate)
 target_compile_options(ds5-bridge PRIVATE -fsigned-char)
 target_compile_definitions(ds5-bridge PRIVATE
         CYW43_LWIP=0
-        PICO_FLASH_ASSUME_CORE1_SAFE=1
+        # 0 (not 1): flash_safe_execute() must really park core1 while flash is
+        # erased/programmed (config_save). With =1 the lockout is skipped and the
+        # flash op races the audio core -> buzzing / crash when saving during
+        # playback. core1_entry registers via flash_safe_execute_core_init().
+        PICO_FLASH_ASSUME_CORE1_SAFE=0
         CYW43_PIO_CLOCK_DIV_INT=${CYW43_PIO_CLOCK_DIV_VALUE}
         ENABLE_VERBOSE=${ENABLE_VERBOSE_VALUE}
         ENABLE_DIAG=${ENABLE_DIAG_VALUE}

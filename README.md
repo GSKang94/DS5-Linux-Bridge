@@ -20,6 +20,25 @@ These are the deliberate, code-level departures from upstream that define this
 fork's character. (Upstream is actively developed and excellent; this list is
 about *direction*, not "things upstream gets wrong.")
 
+- 🌐 **On-device web config instead of WebHID.** Settings live on a tiny HTTP
+  server the adapter hosts itself — it enumerates as a USB network adapter
+  (CDC-NCM) and serves a single self-contained page at a fixed local address. No
+  app, no browser API, no internet, and crucially **no WebHID** (the upstream
+  approach, which never worked in Firefox and is browser/permission-gated). The
+  embedded page works in any browser on any OS, and the firmware re-validates
+  every field so it's a convenience, not the source of truth. Includes
+  **paired-controller (bond) management** — list, nickname, and forget remembered
+  controllers from the page (see [Configuration](#configuration)).
+- 🔀 **Dynamic USB descriptors that stay valid on Windows.** The adapter swaps
+  between two USB configurations at runtime: a *full* set (audio + gamepad +
+  keyboard + the config network interface) while a controller is connected, and
+  a *minimal* set when it isn't — so the OS shows no "ghost" audio/gamepad
+  devices when idle, while staying enumerated for remote wake. The boot keyboard
+  is pinned to a **stable HID instance across both variants** (via a placeholder
+  HID interface in the minimal config) so a gamepad report can never be
+  misrouted to the keyboard during a swap — this eliminates a "rogue keyboard"
+  that otherwise fired spurious keystrokes on wake-from-sleep, without violating
+  Windows' strict ascending-interface-number requirement.
 - 🎚️ **Boxcar / linear resampler instead of WDL.** The haptic decimation and the
   512→480 speaker resample use a lightweight boxcar + linear interpolator
   rather than the WDL resampler — far cheaper on CPU and tuned to better match cabled intensity.
@@ -57,12 +76,19 @@ about *direction*, not "things upstream gets wrong.")
     `hid-playstation`) to avoid state conflicts.
 - 🔌 **Wake from S3 Sleep and Dynamic USB Descriptors:**
   - Swaps USB configurations dynamically to hide audio/gamepad interfaces when
-    the controller is disconnected, preventing "ghost" devices in the OS.
+    the controller is disconnected, preventing "ghost" devices in the OS. The
+    keyboard interface keeps a stable HID instance across both configurations so
+    no input is misrouted during a swap (see
+    [What's different in this fork](#whats-different-in-this-fork)).
   - Wake the host(S3) by turning on the controller.
   - Wake from S5 is available on compatible motherboards (check that yours can
     be woken from S5 by a USB **keyboard**, not just a mouse).
   - Automatically powers off the DualSense after 10s of inactivity when the host
     sleeps or powers off.
+- 🌐 **On-Device Web Configuration & Bond Management:** Adjust settings and manage
+  remembered controllers from a self-hosted page served over a USB network
+  interface — no app or WebHID required (see
+  [Configuration](#configuration)).
 - 📡 **USB 3.0 RF Noise Watchdog:** Auto-retries Bluetooth connections stalled by
   2.4 GHz interference from USB 3.0 ports. Motherboard USB 2.0 ports are
   recommended.
@@ -162,6 +188,25 @@ free-form IP — you can't lock yourself out.)
 
 This replaces the old WebHID approach, which didn't work in Firefox. The
 embedded page works in any browser on any OS.
+
+### Paired controllers (bond management)
+
+The page also lists the controllers the adapter has paired with (the Bluetooth
+link keys it stores, up to four). For each you can:
+
+- **Rename** it with a short nickname (≤15 chars), stored in the adapter's flash.
+- **Forget** it, or **Forget all** — which clears the stored link key(s) so the
+  slot is freed.
+
+Forgetting a controller disconnects it if it's the one currently connected, and
+blacklists its Bluetooth address so it can't silently auto-reconnect afterward.
+To bring a forgotten controller back, re-pair it explicitly (**Share + PS**),
+which clears the blacklist entry on a successful pair. The blacklist persists
+across power cycles.
+
+Flash writes from the page (saving settings, renaming/forgetting bonds) are made
+**audio-safe**: the audio core is briefly parked during the flash erase/program
+so writing while a controller streams audio doesn't corrupt the stream.
 
 > **Notes:**
 > - The config web UI is on by default in release builds. Turn it off with

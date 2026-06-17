@@ -203,6 +203,15 @@ free-form IP — you can't lock yourself out.)
 This replaces the old WebHID approach, which didn't work in Firefox. The
 embedded page works in any browser on any OS.
 
+### Live status
+
+The top of the page shows a live status card — whether a controller is
+connected, its model (DualSense / DualSense Edge), and a battery gauge (percent
+plus a charging indicator) — refreshed every few seconds. This is served from a
+read-only `GET /api/status` endpoint, so any client (not just the page) can poll
+it; it's the intended foundation for a future Steam Deck **Decky Loader** plugin
+that would surface the same status in the Quick Access Menu.
+
 ### Paired controllers (bond management)
 
 The page also lists the controllers the adapter has paired with (the Bluetooth

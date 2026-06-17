@@ -59,13 +59,11 @@ volatile bool report_dirty = false;
 
 void interrupt_loop() {
 #ifdef ENABLE_WAKE_HID
-  // In minimal variant TinyUSB HID instance 0 is the boot keyboard,
-  // not the gamepad. Sending the 63-byte gamepad report to instance 0
-  // here lands on the kbd interface and Windows interprets byte 0
-  // (0x01) as Ctrl modifier plus stray scancodes -- visible as a
-  // rogue keyboard hammering Ctrl/Win/etc after the first connect/
-  // disconnect cycle. Only emit gamepad reports when full variant
-  // is active (DS5 connected).
+  // Only the FULL variant exposes the real gamepad (HID instance 0). In MINIMAL
+  // instance 0 is an inert dummy HID, so don't emit gamepad reports there.
+  // (The keyboard is instance 1 in BOTH variants, so a gamepad report can never
+  // reach it regardless -- see usb_descriptors.cpp. This guard just avoids
+  // pushing reports at the dummy / before the controller is connected.)
   if (!usb_descriptor_variant_is_full())
     return;
 #endif
@@ -206,6 +204,12 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id,
     }
     return 0;
   }
+  // MINIMAL instance 0 is the inert dummy HID, NOT the gamepad. Don't route its
+  // GET_REPORT into the BT feature path (which would query a controller that
+  // isn't connected). Return 0 (STALL); the host never reads it.
+  if (!usb_descriptor_variant_is_full()) {
+    return 0;
+  }
 #endif
   (void)itf;
   (void)report_id;
@@ -258,6 +262,10 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id,
 #ifdef ENABLE_WAKE_HID
   if (itf == usb_kbd_hid_instance()) {
     // Drop keyboard SET_REPORT (host LED state).
+    return;
+  }
+  // MINIMAL instance 0 is the inert dummy HID; ignore any report to it.
+  if (!usb_descriptor_variant_is_full()) {
     return;
   }
 #endif

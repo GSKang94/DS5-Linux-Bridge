@@ -15,10 +15,9 @@
 #include "bt.h"
 #include "usb.h"
 
-// The boot keyboard's TinyUSB HID instance index is variant-dependent
-// (kbd is HID instance 1 in full descriptor variant, 0 in minimal — see
-// usb_descriptors.cpp). Query it at use time so this code follows live
-// variant swaps without having to be notified.
+// The boot keyboard is HID instance 1 in BOTH descriptor variants (a dummy
+// placeholder HID holds instance 0 in minimal — see usb_descriptors.cpp), so
+// this is stable across variant swaps.
 #define WAKE_KBD_INSTANCE     (usb_kbd_hid_instance())
 #define WAKE_KEYCODE_F15      0x68
 // Post-resume timings tuned for "wake-and-resleep" Windows behavior: the host

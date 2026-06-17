@@ -18,10 +18,10 @@ void usb_set_descriptor_variant_full(void);
 void usb_set_descriptor_variant_minimal(void);
 bool usb_descriptor_variant_is_full(void);
 
-// Returns the TinyUSB HID instance index of the boot keyboard for the
-// currently-active descriptor variant. Variant-dependent because TinyUSB
-// indexes HID instances by descriptor byte order: kbd is instance 1 in
-// full (after gamepad) and instance 0 in minimal (only HID present).
+// TinyUSB HID instance index of the boot keyboard. STABLE at 1 in both
+// variants: in full the gamepad is instance 0 (parsed first); in minimal a
+// dummy placeholder HID holds instance 0 so the kbd stays instance 1. Kept as a
+// function so callers stay decoupled from the constant.
 uint8_t usb_kbd_hid_instance(void);
 
 // Request a variant swap: orchestrator notes the desired variant, then

@@ -490,37 +490,75 @@ static_assert(sizeof(descriptor_configuration) == CONFIG_DESC_LEN_TOTAL,
 
 #ifdef ENABLE_WAKE_HID
 // Minimal config descriptor used when no DualSense is connected.
-// Contains only the boot keyboard so the dongle stays enumerated and
-// retains remote-wakeup capability (needed for wake-from-S3/S5), but
-// presents no audio function and no gamepad — so Windows Sound applet
-// and joy.cpl don't show ghost devices.
+// Presents no audio function and no real gamepad — so the Windows Sound applet
+// and joy.cpl don't show ghost devices — while keeping the dongle enumerated
+// and remote-wakeup-capable (needed for wake-from-S3/S5).
 //
-// TinyUSB class drivers (audio, gamepad HID) remain compiled in but
-// receive no open() callback while this variant is active; they sit
-// idle. When the host re-enumerates after a variant swap they'll be
-// torn down / brought back up cleanly.
+// CRITICAL: it contains TWO HID interfaces, in the same order as FULL:
+//   interface 0 = inert DUMMY HID (placeholder where the gamepad sits in FULL)
+//   interface 1 = boot keyboard
+// This pins the keyboard to HID instance 1 in BOTH variants. TinyUSB numbers
+// HID instances by descriptor parse order; in FULL the gamepad (interface 3) is
+// instance 0 and the kbd is instance 1. Without the dummy, MINIMAL had only the
+// kbd, making it instance 0 — so across a MINIMAL->FULL swap the kbd's instance
+// changed and a gamepad report (sent to instance 0/1) could land on the wrong
+// interface: the "rogue keyboard on wake". With the dummy, the kbd is always
+// instance 1 and the bug is structurally impossible. Interface numbers stay
+// ascending (0,1), so Windows accepts the config (it rejects out-of-order
+// interfaces — see why we can't instead reorder kbd ahead of the gamepad).
 //
-// Layout (34 bytes total):
-//   Config descriptor       9
-//   Kbd interface descriptor 9
-//   HID class descriptor    9
-//   EP IN descriptor        7
-#define CONFIG_DESC_LEN_MINIMAL 34
+// The dummy reuses the gamepad's IN endpoint address (0x84); it is never
+// written to. TinyUSB class drivers (audio, real gamepad) stay compiled in but
+// get no open() callback while MINIMAL is active.
+//
+// Layout (59 bytes total):
+//   Config descriptor             9
+//   Dummy interface + HID + EP    9 + 9 + 7
+//   Kbd interface + HID + EP      9 + 9 + 7
+#define CONFIG_DESC_LEN_MINIMAL 59
 uint8_t descriptor_configuration_minimal[CONFIG_DESC_LEN_MINIMAL] = {
     // --- CONFIGURATION DESCRIPTOR ---
     0x09, // bLength
     0x02, // bDescriptorType (CONFIGURATION)
     U16_TO_U8S_LE(CONFIG_DESC_LEN_MINIMAL), // wTotalLength
-    0x01, // bNumInterfaces: just the kbd
+    0x02, // bNumInterfaces: dummy + kbd
     0x01, // bConfigurationValue: 1
     0x00, // iConfiguration: 0
     0xE0, // bmAttributes: SELF-POWERED + REMOTE-WAKEUP (must keep for wake)
     0xFA, // bMaxPower: 500mA
 
-    // --- INTERFACE DESCRIPTOR: HID Boot Keyboard (only interface here) ---
+    // --- INTERFACE DESCRIPTOR: DUMMY HID (placeholder, HID instance 0) ---
     0x09, // bLength
     0x04, // bDescriptorType (INTERFACE)
-    0x00, // bInterfaceNumber: 0 (only one in this variant)
+    0x00, // bInterfaceNumber: 0
+    0x00, // bAlternateSetting: 0
+    0x01, // bNumEndpoints: 1 (IN only, never used)
+    0x03, // bInterfaceClass: HID
+    0x00, // bInterfaceSubClass: None
+    0x00, // bInterfaceProtocol: None
+    0x00, // iInterface
+
+    // HID Descriptor (dummy)
+    0x09, // bLength
+    0x21, // bDescriptorType (HID)
+    0x11, 0x01, // bcdHID: 1.11
+    0x00, // bCountryCode
+    0x01, // bNumDescriptors
+    0x22, // bDescriptorType: Report
+    0x15, 0x00, // wDescriptorLength: 21 (sizeof desc_hid_report_dummy)
+
+    // Endpoint Descriptor (HID IN: EP4 — same address the gamepad uses in FULL)
+    0x07, // bLength
+    0x05, // bDescriptorType (ENDPOINT)
+    0x84, // bEndpointAddress: IN EP4
+    0x03, // bmAttributes: Interrupt
+    0x40, 0x00, // wMaxPacketSize: 64
+    0x0A, // bInterval: 10ms (slow; we never send on it)
+
+    // --- INTERFACE DESCRIPTOR: HID Boot Keyboard (HID instance 1) ---
+    0x09, // bLength
+    0x04, // bDescriptorType (INTERFACE)
+    0x01, // bInterfaceNumber: 1
     0x00, // bAlternateSetting: 0
     0x01, // bNumEndpoints: 1 (IN only)
     0x03, // bInterfaceClass: HID
@@ -561,7 +599,11 @@ static volatile desc_variant_t active_variant = DESC_VARIANT_MINIMAL;
 void usb_set_descriptor_variant_full(void)    { active_variant = DESC_VARIANT_FULL; }
 void usb_set_descriptor_variant_minimal(void) { active_variant = DESC_VARIANT_MINIMAL; }
 bool usb_descriptor_variant_is_full(void)     { return active_variant == DESC_VARIANT_FULL; }
-uint8_t usb_kbd_hid_instance(void) { return active_variant == DESC_VARIANT_FULL ? 1 : 0; }
+// The boot keyboard is HID instance 1 in BOTH variants: in FULL the gamepad is
+// instance 0 (its interface is parsed first), and MINIMAL keeps a dummy HID at
+// instance 0 so the kbd stays instance 1. Stable across variant swaps -- this
+// is what makes the "rogue keyboard on wake" structurally impossible.
+uint8_t usb_kbd_hid_instance(void) { return 1; }
 
 //--------------------------------------------------------------------+
 // Variant swap orchestrator
@@ -1085,6 +1127,30 @@ uint8_t const desc_hid_report_kbd[] = {
     0xC0              // End Collection
 };
 _Static_assert(sizeof(desc_hid_report_kbd) == 45, "keyboard report descriptor length must match wDescriptorLength in config descriptor");
+
+// Dummy HID report descriptor for the MINIMAL variant's placeholder interface.
+// Its ONLY purpose is to occupy HID instance 0 in MINIMAL exactly as the
+// gamepad does in FULL, so the keyboard is HID instance 1 in BOTH variants and
+// its instance index never changes across a variant swap. That stability is
+// what makes the "rogue keyboard on wake" structurally impossible: a gamepad
+// report addressed to instance 0 can never reach the keyboard (instance 1).
+//
+// Vendor-defined usage page (0xFF00) so no OS binds it to a keyboard/mouse/
+// gamepad driver -- it appears as an inert generic HID node with one input
+// report we never send. 21 bytes.
+uint8_t const desc_hid_report_dummy[] = {
+    0x06, 0x00, 0xFF, // Usage Page (Vendor Defined 0xFF00)
+    0x09, 0x01,       // Usage (Vendor Usage 1)
+    0xA1, 0x01,       // Collection (Application)
+    0x15, 0x00,       //   Logical Minimum (0)
+    0x26, 0xFF, 0x00, //   Logical Maximum (255)
+    0x75, 0x08,       //   Report Size (8)
+    0x95, 0x01,       //   Report Count (1)
+    0x09, 0x01,       //   Usage (Vendor Usage 1)
+    0x81, 0x02,       //   Input (Data,Var,Abs)
+    0xC0              // End Collection
+};
+_Static_assert(sizeof(desc_hid_report_dummy) == 21, "dummy report descriptor length must match wDescriptorLength in minimal config descriptor");
 #endif
 
 // Invoked when received GET HID REPORT DESCRIPTOR
@@ -1092,12 +1158,12 @@ _Static_assert(sizeof(desc_hid_report_kbd) == 45, "keyboard report descriptor le
 // Descriptor contents must exist long enough for transfer to complete
 uint8_t const *tud_hid_descriptor_report_cb(uint8_t itf) {
 #ifdef ENABLE_WAKE_HID
-    // TinyUSB assigns HID instance indices by descriptor byte order:
-    //   Full variant   — gamepad (instance 0), kbd (instance 1)
-    //   Minimal variant — kbd only (instance 0)
-    // So the kbd's instance index is variant-dependent.
-    const uint8_t kbd_instance = active_variant == DESC_VARIANT_FULL ? 1 : 0;
-    if (itf == kbd_instance) return desc_hid_report_kbd;
+    // HID instance indices are STABLE across variants:
+    //   instance 1 = boot keyboard (both variants)
+    //   instance 0 = real gamepad in FULL, inert dummy HID in MINIMAL
+    if (itf == usb_kbd_hid_instance()) return desc_hid_report_kbd;
+    // Instance 0 in MINIMAL is the dummy placeholder; serve its descriptor.
+    if (active_variant == DESC_VARIANT_MINIMAL) return desc_hid_report_dummy;
 #endif
     (void) itf;
     if (ds_mode()) {

@@ -7,13 +7,26 @@
 #define LWIP_SOCKET                 0
 #define LWIP_NETCONN                0
 
+// Footprint is kept DELIBERATELY SMALL. This stack serves one ~5 KB config page
+// over a single short-lived HTTP connection at USB speed; it is NEVER a
+// throughput path. lwIP is always up here (no time-share), so every byte of its
+// static footprint permanently shrinks the heap shared with BTstack (~40 KB at
+// boot) and the Opus codec runtime (~76 KB on controller-connect). The earlier
+// web-scale sizing (MEM_SIZE 8000, PBUF_POOL 8 x 1460 B, 8xMSS windows) cost
+// ~21 KB of BSS and OOM-panicked Opus the moment a controller connected. These
+// values are the minimum that still streams the page: a small MSS keeps each
+// pbuf small, and over the low-latency USB link the extra round-trips are free.
 #define MEM_LIBC_MALLOC             0
 #define MEM_ALIGNMENT               4
-#define MEM_SIZE                    8000
-#define MEMP_NUM_TCP_SEG            32
-#define MEMP_NUM_ARP_QUEUE          10
-#define MEMP_NUM_UDP_PCB            6
-#define PBUF_POOL_SIZE              8
+#define MEM_SIZE                    1600
+#define MEMP_NUM_TCP_SEG            14  // must be >= TCP_SND_QUEUELEN (see below)
+#define MEMP_NUM_ARP_QUEUE          2
+#define MEMP_NUM_UDP_PCB            3
+#define MEMP_NUM_TCP_PCB            5   // active conns + a couple lingering TIME_WAIT
+#define MEMP_NUM_TCP_PCB_LISTEN     1   // single httpd listener
+#define MEMP_NUM_PBUF               4
+#define PBUF_POOL_SIZE              4   // 4 * ~600 B (small MSS) ~= 2.4 KB
+#define TCP_MSL                     1000  // ms (default 60000); short TIME_WAIT linger
 
 #define LWIP_ARP                    1
 #define LWIP_ETHERNET               1
@@ -28,9 +41,12 @@
 // for UDP port 67: required for the DHCP *server* to see client DISCOVERs.
 #define LWIP_IP_ACCEPT_UDP_PORT(p) ((p) == PP_NTOHS(67))
 
-#define TCP_MSS                     1460
-#define TCP_WND                     (8 * TCP_MSS)
-#define TCP_SND_BUF                 (8 * TCP_MSS)
+// Small MSS keeps each pbuf-pool buffer small (PBUF_POOL_BUFSIZE tracks MSS), so
+// the pool costs little BSS. The ~5 KB page streams across many small segments;
+// over the low-latency USB link the extra round-trips are invisible.
+#define TCP_MSS                     536
+#define TCP_WND                     (4 * TCP_MSS)   // ~2.1 KB receive window
+#define TCP_SND_BUF                 (3 * TCP_MSS)   // ~1.6 KB; QUEUELEN ~13, fits SEG=14
 #define TCP_SND_QUEUELEN            ((4 * (TCP_SND_BUF) + (TCP_MSS - 1)) / (TCP_MSS))
 #define LWIP_TCP_KEEPALIVE          1
 

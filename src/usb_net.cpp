@@ -4,7 +4,6 @@
 // The dongle additionally enumerates as a USB network adapter. A small lwIP
 // stack runs over it (NO_SYS, serviced from the main loop):
 //   - dhserver (TinyUSB lib/networking) hands the host an address
-//   - mDNS responder answers http://ds5config.local (best-effort)
 //   - lwIP httpd serves the config page and a JSON API; all content is
 //     generated in fs_open_custom / the POST hooks below (no static fsdata)
 //
@@ -28,7 +27,6 @@
 #include "dhserver.h"
 #include "lwip/apps/fs.h"
 #include "lwip/apps/httpd.h"
-#include "lwip/apps/mdns.h"
 #include "lwip/etharp.h"
 #include "lwip/init.h"
 #include "lwip/netif.h"
@@ -102,9 +100,9 @@ static err_t linkoutput_fn(struct netif *netif, struct pbuf *p) {
     (void) netif;
     // Bounded wait: spin only briefly for the NCM endpoint to drain, then drop
     // the frame. An unbounded loop here deadlocks the main loop if the host is
-    // not draining -- e.g. an unsolicited mDNS/IGMP multicast sent before the
-    // host has anything queued. Replies to host traffic always free up quickly;
-    // a dropped multicast is harmless.
+    // not draining (e.g. an unsolicited broadcast sent before the host has
+    // anything queued). Replies to host traffic always free up quickly; a
+    // dropped unsolicited frame is harmless.
     const absolute_time_t deadline = make_timeout_time_ms(50);
     while (tud_ready()) {
         if (tud_network_can_xmit(p->tot_len)) {
@@ -120,10 +118,8 @@ static err_t linkoutput_fn(struct netif *netif, struct pbuf *p) {
 static err_t netif_init_cb(struct netif *netif) {
     LWIP_ASSERT("netif != NULL", (netif != NULL));
     netif->mtu = CFG_TUD_NET_MTU;
-    // No NETIF_FLAG_IGMP: enabling it makes the mDNS responder join a multicast
-    // group, whose membership-report transmit reliably faults this NCM setup
-    // into a watchdog reboot loop. ds5config.local is therefore best-effort
-    // only; the IP (10.7.7.107) is the documented, reliable way in.
+    // No NETIF_FLAG_IGMP: no multicast on this link (mDNS removed). The config
+    // page is reached by IP (http://10.55.55.105/).
     netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_LINK_UP | NETIF_FLAG_UP;
     netif->state = NULL;
     netif->name[0] = 'u';
@@ -344,14 +340,9 @@ void usb_net_init() {
     if (dhserv_init(&dhcp_config) != ERR_OK) {
         printf("[NET] dhcp server init failed\n");
     }
-    mdns_resp_init();
-    // Best-effort: without NETIF_FLAG_IGMP this can't join the multicast group,
-    // so ds5config.local generally won't resolve -- but it also can't crash.
-    mdns_resp_add_netif(&netif_data, "ds5config");
     httpd_init();
 
-    printf("[NET] config UI at http://%s/ (ds5config.local best-effort)\n",
-           ip4addr_ntoa(&ipaddr));
+    printf("[NET] config UI at http://%s/\n", ip4addr_ntoa(&ipaddr));
 }
 
 void usb_net_task() {

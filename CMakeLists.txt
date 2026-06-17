@@ -129,7 +129,6 @@ if (ENABLE_WEBCONFIG)
             pico_unique_id
             pico_lwip_nosys
             pico_lwip_http
-            pico_lwip_mdns
     )
 endif ()
 

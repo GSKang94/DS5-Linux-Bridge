@@ -1,7 +1,7 @@
 #ifndef DS5_BRIDGE_WEB_PAGE_H
 #define DS5_BRIDGE_WEB_PAGE_H
 
-// Config UI served at http://10.7.7.107/ (or http://ds5config.local/, best-effort).
+// Config UI served at http://10.55.55.105/ (default subnet; selectable in the UI).
 // Single self-contained page; loads from GET /api/config and persists via
 // POST /api/config. Settings mirror Config_body (src/config.h); the firmware
 // re-validates every field, so the page is a convenience, not the source of

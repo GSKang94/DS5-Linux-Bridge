@@ -22,7 +22,7 @@
 #define LWIP_UDP                    1
 #define LWIP_DHCP                   0   // we are the DHCP *server* (dhserver.c, raw UDP)
 #define LWIP_DNS                    0   // deliberately no DNS: never hijack host lookups
-#define LWIP_IGMP                   1   // mDNS joins a multicast group
+#define LWIP_IGMP                   0   // no multicast: mDNS removed (never resolved here, see below)
 
 // Let ip4_input accept link-layer-addressed packets (src 0.0.0.0) destined
 // for UDP port 67: required for the DHCP *server* to see client DISCOVERs.
@@ -37,11 +37,12 @@
 #define LWIP_NETIF_STATUS_CALLBACK  1
 #define LWIP_NETIF_LINK_CALLBACK    1
 #define LWIP_NETIF_HOSTNAME         1
-#define LWIP_NETIF_EXT_STATUS_CALLBACK 1  // required by the mDNS responder
-#define LWIP_NUM_NETIF_CLIENT_DATA  1     // mDNS netif client data slot
 
-#define LWIP_MDNS_RESPONDER         1     // answers http://ds5config.local
-#define MDNS_MAX_SERVICES           1
+// mDNS responder removed: without NETIF_FLAG_IGMP it could never join the
+// multicast group, so ds5config.local never resolved here -- and enabling IGMP
+// faulted this NCM setup into a watchdog reboot loop. Users reach the page by IP
+// (http://10.55.55.105/). Dropping it also frees the EXT_STATUS_CALLBACK +
+// NETIF_CLIENT_DATA machinery and the pico_lwip_mdns library.
 
 // HTTP server: all content is generated in fs_open_custom / the POST hooks
 // (usb_net.cpp); the static fsdata table is empty (pico_fsdata.inc).

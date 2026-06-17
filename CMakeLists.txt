@@ -147,14 +147,39 @@ add_subdirectory(lib/opus)
 # CMakeLists.txt, so we can't use POST_BUILD here. Instead use a stamp-file
 # custom command + custom target that runs after opus is built and before
 # ds5-bridge links. Renames .text/.rodata of libopus.a to .time_critical.* which
-# the Pico SDK linker places in RAM (loaded from flash at boot, executed from
-# RAM at runtime). ~220 KB relocated, ~5-6 ms boot-time impact for the copy.
+# the Pico SDK linker places in RAM (loaded from flash at boot, executed from RAM
+# at runtime). ~220 KB relocated, ~5-6 ms boot-time impact for the copy.
+#
+# LOAD-BEARING: this is required for clean duplex audio. Opus's per-frame DSP AND
+# its lookup tables (mdct/fft twiddles, CELT_PVQ_U_DATA, SILK codebooks) thrash the
+# XIP cache when run from flash, causing audio stutter at stock 150 MHz. Upstream
+# relocates the whole library for the same reason (commit 0adca8f). Do NOT drop
+# this to free heap -- it trades clean audio for stutter. The web-config/audio RAM
+# coexistence must be solved within the remaining heap, not by evicting Opus.
+#
+# EXCEPTION -- keep the tonality analyzer in flash (recover ~21 KB of RAM):
+# analysis.c (run_analysis/tonality_analysis, ~16.5 KB) and its mlp_data.c table
+# (~5 KB) are only used for auto-bitrate/complexity>=7 decisions. This firmware
+# encodes at COMPLEXITY 0 with VBR OFF and a fixed bitrate (see audio.cpp), so the
+# analysis path is NEVER executed at runtime -- it is pure dead weight in RAM.
+# After the blanket relocation above, rename ONLY these two member objects' sections
+# back to .text/.rodata so the linker leaves them in flash. Zero audio risk (never
+# called => never XIP-fetched), ~21 KB of heap reclaimed. (Upstream relocated the
+# whole library wholesale via one objcopy for submodule-pristine convenience, not
+# because all of it is per-frame hot; this fork has heap pressure they did not.)
 add_custom_command(
     OUTPUT ${CMAKE_BINARY_DIR}/opus_ram_relocate.stamp
     COMMAND ${CMAKE_OBJCOPY} --rename-section .text=.time_critical.opus_text --rename-section .rodata=.time_critical.opus_rodata --rename-section .rodata.str1.4=.time_critical.opus_strings $<TARGET_FILE:opus>
+    # Un-relocate the never-executed analysis path back to flash. Extract the two
+    # members, reverse the section renames, and replace them in the archive.
+    COMMAND ${CMAKE_AR} x $<TARGET_FILE:opus> analysis.c.obj mlp_data.c.obj
+    COMMAND ${CMAKE_OBJCOPY} --rename-section .time_critical.opus_text=.text --rename-section .time_critical.opus_rodata=.rodata --rename-section .time_critical.opus_strings=.rodata.str1.4 analysis.c.obj
+    COMMAND ${CMAKE_OBJCOPY} --rename-section .time_critical.opus_text=.text --rename-section .time_critical.opus_rodata=.rodata --rename-section .time_critical.opus_strings=.rodata.str1.4 mlp_data.c.obj
+    COMMAND ${CMAKE_AR} r $<TARGET_FILE:opus> analysis.c.obj mlp_data.c.obj
+    COMMAND ${CMAKE_COMMAND} -E rm -f analysis.c.obj mlp_data.c.obj
     COMMAND ${CMAKE_COMMAND} -E touch ${CMAKE_BINARY_DIR}/opus_ram_relocate.stamp
     DEPENDS $<TARGET_FILE:opus>
-    COMMENT "Relocating libopus to .time_critical.* sections"
+    COMMENT "Relocating libopus to RAM (tonality analyzer kept in flash)"
     VERBATIM
 )
 add_custom_target(opus_ram_relocate ALL DEPENDS ${CMAKE_BINARY_DIR}/opus_ram_relocate.stamp)

@@ -382,6 +382,17 @@ int main() {
   audio_init();
   state_init();
 
+#ifdef ENABLE_WAKE_HID
+  // Enumerate immediately as the MINIMAL variant (kbd + inert pads + CDC-NCM),
+  // even before any controller connects. tusb_init() left us tud_disconnect()'d;
+  // without this the dongle would stay invisible to the host on a cold plug-in
+  // until the first controller connection flipped it to FULL -- which made the
+  // config web page (carried on NCM, present in MINIMAL too) unreachable from a
+  // cold start, and is also needed so the device is enumerated before the host
+  // suspends (remote-wakeup). active_variant/desired_variant are already MINIMAL.
+  tud_connect();
+#endif
+
   watchdog_enable(1000, true);
 
   while (1) {

@@ -33,12 +33,16 @@ about *direction*, not "things upstream gets wrong.")
   between two USB configurations at runtime: a *full* set (audio + gamepad +
   keyboard + the config network interface) while a controller is connected, and
   a *minimal* set when it isn't — so the OS shows no "ghost" audio/gamepad
-  devices when idle, while staying enumerated for remote wake. The boot keyboard
-  is pinned to a **stable HID instance across both variants** (via a placeholder
-  HID interface in the minimal config) so a gamepad report can never be
-  misrouted to the keyboard during a swap — this eliminates a "rogue keyboard"
-  that otherwise fired spurious keystrokes on wake-from-sleep, without violating
-  Windows' strict ascending-interface-number requirement.
+  devices when idle, while staying enumerated for remote wake. The **config
+  network interface (CDC-NCM) is present in BOTH variants at the same interface
+  number**, so the config web page is reachable whether or not a controller is
+  connected, and the host keeps a single, stable network adapter across swaps
+  (no duplicate adapters, no lost IP). The boot keyboard is pinned to a **stable
+  HID instance across both variants** (via a placeholder HID interface in the
+  minimal config) so a gamepad report can never be misrouted to the keyboard
+  during a swap — this eliminates a "rogue keyboard" that otherwise fired
+  spurious keystrokes on wake-from-sleep, without violating Windows' strict
+  ascending-interface-number requirement.
 - 🎚️ **Boxcar / linear resampler instead of WDL.** The haptic decimation and the
   512→480 speaker resample use a lightweight boxcar + linear interpolator
   rather than the WDL resampler — far cheaper on CPU and tuned to better match cabled intensity.
@@ -194,9 +198,12 @@ Waveshare board.
 
 The adapter serves its own configuration web page — no app, no browser API, no
 internet. It enumerates as a **USB network adapter** (CDC-NCM) alongside the
-controller, and serves the page over a tiny onboard HTTP server.
+controller, and serves the page over a tiny onboard HTTP server. The network
+adapter is present **whether or not a controller is connected** (same interface
+number in both descriptor variants), so the page is always reachable — including
+when you need to pair a new controller while none is connected.
 
-1. With the controller connected, open **http://10.55.55.105/** in any browser.
+1. Open **http://10.55.55.105/** in any browser (controller connected or not).
 2. Adjust settings — controller mode, polling rate, audio buffer length,
    inactivity timeout, auto-disconnect, onboard LED — and click **Save**.
    Settings are written to the adapter's flash.
@@ -250,10 +257,12 @@ so writing while a controller streams audio doesn't corrupt the stream.
 > **Notes:**
 > - The config web UI is on by default in release builds. Turn it off with
 >   `-DENABLE_WEBCONFIG=OFF`.
-> - The page is reachable while a controller is **connected** (the adapter
->   presents its full USB interface set then). With no controller connected the
->   adapter falls back to a minimal descriptor and the network interface is not
->   exposed.
+> - The page is reachable **whether or not a controller is connected**. The
+>   network interface (CDC-NCM) is carried in both the full and minimal USB
+>   descriptor variants at the same interface number, so the host keeps one
+>   stable network adapter across connect/disconnect. (In the minimal variant the
+>   interfaces that the audio function occupies in the full variant are replaced
+>   by inert, driverless placeholders so no ghost audio device appears.)
 
 ---
 

@@ -64,11 +64,13 @@ just probe each `*.105` until one answers. Hardcoding only `.105` is the common
 first-version shortcut but will silently fail for users who changed it.
 
 Gotchas:
-- **The interface only exists while a controller is connected.** On this branch
-  NCM lives in the FULL USB descriptor variant; with no controller the dongle
-  drops to a minimal descriptor and the network interface disappears. So
-  "dongle present but no controller" = endpoint unreachable. Treat connection
-  failures as "no controller / not plugged in," not as errors.
+- **The interface exists whether or not a controller is connected.** NCM is
+  carried in BOTH USB descriptor variants (full and minimal) at the same
+  interface number, so the endpoint is reachable while idle too, and the host
+  keeps one stable network adapter across controller connect/disconnect (no
+  duplicate adapter, no lost lease). Note: the USB device briefly
+  re-enumerates on the full↔minimal swap, so expect a short blip (the NCM link
+  drops and comes back) right around a controller connect/disconnect.
 - **SteamOS NetworkManager must accept the USB-NCM iface and take the DHCP
   lease.** Usually automatic. If it doesn't lease, NM may need a nudge (e.g. an
   unmanaged-device rule or `nmcli` connection). Verify this early — it's the most
@@ -143,21 +145,22 @@ address (persists across power cycles); re-pair with **Share + PS** to restore.
 
 The adapter only auto-scans for a controller when none is bonded; once one is
 paired it relies on page-scan reconnect. `pair` is the explicit way to add a
-second controller. Because the firmware connects one controller at a time (and
-the network interface only exists while connected), `pair` **disconnects the
-currently connected controller** — keeping its bond, so it reconnects later —
-and opens a 30 s inquiry window. The new controller (in **Share + PS** mode)
-becomes the active connection. During the window incoming auto-reconnects from
-the just-disconnected controller are rejected so it can't reclaim the slot
-before the new one pairs; the window closes when a controller connects or the
-inquiry finds nothing. Expect the NCM link to drop when you send `pair` (the old
-controller disconnects), so issue it fire-and-forget — don't wait on the
-response over the same connection.
+second controller. Because the firmware connects one controller at a time,
+`pair` **disconnects the currently connected controller** (if any) — keeping its
+bond, so it reconnects later — and opens a 30 s inquiry window. The new
+controller (in **Share + PS** mode) becomes the active connection. During the
+window incoming auto-reconnects from the just-disconnected controller are
+rejected so it can't reclaim the slot before the new one pairs; the window
+closes when a controller connects or the inquiry finds nothing. If you call
+`pair` while a controller is connected, expect the NCM link to blip as that
+controller disconnects (full→minimal swap), so issue it fire-and-forget — don't
+wait on the response over the same connection.
 
-> **Behaviour shared with the web page (not plugin bugs):** because the network
-> interface only exists while connected, you can't reach the API to forget bonds
-> when nothing is connected. And forgetting the *currently connected* controller
-> drops the link immediately (expected).
+> **Behaviour shared with the web page (not plugin bugs):** the API is reachable
+> with or without a controller connected (NCM is in both descriptor variants), so
+> you can forget bonds / start pairing while idle. Forgetting the *currently
+> connected* controller drops the link immediately (expected), and any operation
+> that connects/disconnects a controller causes a brief NCM re-enumeration blip.
 
 ---
 

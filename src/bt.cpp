@@ -48,6 +48,17 @@ static bd_addr_t current_device_addr;
 static bool device_found = false;
 static bool new_pair = false; // 只有新匹配的设备才用创建channel，自动重连走的是service
 
+// Pairing window opened by the web UI (POST /api/bonds action=pair). While set:
+//   - the active controller (if any) is torn down, keeping its bond, and inquiry
+//     is opened from the disconnect-complete handler (overriding the normal
+//     "bonded -> page scan, no inquiry" gate);
+//   - incoming auto-reconnects are REJECTED, so the just-disconnected controller
+//     can't page back in and win the slot before the user pairs the new one.
+// Cleared when a new controller opens HID, or when the inquiry window closes
+// with nothing found. This is how the single-controller firmware swaps in a
+// second controller without forgetting the first.
+static bool pairing_window = false;
+
 // Persistent blacklist of controllers the user forgot via the web UI. Survives
 // power-cycles via BTstack TLV flash. Without it, forgetting a controller that
 // is connected (or actively paging us to auto-reconnect) is futile: BTstack
@@ -123,14 +134,63 @@ bool bt_disconnect() {
     return true;
 }
 
+// True if BTstack has at least one stored controller link key. Used to gate
+// inquiry: once a controller is bonded the dongle stops looking for new ones
+// (the bonded controller reconnects on its own via page scan) and only inquires
+// again on an explicit bt_start_pairing() request.
+static bool bt_has_stored_link_key() {
+    btstack_link_key_iterator_t it;
+    if (!gap_link_key_iterator_init(&it)) return false;
+    bd_addr_t addr;
+    link_key_t key;
+    link_key_type_t type;
+    const bool has_key = gap_link_key_iterator_get_next(&it, addr, key, &type);
+    gap_link_key_iterator_done(&it);
+    return has_key;
+}
+
+// Recovery/looping restart of inquiry. Gated on bond presence: with a controller
+// bonded we keep the radio connectable for page-scan reconnect but do NOT
+// re-open inquiry, so a transient failure can't silently reopen pairing.
 static void bt_restart_inquiry() {
     device_found = false;
     new_pair = false;
     connect_attempt_started = 0;
-    gap_inquiry_stop();
-    gap_inquiry_start(30);
     gap_connectable_control(1);
     gap_discoverable_control(1);
+    if (bt_has_stored_link_key()) {
+        printf("[BT] Stored controller -> page scan, skip inquiry restart\n");
+        return;
+    }
+    gap_inquiry_stop();
+    gap_inquiry_start(30);
+}
+
+// Open a fresh 30s inquiry to pair an additional controller, even when one is
+// already bonded. The deliberate "add another controller" path, invoked from
+// the web API (POST /api/bonds action=pair).
+//
+// This firmware connects ONE controller at a time, and the web/network
+// interface only exists while a controller is connected -- so when this is
+// called there is normally an active controller. We tear that link down (but
+// KEEP its bond, unlike forget) and open inquiry once the disconnect completes;
+// the newly paired controller becomes the active connection, and the old one
+// still reconnects later via its retained link key.
+void bt_start_pairing() {
+    pairing_window = true;
+    if (acl_handle != HCI_CON_HANDLE_INVALID) {
+        printf("[BT] Pair request -> disconnect current (keep bond), then inquire\n");
+        bt_disconnect(); // inquiry opens in the disconnection-complete handler
+        return;
+    }
+    printf("[BT] Pair request -> open inquiry\n");
+    device_found = false;
+    new_pair = false;
+    connect_attempt_started = 0;
+    gap_connectable_control(1);
+    gap_discoverable_control(1);
+    gap_inquiry_stop();
+    gap_inquiry_start(30);
 }
 
 void bt_connection_watchdog_tick() {
@@ -386,9 +446,18 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             const uint8_t state = btstack_event_state_get_state(packet);
             printf("[BT] State: %u\n", state);
             if (state == HCI_STATE_WORKING) {
-                printf("[BT] Stack ready, start inquiry\n");
                 bt_blacklist_load(); // local BD addr known -> TLV is selectable
-                gap_inquiry_start(30);
+                // Only open to pairing when no controller is bonded. A bonded
+                // controller reconnects on its own via page scan, so we stay
+                // connectable but don't inquire (avoids grabbing any nearby
+                // DualSense in pairing mode). Use POST /api/bonds action=pair to
+                // deliberately add another controller.
+                if (bt_has_stored_link_key()) {
+                    printf("[BT] Stack ready, stored controller -> page scan, no inquiry\n");
+                } else {
+                    printf("[BT] Stack ready, no stored controller -> start inquiry\n");
+                    gap_inquiry_start(30);
+                }
             }
             break;
         }
@@ -431,6 +500,12 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
                 break;
             }
             if (event_type == HCI_EVENT_INQUIRY_COMPLETE) {
+                if (pairing_window) {
+                    // Pairing window expired with no new controller found; close
+                    // it so bonded controllers can auto-reconnect again.
+                    pairing_window = false;
+                    printf("[HCI] Pairing window closed (inquiry found nothing)\n");
+                }
                 printf("[HCI] Restart inquiry\n");
                 bt_restart_inquiry();
             }
@@ -575,6 +650,15 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
                 hci_send_cmd(&hci_reject_connection_request, addr, 0x0F);
                 break;
             }
+            if (pairing_window) {
+                // While the user is pairing a new controller, reject incoming
+                // auto-reconnects so the just-disconnected controller can't page
+                // back in and grab the slot first. Its bond is intact; it
+                // reconnects once the pairing window closes.
+                printf("[HCI] Rejecting connection from %s (pairing window open)\n", bd_addr_to_str(addr));
+                hci_send_cmd(&hci_reject_connection_request, addr, 0x0F);
+                break;
+            }
             if ((cod & 0x000F00) == 0x000500) {
                 bd_addr_copy(current_device_addr, addr);
                 gap_inquiry_stop();
@@ -615,8 +699,21 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
 #if ENABLE_BATT_LED
             battery_led_on_disconnect();
 #endif
-            printf("[HCI] Disconnected reason=0x%02X, start inquiry\n", reason);
-            gap_inquiry_start(30);
+            // An explicit web-UI pair request forces inquiry even with a bond
+            // stored (we just dropped the active controller to make room for a
+            // new one); otherwise a bonded controller reconnects via page scan,
+            // so we only inquire when nothing is bonded.
+            if (pairing_window) {
+                // Keep the window open across the disconnect; it closes when the
+                // new controller opens HID or the inquiry finds nothing.
+                printf("[HCI] Disconnected reason=0x%02X, pair request -> start inquiry\n", reason);
+                gap_inquiry_start(30);
+            } else if (bt_has_stored_link_key()) {
+                printf("[HCI] Disconnected reason=0x%02X, stored controller -> page scan, no inquiry\n", reason);
+            } else {
+                printf("[HCI] Disconnected reason=0x%02X, no stored controller -> start inquiry\n", reason);
+                gap_inquiry_start(30);
+            }
             break;
         }
 
@@ -733,6 +830,9 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
                 } else if (psm == PSM_HID_INTERRUPT) {
                     printf("[L2CAP] HID Interrupt opened cid=0x%04X\n", local_cid);
                     hid_interrupt_cid = local_cid;
+                    // A controller is fully connected -- close any open pairing
+                    // window so bonded controllers can auto-reconnect again.
+                    pairing_window = false;
                     // Successful pair removes this MAC from the blacklist -- an
                     // explicit PS+Share re-pair is the user un-forgetting it.
                     bt_blacklist_remove(current_device_addr);

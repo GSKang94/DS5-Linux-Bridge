@@ -123,11 +123,13 @@ h2{font-size:1.1rem;margin-bottom:.3rem}
 
 <h2>Paired controllers</h2>
 <div class="hint">Controllers the adapter remembers. The adapter holds up to
-  <span id="bond_max">4</span>. Forgetting one frees a slot; you'll re-pair with
-  Share + PS next time.</div>
+  <span id="bond_max">4</span>. Once a controller is paired the adapter stops
+  looking for new ones (a remembered controller reconnects on its own) &mdash;
+  use <b>Pair new controller</b> to add another, or forget one to free a slot.</div>
 <div id="bonds"></div>
 <div id="bonds_empty" style="display:none">No paired controllers stored.</div>
 <div class="btns">
+  <button id="pair">Pair new controller</button>
   <button id="forgetall" class="fg">Forget all</button>
   <span id="bstatus"></span>
 </div>
@@ -226,6 +228,10 @@ function forgetBond(addr,label){
   if(!confirm('Forget "'+label+'"?\nYou will need to re-pair it (Share + PS).'))return;
   postBonds('action=forget&addr='+addr,'forgetting…');
 }
+$('pair').onclick=()=>{
+  if(!confirm('Pair a new controller?\nThe controller you are using now will disconnect (it stays remembered and reconnects later). Then put the new controller in pairing mode (hold Share + PS until the light bar flashes).'))return;
+  postBonds('action=pair','opening pairing…');
+};
 $('forgetall').onclick=()=>{
   if(!confirm('Forget ALL paired controllers?\nEach will need to be re-paired.'))return;
   postBonds('action=forgetall','forgetting all…');

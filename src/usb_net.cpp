@@ -444,6 +444,14 @@ static void apply_bonds_post(char *body) {
         }
     }
 
+    if (strcmp(action, "pair") == 0) {
+        // Open a fresh inquiry to add another controller. Normally the dongle
+        // only inquires when nothing is bonded; this is the deliberate opt-in.
+        bt_start_pairing();
+        printf("[NET] start pairing (open inquiry) via web UI\n");
+        return;
+    }
+
     if (strcmp(action, "forgetall") == 0) {
         bt_bond_forget_all();
         // Wipe all nicknames too (no bonds left to name).

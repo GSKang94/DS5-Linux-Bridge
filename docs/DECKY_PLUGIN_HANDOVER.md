@@ -136,9 +136,23 @@ controller reconnects / the adapter is replugged.
 - `rename` + `addr` + `name` (≤15 chars; URL-encode it)
 - `forget` + `addr`
 - `forgetall`
+- `pair` (no `addr`) — add another controller
 
 Forget disconnects the live controller if it's the target and blacklists its
 address (persists across power cycles); re-pair with **Share + PS** to restore.
+
+The adapter only auto-scans for a controller when none is bonded; once one is
+paired it relies on page-scan reconnect. `pair` is the explicit way to add a
+second controller. Because the firmware connects one controller at a time (and
+the network interface only exists while connected), `pair` **disconnects the
+currently connected controller** — keeping its bond, so it reconnects later —
+and opens a 30 s inquiry window. The new controller (in **Share + PS** mode)
+becomes the active connection. During the window incoming auto-reconnects from
+the just-disconnected controller are rejected so it can't reclaim the slot
+before the new one pairs; the window closes when a controller connects or the
+inquiry finds nothing. Expect the NCM link to drop when you send `pair` (the old
+controller disconnects), so issue it fire-and-forget — don't wait on the
+response over the same connection.
 
 > **Behaviour shared with the web page (not plugin bugs):** because the network
 > interface only exists while connected, you can't reach the API to forget bonds

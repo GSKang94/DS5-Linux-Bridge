@@ -84,6 +84,12 @@ bool bt_bond_forget(const uint8_t *addr);
 // Forget every stored bond.
 void bt_bond_forget_all();
 
+// Force a fresh 30s inquiry to pair an additional controller, even when one is
+// already bonded. No-op while a controller is connected. Invoked from the web
+// API (POST /api/bonds action=pair); normally the dongle only inquires when no
+// controller is bonded.
+void bt_start_pairing();
+
 // If a controller is currently connected, copy its address into addr_out
 // (BT_ADDR_LEN bytes) and return true; otherwise return false.
 bool bt_connected_addr(uint8_t *addr_out);

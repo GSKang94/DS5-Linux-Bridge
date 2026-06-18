@@ -115,6 +115,13 @@ about *direction*, not "things upstream gets wrong.")
    successful connection.
 3. Once paired, the adapter enumerates the controller interfaces to the host.
 
+The adapter only scans for a controller (inquiry) when **no controller is
+remembered**. Once at least one controller is paired it stops scanning — a
+remembered controller reconnects on its own — so a nearby DualSense in pairing
+mode won't get grabbed. To deliberately add another controller, use **Pair new
+controller** on the web page (or `POST /api/bonds` with `action=pair`); this
+opens a fresh 30-second inquiry while the adapter is idle.
+
 ---
 
 ## Operating System & Driver Behavior
@@ -220,6 +227,15 @@ link keys it stores, up to four). For each you can:
 - **Rename** it with a short nickname (≤15 chars), stored in the adapter's flash.
 - **Forget** it, or **Forget all** — which clears the stored link key(s) so the
   slot is freed.
+
+**Pair new controller** opens a fresh inquiry so you can add another DualSense
+even while controllers are already remembered (the adapter otherwise scans only
+when nothing is paired). Because the adapter connects one controller at a time,
+clicking it disconnects the controller you're currently using — **its bond is
+kept**, so it reconnects later — and opens a 30-second pairing window. Put the
+new controller in **Share + PS** mode during that window; it becomes the active
+connection. During the window the previous controller is held off so it can't
+grab the slot back before the new one pairs.
 
 Forgetting a controller disconnects it if it's the one currently connected, and
 blacklists its Bluetooth address so it can't silently auto-reconnect afterward.

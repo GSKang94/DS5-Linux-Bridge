@@ -11,7 +11,7 @@ getting it right on Linux / SteamOS (Bazzite).
   &nbsp;·&nbsp;
   <a href="docs/USER_GUIDE.md">📖 User guide</a>
   &nbsp;·&nbsp;
-  <a href="https://github.com/kungaa/DS5-Linux-Decky">🎮 Steam Deck plugin</a>
+  <a href="https://github.com/kungaa/DS5-Linux-Decky">🎮 Decky Loader plugin</a>
 </p>
 
 > **Opinionated Linux fork of [awalol/DS5Dongle](https://github.com/awalol/DS5Dongle).**

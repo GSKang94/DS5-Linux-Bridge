@@ -476,8 +476,8 @@ uint8_t descriptor_configuration[] = {
     0x00, // bCountryCode: Not localized
     0x01, // bNumDescriptors: 1 report descriptor
     0x22, // bDescriptorType: Report
-    0x21, 0x01, // wDescriptorLength: 289 (0x0121) DS
-    // 0x95, 0x01, // wDescriptorLength: 405 (0x0195) DSE
+    0x11, 0x01, // wDescriptorLength: 273 (0x0111) DS
+    // 0x85, 0x01, // wDescriptorLength: 389 (0x0185) DSE
 
     // Endpoint Descriptor (HID IN: EP4)
     0x07, // bLength
@@ -724,9 +724,9 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
     descriptor_configuration[offset - 1] = bInterval;
     descriptor_configuration[offset - 8] = bInterval;
     if (ds_mode()) {
-        descriptor_configuration[offset - 16] = 0x21; // DS report desc low byte (0x0121 = 289)
+        descriptor_configuration[offset - 16] = 0x11; // DS report desc low byte (0x0111 = 273)
     }else {
-        descriptor_configuration[offset - 16] = 0x95; // DSE report desc low byte (0x0195 = 405)
+        descriptor_configuration[offset - 16] = 0x85; // DSE report desc low byte (0x0185 = 389)
     }
     return descriptor_configuration;
 }
@@ -805,14 +805,11 @@ uint8_t const desc_hid_report_ds[] = {
     0x09, 0x25, //   Usage (0x25)
     0x95, 0x1A, //   Report Count (26)
     0xB1, 0x02, //   Feature (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
-    0x85, 0x0B, //   Report ID (11)
-    0x09, 0x41, //   Usage (0x41)
-    0x95, 0x29, //   Report Count (41)
-    0xB1, 0x02, //   Feature (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
-    0x85, 0x0C, //   Report ID (12)
-    0x09, 0x42, //   Usage (0x42)
-    0x95, 0x29, //   Report Count (41)
-    0xB1, 0x02, //   Feature (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
+    // Report IDs 11/12 (usages 0x41/0x42, 41-byte feature reports) removed: a
+    // genuine DualSense / DualSense Edge jumps 0x0A -> 0x20 here (confirmed
+    // against real-device descriptor dumps). These were inherited from
+    // upstream's base descriptor and never serviced by the firmware; removing
+    // them makes the report-ID set match real hardware exactly. -16 bytes each.
     0x85, 0x20, //   Report ID (32)
     0x09, 0x26, //   Usage (0x26)
     0x95, 0x3F, //   Report Count (63)
@@ -882,7 +879,7 @@ uint8_t const desc_hid_report_ds[] = {
     0xC0, // End Collection
     // 289 bytes
 };
-static_assert(sizeof(desc_hid_report_ds) == 0x0121);
+static_assert(sizeof(desc_hid_report_ds) == 0x0111);
 
 uint8_t const desc_hid_report_dse[] = {
     0x05, 0x01, // Usage Page (Generic Desktop Ctrls)
@@ -954,14 +951,11 @@ uint8_t const desc_hid_report_dse[] = {
     0x09, 0x25, //   Usage (0x25)
     0x95, 0x1A, //   Report Count (26)
     0xB1, 0x02, //   Feature (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
-    0x85, 0x0B, //   Report ID (11)
-    0x09, 0x41, //   Usage (0x41)
-    0x95, 0x29, //   Report Count (41)
-    0xB1, 0x02, //   Feature (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
-    0x85, 0x0C, //   Report ID (12)
-    0x09, 0x42, //   Usage (0x42)
-    0x95, 0x29, //   Report Count (41)
-    0xB1, 0x02, //   Feature (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
+    // Report IDs 11/12 (usages 0x41/0x42, 41-byte feature reports) removed: a
+    // genuine DualSense / DualSense Edge jumps 0x0A -> 0x20 here (confirmed
+    // against real-device descriptor dumps). These were inherited from
+    // upstream's base descriptor and never serviced by the firmware; removing
+    // them makes the report-ID set match real hardware exactly. -16 bytes each.
     0x85, 0x20, //   Report ID (32)
     0x09, 0x26, //   Usage (0x26)
     0x95, 0x3F, //   Report Count (63)
@@ -1089,7 +1083,7 @@ uint8_t const desc_hid_report_dse[] = {
     0xC0, // End Collection
     // 405 bytes
 };
-static_assert(sizeof(desc_hid_report_dse) == 0x0195);
+static_assert(sizeof(desc_hid_report_dse) == 0x0185);
 
 #ifdef ENABLE_WAKE_HID
 // 41-byte boot-keyboard report descriptor (modifier byte + reserved + 6 keycodes,

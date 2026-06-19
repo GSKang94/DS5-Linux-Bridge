@@ -71,12 +71,6 @@ else()
     set(ENABLE_VERBOSE_VALUE 0)
 endif ()
 add_compile_definitions(ENABLE_VERBOSE=${ENABLE_VERBOSE_VALUE})
-option(ENABLE_DIAG "Enable HID diagnostic counters and timing probes" OFF)
-if(ENABLE_DIAG)
-    set(ENABLE_DIAG_VALUE 1)
-else()
-    set(ENABLE_DIAG_VALUE 0)
-endif()
 option(ENABLE_BATT_LED "Blink Pico LED when DualSense battery is low (<=10%)" ON)
 if (ENABLE_BATT_LED)
         set(ENABLE_BATT_LED_VALUE 1)
@@ -123,7 +117,6 @@ add_executable(ds5-bridge
         src/bt.cpp
         src/dse.cpp
         src/config.cpp
-        src/cmd.cpp
         src/state_mgr.cpp
         src/ram_mem.c
 )
@@ -246,7 +239,6 @@ target_compile_definitions(ds5-bridge PRIVATE
         PICO_FLASH_ASSUME_CORE1_SAFE=0
         CYW43_PIO_CLOCK_DIV_INT=${CYW43_PIO_CLOCK_DIV_VALUE}
         ENABLE_VERBOSE=${ENABLE_VERBOSE_VALUE}
-        ENABLE_DIAG=${ENABLE_DIAG_VALUE}
         ENABLE_BATT_LED=${ENABLE_BATT_LED_VALUE}
         SYS_CLOCK_KHZ=${SYS_CLOCK_KHZ_VALUE}
         DISABLE_SPEAKER_PROC=${DISABLE_SPEAKER_PROC_VALUE}

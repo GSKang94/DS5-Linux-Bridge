@@ -15,7 +15,6 @@
 #include "wake.h"
 #include <cstdio>
 
-#include "cmd.h"
 #include "config.h"
 #include "dse.h"
 #include "usb_net.h"
@@ -32,19 +31,6 @@ int reportSeqCounter = 0;
 uint8_t packetCounter = 0;
 bool spk_active = false;
 bool mic_active = false;
-#if ENABLE_DIAG
-static volatile uint32_t main_loop_gap_max_us = 0;
-static volatile uint32_t cyw43_poll_max_us = 0;
-static volatile uint32_t tud_task_max_us = 0;
-static volatile uint32_t audio_loop_max_us = 0;
-static volatile uint32_t interrupt_loop_max_us = 0;
-
-static inline void timing_update_max(volatile uint32_t &current_max, uint32_t value) {
-  if (value > current_max) {
-    current_max = value;
-  }
-}
-#endif
 
 uint8_t interrupt_in_data[63] = {
     0x7f, 0x7d, 0x7f, 0x7e, 0x00, 0x00, 0xa7, 0x08, 0x00, 0x00, 0x00,
@@ -217,10 +203,6 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id,
   (void)buffer;
   (void)reqlen;
 
-  if (is_pico_cmd(report_id)) {
-    return pico_cmd_get(report_id, buffer, reqlen);
-  }
-
   // DSE profiles: while the unlock + prefetch is still in progress, return 0
   // (NAK) for profile reads so the PS app retries rather than caching an
   // empty snapshot. Still kick off the background BT fetch.
@@ -274,12 +256,6 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id,
   (void)report_type;
   (void)buffer;
   (void)bufsize;
-
-  if (is_pico_cmd(report_id)) {
-    printf("[HID] Receive 0xf6 setting config, funcid:0x%02X\n", buffer[0]);
-    pico_cmd_set(report_id, buffer, bufsize);
-    return;
-  }
 
   // INTERRUPT OUT
   if (report_id == 0) {
@@ -396,35 +372,12 @@ int main() {
   watchdog_enable(1000, true);
 
   while (1) {
-#if ENABLE_DIAG
-    static uint64_t last_loop_us = 0;
-    const uint64_t loop_start_us = time_us_64();
-    if (last_loop_us != 0) {
-      timing_update_max(main_loop_gap_max_us,
-                        static_cast<uint32_t>(loop_start_us - last_loop_us));
-    }
-    last_loop_us = loop_start_us;
-#endif
     watchdog_update();
-#if ENABLE_DIAG
-    uint64_t section_start_us = time_us_64();
-#endif
     cyw43_arch_poll();
-#if ENABLE_DIAG
-    timing_update_max(cyw43_poll_max_us,
-                      static_cast<uint32_t>(time_us_64() - section_start_us));
-#endif
     bt_connection_watchdog_tick();
     bt_blacklist_persist_if_dirty();
     bt_pump();
-#if ENABLE_DIAG
-    section_start_us = time_us_64();
-#endif
     tud_task();
-#if ENABLE_DIAG
-    timing_update_max(tud_task_max_us,
-                      static_cast<uint32_t>(time_us_64() - section_start_us));
-#endif
     wake_task();
 #ifdef ENABLE_WAKE_HID
     usb_variant_task();
@@ -432,20 +385,8 @@ int main() {
     // Service lwIP timers for the onboard config web server (no-op when
     // ENABLE_WEBCONFIG is off). Cheap; not in the audio hot path.
     usb_net_task();
-#if ENABLE_DIAG
-    section_start_us = time_us_64();
-#endif
     audio_loop();
-#if ENABLE_DIAG
-    timing_update_max(audio_loop_max_us,
-                      static_cast<uint32_t>(time_us_64() - section_start_us));
-    section_start_us = time_us_64();
-#endif
     interrupt_loop();
-#if ENABLE_DIAG
-    timing_update_max(interrupt_loop_max_us,
-                      static_cast<uint32_t>(time_us_64() - section_start_us));
-#endif
     // DSE Edge profile snapshot prefetch/unlock state machine.
     dse_task();
 #if ENABLE_BATT_LED
@@ -459,22 +400,3 @@ int main() {
     }
   }
 }
-
-#if ENABLE_DIAG
-void timing_get_diag(TimingDiag *out) {
-  if (out == nullptr) return;
-  out->main_loop_gap_max_us = main_loop_gap_max_us;
-  out->cyw43_poll_max_us = cyw43_poll_max_us;
-  out->tud_task_max_us = tud_task_max_us;
-  out->audio_loop_max_us = audio_loop_max_us;
-  out->interrupt_loop_max_us = interrupt_loop_max_us;
-}
-
-void timing_reset_diag() {
-  main_loop_gap_max_us = 0;
-  cyw43_poll_max_us = 0;
-  tud_task_max_us = 0;
-  audio_loop_max_us = 0;
-  interrupt_loop_max_us = 0;
-}
-#endif

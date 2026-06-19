@@ -13,13 +13,6 @@ enum CHANNEL_TYPE {
     CONTROL
 };
 
-#if ENABLE_DIAG
-struct BtDiag {
-    uint32_t audio_send_fifo_full;
-    uint32_t l2cap_send_errors;
-};
-#endif
-
 typedef void (*bt_data_callback_t)(CHANNEL_TYPE channel, uint8_t *data, uint16_t len);
 
 int bt_init();
@@ -31,10 +24,6 @@ void bt_write(const uint8_t *data, uint16_t len, bool kick = true);
 // cyw43_arch_poll() so the kick cost is paid outside audio_loop.
 void bt_pump();
 bool bt_send_pending();
-#if ENABLE_DIAG
-void bt_get_diag(BtDiag *out);
-void bt_reset_diag();
-#endif
 void bt_get_signal_strength(int8_t *rssi);
 
 // Live controller status for the web UI / Decky plugin (GET /api/status).

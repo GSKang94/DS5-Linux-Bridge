@@ -88,18 +88,8 @@ static bool check_dse = false;
 static int8_t bt_rssi = 0;
 unordered_map<uint8_t, vector<uint8_t> > feature_data;
 queue_t send_fifo;
-#if ENABLE_DIAG
-static volatile uint32_t bt_audio_send_fifo_full_count = 0;
-static volatile uint32_t bt_l2cap_send_error_count = 0;
-#endif
 
 constexpr size_t BT_SEND_MAX_PACKET_SIZE = 400; // 0xA2 header + 398-byte audio report + slack
-
-#if ENABLE_DIAG
-static inline void bump_counter(volatile uint32_t &counter) {
-    counter = counter + 1;
-}
-#endif
 
 struct send_element {
     uint8_t data[BT_SEND_MAX_PACKET_SIZE];
@@ -920,9 +910,6 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
                 }
                 const uint8_t status = l2cap_send(hid_interrupt_cid, send_packet.data, send_packet.len);
                 if (status != 0) {
-#if ENABLE_DIAG
-                    bump_counter(bt_l2cap_send_error_count);
-#endif
                     retry_packet = send_packet;
                     retry_pending = true;
                     extern volatile bool send_chain_active;
@@ -970,9 +957,6 @@ void bt_write(const uint8_t *data, const uint16_t len, bool kick) {
 
     if (!queue_try_add(&send_fifo, &packet)) {
         if (!kick) {
-#if ENABLE_DIAG
-            bump_counter(bt_audio_send_fifo_full_count);
-#endif
             return;
         }
         printf("[L2CAP bt_write] Error: Failed to add packet to send FIFO\n");
@@ -1013,19 +997,6 @@ void bt_pump() {
 bool bt_send_pending() {
     return !queue_is_empty(&send_fifo) || send_chain_active;
 }
-
-#if ENABLE_DIAG
-void bt_get_diag(BtDiag *out) {
-    if (out == nullptr) return;
-    out->audio_send_fifo_full = bt_audio_send_fifo_full_count;
-    out->l2cap_send_errors = bt_l2cap_send_error_count;
-}
-
-void bt_reset_diag() {
-    bt_audio_send_fifo_full_count = 0;
-    bt_l2cap_send_error_count = 0;
-}
-#endif
 
 vector<uint8_t> get_feature_data(uint8_t reportId, uint16_t len) {
     // 若为0x81则会请求新内容，其他若有旧数据则不进行请求

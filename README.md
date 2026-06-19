@@ -40,7 +40,7 @@ getting it right on Linux / SteamOS (Bazzite).
   configuration page (no app, no WebHID, any browser). Adjust settings and
   manage remembered controllers. Reachable whether or not a controller is
   connected.
-- 🎮 **Steam Deck companion plugin** — a [Decky Loader plugin](https://github.com/kungaa/DS5-Linux-Decky)
+- 🎮 **Decky Loader companion plugin** — a [Decky Loader plugin](https://github.com/kungaa/DS5-Linux-Decky)
   surfaces controller status and settings in the Quick Access Menu, talking to
   the same on-device API as the web page.
 - 🔌 **Wake from sleep (S3 / S5)** — wake the host by turning on the controller

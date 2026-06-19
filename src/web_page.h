@@ -113,10 +113,22 @@ footer .kofi:hover{text-decoration:none;opacity:.9}
     <option value="0">10.55.55.105 (default)</option>
     <option value="1">172.31.55.105</option>
     <option value="2">192.168.137.105</option>
+    <option value="3">Custom…</option>
   </select>
   <div class="hint">Where this page is served. Change only if it collides with
-  your network. Takes effect after you unplug and replug the adapter — then
-  browse to the new address.</div>
+  your network — or to give each of several adapters on one PC its own address.
+  Takes effect after you unplug and replug the adapter — then browse to the new
+  address.</div>
+  <div id="customip_wrap" style="display:none;margin-top:.5rem">
+    <input id="webconfig_custom_ip" type="text" inputmode="decimal"
+           placeholder="e.g. 10.20.30.105" pattern="\d{1,3}(\.\d{1,3}){3}">
+    <div class="hint">⚠️ <b>Advanced.</b> Must be a <b>private</b> address
+    (<code>10.x.x.x</code>, <code>172.16–31.x.x</code>, or
+    <code>192.168.x.x</code>), and not a <code>.0</code>/<code>.255</code>. If
+    you enter something unreachable the adapter falls back to the default
+    address — you won't get locked out, but you may not land where you expected.
+    The PC gets a DHCP lease in the same <code>/29</code> block.</div>
+  </div>
 </div>
 
 <div>
@@ -149,6 +161,9 @@ const upd=[bindRange('audio_buffer_length','ab_val'),bindRange('inactive_time','
 function markDirty(){$('save').disabled=false;setStatus('unsaved changes','dirty')}
 ['controller_mode','polling_rate_mode','disable_inactive_disconnect','disable_pico_led','webconfig_subnet']
   .forEach(id=>$(id).onchange=markDirty);
+function toggleCustomIp(){$('customip_wrap').style.display=$('webconfig_subnet').value==='3'?'':'none'}
+$('webconfig_subnet').addEventListener('change',toggleCustomIp);
+$('webconfig_custom_ip').oninput=markDirty;
 
 async function load(){
   try{
@@ -161,6 +176,9 @@ async function load(){
     $('disable_inactive_disconnect').checked=!!c.disable_inactive_disconnect;
     $('disable_pico_led').checked=!!c.disable_pico_led;
     $('webconfig_subnet').value=c.webconfig_subnet;
+    if(c.webconfig_custom_ip&&c.webconfig_custom_ip!=='0.0.0.0')
+      $('webconfig_custom_ip').value=c.webconfig_custom_ip;
+    toggleCustomIp();
     upd.forEach(f=>f());
     $('save').disabled=true;setStatus('');
   }catch(e){setStatus('load failed','err')}
@@ -174,7 +192,8 @@ async function save(){
     'inactive_time='+$('inactive_time').value,
     'disable_inactive_disconnect='+($('disable_inactive_disconnect').checked?1:0),
     'disable_pico_led='+($('disable_pico_led').checked?1:0),
-    'webconfig_subnet='+$('webconfig_subnet').value
+    'webconfig_subnet='+$('webconfig_subnet').value,
+    'webconfig_custom_ip='+encodeURIComponent($('webconfig_custom_ip').value.trim())
   ].join('&');
   setStatus('saving…','dirty');
   try{

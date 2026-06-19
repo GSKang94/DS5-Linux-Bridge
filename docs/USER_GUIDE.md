@@ -81,11 +81,27 @@ adapter across controller connect/disconnect.
    inactivity timeout, auto-disconnect, onboard LED — and click **Save**.
    Settings are written to the adapter's flash.
 
-The page address is selectable (default `10.55.55.105`, with `172.31.55.105` and
-`192.168.137.105` alternatives) in case the default subnet collides with your
-network. Changing it requires unplugging and replugging the adapter, after which
-you browse to the new address. It's a fixed list, not a free-form IP — you can't
-lock yourself out.
+The page address is selectable: three vetted presets — default `10.55.55.105`,
+plus `172.31.55.105` and `192.168.137.105` — in case the default subnet collides
+with your network. Changing it requires unplugging and replugging the adapter,
+after which you browse to the new address. The presets can't lock you out.
+
+There is also a **Custom…** option for a free-form address. It must be a
+**private** IP (`10.x.x.x`, `172.16–31.x.x`, or `192.168.x.x`) and not a
+`.0`/`.255`; the adapter validates this and **falls back to the default address
+if you enter something unreachable**, so you can't brick the page — but you may
+not land where you expected. The PC gets its DHCP lease in the same `/29` block.
+
+### Multiple adapters on one PC
+
+Each adapter is a separate USB network device, so several can share one host —
+but they all default to `10.55.55.105`, so their config pages would collide. To
+run more than one at once, give each its own address: plug the first adapter in
+**alone**, set it to a different preset (or a Custom address) and Save, then
+unplug it and bring up the next. Three presets cover three adapters out of the
+box; use Custom addresses for more. (This only affects the config page — the
+controllers themselves work regardless. The [Steam Deck plugin](#steam-deck-plugin)
+discovers adapters by probing the presets first.)
 
 Flash writes from the page (saving settings, renaming/forgetting bonds) are made
 **audio-safe**: the audio core is briefly parked during the flash erase/program

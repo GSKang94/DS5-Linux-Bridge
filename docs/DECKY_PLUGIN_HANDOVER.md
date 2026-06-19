@@ -50,18 +50,43 @@ The firmware is the **DHCP server**. Addresses (from `src/usb_net.cpp`,
 | Netmask | 255.255.255.248 (`/29`) |
 | Gateway / DNS | none (link-local only; never routes, never hijacks DNS) |
 
-The subnet is **user-selectable** (config field `webconfig_subnet`, 0–2) in case
-of collision:
+The subnet is **user-selectable** (config field `webconfig_subnet`) in case of
+collision — and so several dongles can coexist on one host, each on its own
+address. Three vetted presets, plus a custom-IP escape hatch:
 
 | `webconfig_subnet` | Dongle IP |
 | --- | --- |
 | 0 (default) | 10.55.55.105 |
 | 1 | 172.31.55.105 |
 | 2 | 192.168.137.105 |
+| 3 (custom) | `webconfig_custom_ip` (a private address the user typed) |
 
-**Plugin must handle all three.** Read `webconfig_subnet` from `/api/config`, or
-just probe each `*.105` until one answers. Hardcoding only `.105` is the common
-first-version shortcut but will silently fail for users who changed it.
+`/api/config` reports `webconfig_custom_ip` as a dotted-quad string (`"0.0.0.0"`
+when unset). When `webconfig_subnet == 3`, that's the live dongle address.
+
+**Plugin must not hardcode only `.105`.** Hardcoding the default is the common
+first-version shortcut but silently fails for users who changed it.
+
+### Multi-dongle discovery (desired plugin behavior — two stages)
+
+Multiple dongles can be plugged into one host at once, each on a different
+address (the user assigns these manually via the web page). Discover them in two
+stages:
+
+1. **Probe the three presets** (`10.55.55.105`, `172.31.55.105`,
+   `192.168.137.105`) with a cheap `GET /api/status`. This catches the common
+   case with zero guesswork.
+2. **Then enumerate the host's network interfaces** for the USB-NCM links and
+   probe their `/29` neighbours — this is how you find dongles on **custom**
+   addresses (which aren't in the preset list). On the Deck, the NCM ifaces show
+   up as additional NICs; for each, the dongle is the `.105`-equivalent / DHCP
+   server on that link, so a probe of the gateway-less /29 host range finds it.
+
+If more than one answers, treat each as a **separate dongle instance** — let the
+user pick which to view/manage and expose status + settings for each
+independently (not just the first that answers). Each address is an independent
+dongle with its own `/api/*`; there is no cross-dongle aggregation in firmware,
+so the plugin owns the multi-instance UX.
 
 Gotchas:
 - **The interface exists whether or not a controller is connected.** NCM is
@@ -104,7 +129,7 @@ auth, no HTTPS (link-local USB segment).
 ```json
 { "version": "v1.1.0", "inactive_time": 10, "disable_inactive_disconnect": 0,
   "disable_pico_led": 0, "polling_rate_mode": 2, "audio_buffer_length": 32,
-  "controller_mode": 2, "webconfig_subnet": 0 }
+  "controller_mode": 2, "webconfig_subnet": 0, "webconfig_custom_ip": "0.0.0.0" }
 ```
 
 ### `POST /api/config`  — save settings
@@ -120,7 +145,8 @@ source of truth for bounds):
 | `inactive_time` | idle disconnect (min) | 5–60 |
 | `disable_inactive_disconnect` | never idle-disconnect | 0/1 |
 | `disable_pico_led` | onboard LED off | 0/1 |
-| `webconfig_subnet` | page address index | 0–2 |
+| `webconfig_subnet` | page address index (3 = custom) | 0–3 |
+| `webconfig_custom_ip` | custom dongle IP (used when subnet=3) | private IPv4 |
 
 `controller_mode`, `polling_rate_mode`, `webconfig_subnet` take effect after the
 controller reconnects / the adapter is replugged.

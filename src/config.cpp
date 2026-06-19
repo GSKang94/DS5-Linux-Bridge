@@ -11,10 +11,11 @@
 #include "hardware/sync.h"
 #include "pico/cyw43_arch.h"
 #include "pico/flash.h" // flash_safe_execute(): park core1 during the flash op
+#include "usb_net.h" // WEBCONFIG_SUBNET_COUNT (subnet-index bound, always defined)
 #include "utils.h"
 
 constexpr uint32_t CONFIG_MAGIC = 0x66ccff00;
-constexpr uint16_t CONFIG_VERSION = 4; // v4 added Config_body.bond_names
+constexpr uint16_t CONFIG_VERSION = 5; // v5 added webconfig_custom_ip; v4 bond_names
 constexpr uint32_t CONFIG_FLASH_OFFSET =
     PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE;
 static Config config{};
@@ -79,9 +80,17 @@ void config_valid() {
     body->controller_mode = 2;
     printf("[Config] controller_mode is invalid\n");
   }
-  if (body->webconfig_subnet > 2) {
+  if (body->webconfig_subnet > WEBCONFIG_SUBNET_MAX) {
     body->webconfig_subnet = 0; // default: 10.55.55.x
     printf("[Config] webconfig_subnet is invalid\n");
+  }
+  // If "custom IP" is selected, the stored address must be a valid private host
+  // address; otherwise fall back to the default preset so the page stays
+  // reachable (this is the safety net behind the custom-IP YOLO option).
+  if (body->webconfig_subnet == WEBCONFIG_SUBNET_CUSTOM &&
+      !webconfig_ip_is_valid(body->webconfig_custom_ip)) {
+    body->webconfig_subnet = 0;
+    printf("[Config] webconfig_custom_ip invalid; using default preset\n");
   }
   if (body->config_version != CONFIG_VERSION) {
     body->config_version = CONFIG_VERSION;
@@ -97,11 +106,14 @@ void config_valid() {
 void config_load() {
   memcpy(&config, flash_config(), sizeof(Config));
 
-  // Migration: bond_names was added in config v4. If the flash holds an older
-  // (or uninitialized/0xFF) config, that region is garbage -- zero it so we
-  // start with no nicknames rather than random bytes. config_valid() (below)
-  // bumps the version field afterwards.
+  // Migration: on any version mismatch (older format, or uninitialized/0xFF
+  // flash) the trailing struct region is garbage. v5 inserted webconfig_custom_ip
+  // ahead of bond_names, shifting their offsets, so zero both: the custom IP
+  // becomes 0.0.0.0 (invalid -> config_valid() falls back to the default preset)
+  // and nicknames start empty rather than random. config_valid() (below) then
+  // bumps the version and clamps every other field.
   if (config.version != CONFIG_VERSION) {
+    memset(config.body.webconfig_custom_ip, 0, sizeof(config.body.webconfig_custom_ip));
     memset(config.body.bond_names, 0, sizeof(config.body.bond_names));
   }
 

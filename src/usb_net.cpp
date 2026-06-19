@@ -57,19 +57,44 @@ static struct netif netif_data;
 // Each is an obscure corner of RFC 1918 space (homes mostly use 192.168.0/1.x
 // or 10.0.0.x), spread across all three private blocks so if one ever collides
 // with the user's real LAN, another almost certainly won't. The dongle takes
-// .105; the host PC gets .106 by DHCP. Because this is an *index* into a fixed
-// table (not a free-form IP), a "wrong" choice still lands on a valid, reachable
-// subnet -- there is no way to type yourself into an unreachable state.
+// .105; the host PC gets .106 by DHCP. For a preset this is an *index* into a
+// fixed table, so a "wrong" choice still lands on a valid, reachable subnet.
+// A fourth selector value (WEBCONFIG_SUBNET_CUSTOM) instead uses a user-entered
+// private IP (Config_body.webconfig_custom_ip) -- power-user escape hatch, still
+// constrained to RFC-1918 host addresses so it can't point somewhere unroutable.
 //
-// IMPORTANT: keep this table, WEBCONFIG_SUBNET_COUNT, the web page <select> and
-// the config_valid() bound in sync.
+// IMPORTANT: keep this table and the web page <select> in sync with
+// WEBCONFIG_SUBNET_COUNT (usb_net.h) -- the static_assert below enforces the
+// table length, and config_valid() clamps against the same constant.
 struct subnet_def { uint8_t a, b, c; };
 static const subnet_def kSubnets[] = {
     {10,  55,  55},   // 0: 10.55.55.105   (default; distinct from PC-wake-dongle)
     {172, 31,  55},   // 1: 172.31.55.105  (top of 172.16/12, almost never used)
     {192, 168, 137},  // 2: 192.168.137.105 (Windows ICS default range)
 };
-#define WEBCONFIG_SUBNET_COUNT (sizeof(kSubnets) / sizeof(kSubnets[0]))
+static_assert(sizeof(kSubnets) / sizeof(kSubnets[0]) == WEBCONFIG_SUBNET_COUNT,
+              "kSubnets size must match WEBCONFIG_SUBNET_COUNT (usb_net.h)");
+
+// True if a.b.c.d is a usable *private* host address for the config page: inside
+// RFC-1918 (10/8, 172.16/12, 192.168/16), and not a .0 network / .255 broadcast
+// / .105+ overflow within its /29. This is the gate that keeps "custom IP" from
+// bricking config-page reachability -- YOLO means "any private host", not "any
+// 32 bits". Shared with config_valid() via webconfig_ip_is_valid().
+bool webconfig_ip_is_valid(const uint8_t ip[4]) {
+    const uint8_t a = ip[0], b = ip[1], d = ip[3];
+    const bool rfc1918 =
+        (a == 10) ||
+        (a == 172 && b >= 16 && b <= 31) ||
+        (a == 192 && b == 168);
+    if (!rfc1918) return false;
+    // Keep the dongle host octet in [1,252] so its /29 (network = d & ~7) has
+    // room for the .+1..+3 host leases below without hitting .255 broadcast.
+    if (d < 1 || d > 252) return false;
+    const uint8_t net = d & 0xF8; // /29 network base
+    if (d == net) return false;       // network address
+    if (d == (net + 7)) return false; // /29 broadcast
+    return true;
+}
 
 // Resolved at init from the config index.
 static ip4_addr_t ipaddr;
@@ -79,15 +104,30 @@ static dhcp_entry_t dhcp_entries[3];
 static dhcp_config_t dhcp_config;
 
 // Populate ipaddr/netmask/dhcp from the selected subnet (called in usb_net_init).
-static void build_subnet(uint8_t idx) {
-    if (idx >= WEBCONFIG_SUBNET_COUNT) idx = 0;
-    const subnet_def &s = kSubnets[idx];
-    IP4_ADDR(&ipaddr,  s.a, s.b, s.c, 105);
+// For presets the dongle is .105 and the host leases are .106-.108. For a custom
+// IP the dongle takes the user octets and the host leases are the other usable
+// addresses in the same /29 (skipping the dongle's own host octet).
+static void build_subnet(uint8_t idx, const uint8_t custom_ip[4]) {
+    uint8_t da, db, dc, dd; // dongle address octets
+    if (idx == WEBCONFIG_SUBNET_CUSTOM && webconfig_ip_is_valid(custom_ip)) {
+        da = custom_ip[0]; db = custom_ip[1]; dc = custom_ip[2]; dd = custom_ip[3];
+    } else {
+        if (idx >= WEBCONFIG_SUBNET_COUNT) idx = 0;
+        const subnet_def &s = kSubnets[idx];
+        da = s.a; db = s.b; dc = s.c; dd = 105;
+    }
+    IP4_ADDR(&ipaddr,  da, db, dc, dd);
     IP4_ADDR(&netmask, 255, 255, 255, 248); // /29
     IP4_ADDR(&gateway, 0, 0, 0, 0);         // link-local only, no routing
-    for (int i = 0; i < 3; i++) {
-        IP4_ADDR(&dhcp_entries[i].addr, s.a, s.b, s.c, 106 + i);
-        dhcp_entries[i].lease = 24 * 60 * 60;
+    // Host leases: the three usable /29 host octets other than the dongle's own.
+    const uint8_t net = dd & 0xF8;
+    int n = 0;
+    for (uint8_t off = 1; off <= 6 && n < 3; off++) {
+        const uint8_t host = net + off;
+        if (host == dd) continue; // don't lease the dongle's own address
+        IP4_ADDR(&dhcp_entries[n].addr, da, db, dc, host);
+        dhcp_entries[n].lease = 24 * 60 * 60;
+        n++;
     }
     IP4_ADDR(&dhcp_config.router, 0, 0, 0, 0); // none
     dhcp_config.port = 67;
@@ -189,7 +229,8 @@ static int json_config(char *out, size_t cap) {
                     "\"polling_rate_mode\":%u,"
                     "\"audio_buffer_length\":%u,"
                     "\"controller_mode\":%u,"
-                    "\"webconfig_subnet\":%u}",
+                    "\"webconfig_subnet\":%u,"
+                    "\"webconfig_custom_ip\":\"%u.%u.%u.%u\"}",
                     PICO_PROGRAM_VERSION_STRING,
                     c.inactive_time,
                     c.disable_inactive_disconnect,
@@ -197,7 +238,9 @@ static int json_config(char *out, size_t cap) {
                     c.polling_rate_mode,
                     c.audio_buffer_length,
                     c.controller_mode,
-                    c.webconfig_subnet);
+                    c.webconfig_subnet,
+                    c.webconfig_custom_ip[0], c.webconfig_custom_ip[1],
+                    c.webconfig_custom_ip[2], c.webconfig_custom_ip[3]);
 }
 
 //--------------------------------------------------------------------+
@@ -408,7 +451,18 @@ static void apply_post(char *body) {
         } else if (strcmp(tok, "controller_mode") == 0) {
             c.controller_mode = (uint8_t) clampi(val, 0, 2);
         } else if (strcmp(tok, "webconfig_subnet") == 0) {
-            c.webconfig_subnet = (uint8_t) clampi(val, 0, (int) WEBCONFIG_SUBNET_COUNT - 1);
+            c.webconfig_subnet = (uint8_t) clampi(val, 0, WEBCONFIG_SUBNET_MAX);
+        } else if (strcmp(tok, "webconfig_custom_ip") == 0) {
+            // Dotted-quad "a.b.c.d" (dots aren't URL-encoded). Parse leniently;
+            // config_valid() is the real gate and rejects non-private addresses.
+            unsigned a = 0, b = 0, cc = 0, d = 0;
+            if (sscanf(eq, "%u.%u.%u.%u", &a, &b, &cc, &d) == 4 &&
+                a <= 255 && b <= 255 && cc <= 255 && d <= 255) {
+                c.webconfig_custom_ip[0] = (uint8_t) a;
+                c.webconfig_custom_ip[1] = (uint8_t) b;
+                c.webconfig_custom_ip[2] = (uint8_t) cc;
+                c.webconfig_custom_ip[3] = (uint8_t) d;
+            }
         }
     }
 
@@ -537,7 +591,8 @@ void usb_net_init() {
     memcpy(tud_network_mac_address + 1, board_id.id + 3, 5);
 
     // Resolve the selected subnet (web-UI configurable) before bringing up lwIP.
-    build_subnet(get_config().webconfig_subnet);
+    const Config_body &cfg = get_config();
+    build_subnet(cfg.webconfig_subnet, cfg.webconfig_custom_ip);
 
     lwip_init();
 

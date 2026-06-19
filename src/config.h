@@ -28,7 +28,14 @@ struct __attribute__((packed)) Config_body {
     uint8_t polling_rate_mode; // 0: 250Hz, 1: 500Hz, 2: real-time
     uint8_t audio_buffer_length; // [16,128]
     uint8_t controller_mode; // 0: DS5, 1: DSE, 2: Auto
-    uint8_t webconfig_subnet; // index into the vetted /29 subnet table [0,2]
+    // Config-page address selector. 0..2 = vetted /29 presets; WEBCONFIG_SUBNET_CUSTOM
+    // (3) = use webconfig_custom_ip below. See usb_net.cpp build_subnet().
+    uint8_t webconfig_subnet;
+    // Custom dongle IP (4 octets) used only when webconfig_subnet == CUSTOM. Must
+    // be a private (RFC-1918) host address; validated in config_valid(). The host
+    // DHCP lease lands in the same /29 (mirrors the preset scheme). 0.0.0.0 means
+    // "unset" -> falls back to the default preset.
+    uint8_t webconfig_custom_ip[4];
     BondName bond_names[CONFIG_MAX_BOND_NAMES]; // nicknames for paired controllers
 };
 

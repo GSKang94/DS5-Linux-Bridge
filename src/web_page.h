@@ -28,11 +28,11 @@ button:disabled{background:#333;color:#777;cursor:default}
 .err{color:#f87171}
 hr{border:0;border-top:1px solid #333;margin:2rem 0}
 h2{font-size:1.1rem;margin-bottom:.3rem}
-.bond{display:flex;align-items:center;gap:.5rem;padding:.5rem 0;border-bottom:1px solid #222}
-.bond .nm{flex:1;background:#222;border:1px solid #444;color:#eee;padding:.35rem;border-radius:4px;font-size:.9rem}
+.bond{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;padding:.5rem 0;border-bottom:1px solid #222}
+.bond .nm{flex:1 1 8rem;min-width:0;background:#222;border:1px solid #444;color:#eee;padding:.35rem;border-radius:4px;font-size:.9rem}
 .bond .addr{color:#888;font-size:.78rem;font-family:monospace}
-.bond .dot{color:#4ade80;font-size:.78rem}
-.bond button{margin:0;padding:.35rem .7rem;font-size:.85rem;background:#3a3a3a}
+.bond .dot{color:#4ade80;font-size:.78rem;white-space:nowrap}
+.bond button{margin:0;padding:.35rem .7rem;font-size:.85rem;background:#3a3a3a;flex:none}
 .bond button.fg{background:#7f1d1d}
 .btns{display:flex;gap:.5rem;align-items:center}
 #bonds_empty{color:#888;font-size:.9rem}
@@ -47,6 +47,11 @@ h2{font-size:1.1rem;margin-bottom:.3rem}
 .batt .bar::after{content:"";position:absolute;right:-3px;top:4px;width:2px;height:6px;background:#888}
 .batt .fill{height:100%;background:#4ade80;border-radius:1px}
 .batt.low .fill{background:#f87171}
+footer{margin:2.5rem 0 1rem;padding-top:1rem;border-top:1px solid #333;display:flex;gap:1rem;flex-wrap:wrap;align-items:center;font-size:.85rem;color:#888}
+footer a{color:#60a5fa;text-decoration:none}
+footer a:hover{text-decoration:underline}
+footer .kofi{color:#fff;background:#13c3ff;padding:.3rem .7rem;border-radius:4px}
+footer .kofi:hover{text-decoration:none;opacity:.9}
 </style></head><body>
 <h1>DS5-Linux-Bridge <small id="ver"></small></h1>
 <p>Adapter configuration. Changes are saved to the adapter's flash.</p>
@@ -262,7 +267,12 @@ load();
 loadBonds();
 loadStatus();
 setInterval(loadStatus,4000);
-</script></body></html>
+</script>
+<footer>
+  <a href="https://github.com/kungaa/ds5-linux-bridge" target="_blank" rel="noopener">GitHub</a>
+  <a class="kofi" href="https://ko-fi.com/mkungaa" target="_blank" rel="noopener">☕ Support on Ko-fi</a>
+</footer>
+</body></html>
 )rawhtml";
 
 #endif // DS5_BRIDGE_WEB_PAGE_H

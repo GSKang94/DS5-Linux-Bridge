@@ -76,6 +76,10 @@ serves the page over a tiny onboard HTTP server. The page is reachable **whether
 or not a controller is connected**, and the host keeps a single, stable network
 adapter across controller connect/disconnect.
 
+<p align="center">
+  <img src="../assets/webconfig.png" alt="The DS5-Linux-Bridge configuration page, showing the live status card, controller mode and polling-rate selectors, audio-buffer and inactivity-timeout sliders, config-page address, and the paired-controllers list." width="360">
+</p>
+
 1. Open **http://10.55.55.105/** in any browser.
 2. Adjust settings — controller mode, polling rate, audio buffer length,
    inactivity timeout, auto-disconnect, onboard LED — and click **Save**.

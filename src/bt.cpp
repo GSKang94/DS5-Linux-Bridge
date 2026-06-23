@@ -12,6 +12,7 @@
 #include "btstack_event.h"
 #include "btstack_tlv.h" // persistent blacklist storage (forget-bond enforcement)
 #include "gap.h"
+#include "hci_cmd.h"
 #include "l2cap.h"
 #include "pico/cyw43_arch.h"
 #include "utils.h"
@@ -112,6 +113,14 @@ void bt_send_control(uint8_t *data, uint16_t len) {
     if (hid_control_cid != 0) {
         l2cap_send(hid_control_cid, data, len);
     }
+}
+
+static void bt_apply_low_latency_link_policy(hci_con_handle_t handle) {
+    if (handle == HCI_CON_HANDLE_INVALID) {
+        return;
+    }
+    hci_send_cmd(&hci_write_link_policy_settings, handle,
+                 LM_LINK_POLICY_DISABLE_ALL_LM_MODES);
 }
 
 bool bt_disconnect() {
@@ -415,6 +424,7 @@ int bt_init() {
     gap_secure_connections_enable(true);
     gap_ssp_set_io_capability(SSP_IO_CAPABILITY_DISPLAY_YES_NO);
     gap_ssp_set_authentication_requirement(SSP_IO_AUTHREQ_MITM_PROTECTION_NOT_REQUIRED_GENERAL_BONDING);
+    gap_set_default_link_policy_settings(LM_LINK_POLICY_DISABLE_ALL_LM_MODES);
 
     // Faster reconnect: answer the controller's page on an interlaced page scan
     // with an 11.25ms interval instead of the BTstack default standard-mode scan
@@ -554,6 +564,7 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
                 bt_rssi = 0;
                 bd_addr_copy(current_device_addr, conn_addr);
                 printf("[HCI] ACL connected handle=0x%04X\n", handle);
+                bt_apply_low_latency_link_policy(handle);
                 printf("[HCI] Request authentication on handle=0x%04X\n", handle);
                 hci_send_cmd(&hci_authentication_requested, handle);
             } else {
@@ -632,6 +643,19 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
                                              MTU_INTERRUPT,
                                              &hid_interrupt_cid);
                     }
+                }
+            }
+            break;
+        }
+
+        case HCI_EVENT_MODE_CHANGE: {
+            const uint8_t status = hci_event_mode_change_get_status(packet);
+            const hci_con_handle_t handle = hci_event_mode_change_get_handle(packet);
+            const uint8_t mode = hci_event_mode_change_get_mode(packet);
+            if (handle == acl_handle) {
+                if (status == ERROR_CODE_SUCCESS && mode != 0) {
+                    bt_apply_low_latency_link_policy(handle);
+                    gap_sniff_mode_exit(handle);
                 }
             }
             break;

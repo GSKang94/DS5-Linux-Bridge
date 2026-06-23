@@ -30,13 +30,34 @@
 // Pico SDK speciifically for waiting on conditions
 #include "pico/critical_section.h"
 #include "pico/time.h"
+#include <cstdint>
+#include <cstring>
 
 int reportSeqCounter = 0;
 uint8_t packetCounter = 0;
 bool spk_active = false;
 bool mic_active = false;
 
-uint8_t interrupt_in_data[63] = {
+namespace {
+constexpr uint8_t HID_INPUT_REPORT_LEN = 63;
+constexpr uint8_t BT_INPUT_REPORT_OFFSET = 3;
+constexpr uint8_t REALTIME_HID_QUEUE_DEPTH = 4;
+
+struct RealtimeHidReport {
+  uint8_t data[HID_INPUT_REPORT_LEN];
+};
+
+RealtimeHidReport realtime_hid_queue[REALTIME_HID_QUEUE_DEPTH];
+uint8_t realtime_hid_head = 0;
+uint8_t realtime_hid_tail = 0;
+uint8_t realtime_hid_count = 0;
+
+uint8_t realtime_hid_prev_index(uint8_t index) {
+  return index == 0 ? REALTIME_HID_QUEUE_DEPTH - 1 : index - 1;
+}
+} // namespace
+
+uint8_t interrupt_in_data[HID_INPUT_REPORT_LEN] = {
     0x7f, 0x7d, 0x7f, 0x7e, 0x00, 0x00, 0xa7, 0x08, 0x00, 0x00, 0x00,
     0x52, 0x43, 0x30, 0x41, 0x01, 0x00, 0x0e, 0x00, 0xef, 0xff, 0x03,
     0x03, 0x7b, 0x1b, 0x18, 0xf0, 0xcc, 0x9c, 0x60, 0x00, 0xfc, 0x80,
@@ -45,7 +66,55 @@ uint8_t interrupt_in_data[63] = {
     0x53, 0x9f, 0x28, 0x35, 0xa5, 0xa8, 0x0c, 0x8b};
 
 critical_section_t report_cs;
-volatile bool report_dirty = false;
+
+void realtime_hid_queue_push(const uint8_t *report) {
+  critical_section_enter_blocking(&report_cs);
+
+  // Keep interrupt_in_data as the latest report for non-HID side consumers
+  // such as battery_led_tick().
+  memcpy(interrupt_in_data, report, HID_INPUT_REPORT_LEN);
+
+  if (realtime_hid_count == REALTIME_HID_QUEUE_DEPTH) {
+    realtime_hid_tail = (realtime_hid_tail + 1) % REALTIME_HID_QUEUE_DEPTH;
+    realtime_hid_count--;
+  }
+
+  memcpy(realtime_hid_queue[realtime_hid_head].data, report, HID_INPUT_REPORT_LEN);
+  realtime_hid_head = (realtime_hid_head + 1) % REALTIME_HID_QUEUE_DEPTH;
+  realtime_hid_count++;
+
+  critical_section_exit(&report_cs);
+}
+
+bool realtime_hid_queue_pop(uint8_t *report) {
+  bool popped = false;
+
+  critical_section_enter_blocking(&report_cs);
+  if (realtime_hid_count > 0) {
+    memcpy(report, realtime_hid_queue[realtime_hid_tail].data, HID_INPUT_REPORT_LEN);
+    realtime_hid_tail = (realtime_hid_tail + 1) % REALTIME_HID_QUEUE_DEPTH;
+    realtime_hid_count--;
+    popped = true;
+  }
+  critical_section_exit(&report_cs);
+
+  return popped;
+}
+
+void realtime_hid_queue_requeue_front(const uint8_t *report) {
+  critical_section_enter_blocking(&report_cs);
+
+  if (realtime_hid_count == REALTIME_HID_QUEUE_DEPTH) {
+    realtime_hid_head = realtime_hid_prev_index(realtime_hid_head);
+    realtime_hid_count--;
+  }
+
+  realtime_hid_tail = realtime_hid_prev_index(realtime_hid_tail);
+  memcpy(realtime_hid_queue[realtime_hid_tail].data, report, HID_INPUT_REPORT_LEN);
+  realtime_hid_count++;
+
+  critical_section_exit(&report_cs);
+}
 
 void interrupt_loop() {
 #ifdef ENABLE_WAKE_HID
@@ -62,34 +131,20 @@ void interrupt_loop() {
 
   // TODO: Refactor for better code reuse
   if (get_config().polling_rate_mode != 2) {
-    if (!tud_hid_report(0x01, interrupt_in_data, 63)) {
+    if (!tud_hid_report(0x01, interrupt_in_data, HID_INPUT_REPORT_LEN)) {
       printf("[USBHID] tud_hid_report error\n");
     }
     return;
   }
 
-  bool should_send = false;
-  // Local buffer to hold the report data while we prepare it to send.
-  uint8_t safe_report[63];
-
-  critical_section_enter_blocking(&report_cs);
-  if (report_dirty) {
-    memcpy(safe_report, interrupt_in_data, 63);
-    report_dirty = false;
-    should_send = true;
-  }
-  critical_section_exit(&report_cs);
+  uint8_t safe_report[HID_INPUT_REPORT_LEN];
+  const bool should_send = realtime_hid_queue_pop(safe_report);
 
   // Only send to TinyUSB if we actually grabbed fresh data
   if (should_send) {
-    if (!tud_hid_report(0x01, safe_report, 63)) {
+    if (!tud_hid_report(0x01, safe_report, HID_INPUT_REPORT_LEN)) {
       printf("[USBHID] tud_hid_report error\n");
-
-      // If the report failed to queue, restore the dirty flag
-      // so we try again on the next loop iteration.
-      critical_section_enter_blocking(&report_cs);
-      report_dirty = true;
-      critical_section_exit(&report_cs);
+      realtime_hid_queue_requeue_front(safe_report);
     }
   }
 }
@@ -114,6 +169,9 @@ void on_bt_data(CHANNEL_TYPE channel, uint8_t *data, uint16_t len) {
   if (channel == INTERRUPT && len > 2 && data[1] == 0x31) {
     if (data[2] >> 1 & 1) {
       mic_add_queue(data + 4);
+      return;
+    }
+    if (len < BT_INPUT_REPORT_OFFSET + HID_INPUT_REPORT_LEN) {
       return;
     }
 
@@ -160,24 +218,14 @@ void on_bt_data(CHANNEL_TYPE channel, uint8_t *data, uint16_t len) {
     // stereo Headphones profiles. We pass the DS5's real values through
     // unchanged — the DS5 hardware jack sensor is authoritative.
     if (get_config().polling_rate_mode != 2) {
-      memcpy(interrupt_in_data, data + 3, 63);
+      memcpy(interrupt_in_data, data + BT_INPUT_REPORT_OFFSET, HID_INPUT_REPORT_LEN);
 #if ENABLE_BATT_LED
       battery_led_note_report();
 #endif
       return;
     }
 
-    // We add the critical section here to avoid any race conditions when
-    // writing to the interrupt_in_data buffer, which is shared between the main
-    // loop and this callback. The critical section ensures that only one thread
-    // can access the buffer at a time, preventing data corruption and ensuring
-    // thread safety. We also set the report_dirty flag to true to indicate that
-    // new data is available
-    //  and needs to be sent in the next interrupt report.
-    critical_section_enter_blocking(&report_cs);
-    memcpy(interrupt_in_data, data + 3, 63);
-    report_dirty = true;
-    critical_section_exit(&report_cs);
+    realtime_hid_queue_push(data + BT_INPUT_REPORT_OFFSET);
 #if ENABLE_BATT_LED
     battery_led_note_report();
 #endif
@@ -448,6 +496,7 @@ int main() {
     bt_blacklist_persist_if_dirty();
     bt_pump();
     tud_task();
+    interrupt_loop();
     wake_task();
 #ifdef ENABLE_WAKE_HID
     usb_variant_task();

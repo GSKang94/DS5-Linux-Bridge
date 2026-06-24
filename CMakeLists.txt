@@ -100,12 +100,16 @@ if (PICO_W_BUILD)
         set(SYS_CLOCK_KHZ_VALUE 200000)
         set(DISABLE_SPEAKER_PROC_VALUE 1)
 else ()
-        # Both RP2350 targets (Pico 2 W and Waveshare RP2350B-Plus-W) run the
-        # stock 150 MHz clock. Selective RAM relocation (relocate_to_ram) keeps the
-        # hot paths out of flash XIP, so no overclock is needed for stable audio +
-        # 1000Hz polling. PIO div 2 matches the 150 MHz system clock.
-        set(CYW43_PIO_CLOCK_DIV_VALUE 2)
-        set(SYS_CLOCK_KHZ_VALUE 150000)
+        # Both RP2350 targets (Pico 2 W and Waveshare RP2350B-Plus-W) run a mild
+        # 200 MHz overclock. Selective RAM relocation (relocate_to_ram) already
+        # keeps the hot paths out of flash XIP, but Opus per-frame decode CPU still
+        # steals cycles from the BT input-polling cadence on a single core; the
+        # +33% core clock (150 -> 200 MHz) buys that headroom back. 200 MHz is RP
+        # Pi's own well-tested point and runs at the SDK-default 1.10V core voltage
+        # (no vreg bump -- see the overclock path in main.cpp). PIO div 3 keeps the
+        # CYW43 SPI clock in spec at 200 MHz (div 2 was for the old 150 MHz clock).
+        set(CYW43_PIO_CLOCK_DIV_VALUE 3)
+        set(SYS_CLOCK_KHZ_VALUE 200000)
 endif ()
 
 

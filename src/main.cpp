@@ -116,7 +116,14 @@ void realtime_hid_queue_requeue_front(const uint8_t *report) {
   critical_section_exit(&report_cs);
 }
 
-void interrupt_loop() {
+// Called twice per main-loop iteration: once early (right after tud_task, to
+// drain the realtime queue with minimal latency) and once at the canonical
+// bottom-of-loop spot. `drain_only` marks the early call: it services ONLY the
+// realtime queue (polling_rate_mode == 2). The non-realtime path (modes 0/1)
+// re-sends the same interrupt_in_data unconditionally, so running it on both
+// calls would emit the report up to twice per iteration; restrict it to the
+// single bottom call to preserve the original modes-0/1 cadence.
+void interrupt_loop(bool drain_only = false) {
 #ifdef ENABLE_WAKE_HID
   // Only the FULL variant exposes the real gamepad (HID instance 0). In MINIMAL
   // instance 0 is an inert dummy HID, so don't emit gamepad reports there.
@@ -131,6 +138,8 @@ void interrupt_loop() {
 
   // TODO: Refactor for better code reuse
   if (get_config().polling_rate_mode != 2) {
+    if (drain_only)
+      return; // non-realtime: only emit from the bottom-of-loop call
     if (!tud_hid_report(0x01, interrupt_in_data, HID_INPUT_REPORT_LEN)) {
       printf("[USBHID] tud_hid_report error\n");
     }
@@ -356,12 +365,15 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id,
 
 int main() {
 #if SYS_CLOCK_KHZ != 150000
-  // Overclock path: raise core voltage before bumping the system clock.
-  // (1.20V is stable/safe for 320 MHz.) At the stock 150 MHz this is skipped —
-  // RAM-relocated hot paths make the overclock unnecessary, and the SDK's
-  // default clock init handles the stock case.
+  // Overclock path. 200 MHz is stable on RP2350 at the SDK-default 1.10V core
+  // voltage (this is RP Pi's own 200 MHz operating point), so we do NOT raise
+  // vreg for it -- less heat, less stress. Only a more aggressive overclock
+  // (>200 MHz) needs the voltage bump; 1.20V is good well past 300 MHz. The
+  // vreg settle delay only matters when we actually changed the voltage.
+#if SYS_CLOCK_KHZ > 200000
   vreg_set_voltage(VREG_VOLTAGE_1_20);
   sleep_ms(1000);
+#endif
   set_sys_clock_khz(SYS_CLOCK_KHZ, true);
 #endif
 
@@ -496,7 +508,7 @@ int main() {
     bt_blacklist_persist_if_dirty();
     bt_pump();
     tud_task();
-    interrupt_loop();
+    interrupt_loop(true); // early: drain the realtime HID queue only
     wake_task();
 #ifdef ENABLE_WAKE_HID
     usb_variant_task();

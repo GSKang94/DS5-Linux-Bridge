@@ -517,8 +517,13 @@ int main() {
     // is built). Cheap; not in the audio hot path. wifi_net_task pumps the
     // WiFi link state + lwIP timers.
     wifi_net_task();
-    audio_loop();
+    // Emit the HID input report BEFORE servicing audio. audio_loop() drains the
+    // mic-decode FIFO and does a tud_audio_write() that can be large; running it
+    // first delayed the input report within each iteration. Prioritizing the
+    // report here trims the per-iteration jitter on the 1 kHz polling path (the
+    // early interrupt_loop(true) above only drains the realtime queue for mode 2).
     interrupt_loop();
+    audio_loop();
     // DSE Edge profile snapshot prefetch/unlock state machine.
     dse_task();
 #if ENABLE_BATT_LED

@@ -1017,7 +1017,11 @@ void bt_write(const uint8_t *data, const uint16_t len, bool kick) {
 // L2CAP_EVENT_CAN_SEND_NOW handler. Set here when we issue a request.
 volatile bool send_chain_active = false;
 
-void bt_pump() {
+// RAM-resident: runs every main-loop iteration to kick the L2CAP TX chain. Tiny
+// but called constantly, so a flash-refetch stall here directly perturbs the
+// loop cadence -- keep it out of XIP. (l2cap_request_can_send_now_event itself
+// is SDK code; the l2cap TX pump it drives is already relocated in CMakeLists.)
+void __not_in_flash_func(bt_pump)() {
     if (hid_interrupt_cid == 0) return;
     if (send_chain_active) return;
     if (queue_is_empty(&send_fifo)) return;

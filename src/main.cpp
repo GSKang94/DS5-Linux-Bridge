@@ -158,7 +158,9 @@ void interrupt_loop(bool drain_only = false) {
   }
 }
 
-void state_push_to_bt() {
+// RAM-resident: on the controller->host output path. Kept out of flash so a
+// core1 Opus-decode XIP-cache eviction can't add a flash-refetch stall here.
+void __not_in_flash_func(state_push_to_bt)() {
   if (spk_active) {
     return;
   }
@@ -173,7 +175,12 @@ void state_push_to_bt() {
   bt_write(outputData, sizeof(outputData));
 }
 
-void on_bt_data(CHANNEL_TYPE channel, uint8_t *data, uint16_t len) {
+// RAM-resident: this is THE per-packet controller input handler -- it runs for
+// every BT input report. The SDK BT data path is already RAM-relocated (see the
+// relocate_to_ram() list in CMakeLists.txt); this is the application tail of
+// that path. Keeping it out of flash XIP means a core1 Opus-decode cache thrash
+// can't stall the next incoming report's processing (the outlier-tail mechanism).
+void __not_in_flash_func(on_bt_data)(CHANNEL_TYPE channel, uint8_t *data, uint16_t len) {
   // printf("[Main] BT data callback: channel=%u len=%u\n", channel, len);
   if (channel == INTERRUPT && len > 2 && data[1] == 0x31) {
     if (data[2] >> 1 & 1) {

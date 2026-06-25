@@ -668,9 +668,34 @@ void usb_request_variant_minimal(void) { desired_variant = DESC_VARIANT_MINIMAL;
 void usb_set_host_suspended(bool s)    { host_suspended_flag = s; }
 bool usb_variant_swap_in_progress(void) { return swap_state != SWAP_IDLE; }
 
+// Cold-boot autosuspend recovery (issue #4). While the gate below holds a
+// pending UP-swap (MINIMAL->FULL) shut, periodically re-issue a USB bus resume
+// to coax the host into re-mounting us (which fires tud_resume_cb/tud_mount_cb
+// -> clears the gate). Rate-limited so we don't spam resume signaling.
+//
+// CRITICAL: only the MINIMAL->FULL direction is nudged. The DOWN-swap
+// (FULL->MINIMAL, requested when the controller disconnects) can legitimately
+// be pending while the host is in a genuine S3 suspend -- a DS5 that powers
+// itself off after the host sleeps leaves desired=MINIMAL, active=FULL. Forcing
+// a resume there would wake the sleeping host, the exact thing the gate exists
+// to prevent. The UP-swap only ever happens right after a controller connects,
+// which is precisely when we DO want the bus back up so the gamepad appears.
+static constexpr uint64_t SWAP_GATE_RESUME_RETRY_US = 1000000; // 1 s
+static uint64_t swap_gate_last_resume_us = 0;
+
 void usb_variant_task(void) {
     if (host_suspended_flag) {
-        // Never re-enumerate during host suspend.
+        // Never re-enumerate during host suspend. But if an UP-swap to FULL is
+        // pending and the host has us suspended, keep nudging the bus back up so
+        // the gate can clear -- otherwise a host that suspends MINIMAL and never
+        // re-mounts strands the controller in MINIMAL forever (issue #4).
+        if (desired_variant == DESC_VARIANT_FULL && active_variant == DESC_VARIANT_MINIMAL) {
+            const uint64_t now = time_us_64();
+            if (now - swap_gate_last_resume_us >= SWAP_GATE_RESUME_RETRY_US) {
+                swap_gate_last_resume_us = now;
+                wake_request_bus_resume();
+            }
+        }
         return;
     }
     const uint64_t now = time_us_64();

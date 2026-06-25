@@ -110,6 +110,36 @@ static void request_host_wake(const char *reason) {
 #endif
 }
 
+// Resume the USB bus WITHOUT advancing the wake-FSM keystroke sequence.
+//
+// This is the cold-boot autosuspend recovery path (issue #4). On some hosts the
+// idle MINIMAL interface is selective-suspended right after enumeration and the
+// host never re-mounts it on its own. When a controller then connects, the
+// MINIMAL->FULL variant swap is requested but usb_variant_task() refuses to
+// re-enumerate while host_suspended -- so the gamepad never appears (lightbar /
+// audio path are up over BT, but the host sees no input device). request_host_wake()
+// only fires ONCE at connect time; if that single attempt doesn't take, the swap
+// stays gated forever. usb_variant_task() calls this repeatedly (rate-limited)
+// while a swap is desired-but-gated, to keep nudging the host to resume the bus
+// so tud_resume_cb/tud_mount_cb can clear the gate and let the swap proceed.
+//
+// Deliberately does NOT touch the F15 keystroke FSM: this is not a wake-from-S3
+// (the host is awake, it just selective-suspended an idle interface), so there
+// is no host to wake with a keypress -- we only need the bus back up. Returns
+// true if a resume was issued.
+bool wake_request_bus_resume(void) {
+    bool ok = tud_remote_wakeup();
+
+    // Same Linux quirk handled in request_host_wake(): the host may have
+    // suspended us without arming REMOTE_WAKEUP, so tud_remote_wakeup() returns
+    // false. Force the resume at the DCD level when we know we're suspended.
+    if (!ok && host_suspended) {
+        dcd_remote_wakeup(0);
+        ok = true;
+    }
+    return ok;
+}
+
 void wake_init(void) {
     critical_section_init(&wake_cs);
 }

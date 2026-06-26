@@ -7,7 +7,13 @@ on:
 
 env:
   PICO_SDK_REF: 2.2.0
-  TINYUSB_REF: 0.20.0
+  # Pin TinyUSB to the exact commit the local SDK 2.2.0 install ships and that is
+  # hardware-verified. NOT a tag: the 0.20.0 tag predates the usbd control-transfer
+  # wLength fixes (e954302c1 / 8a63f9c57) that the MS OS 2.0 descriptor fetch needs;
+  # building against 0.20.0 makes the MINIMAL USB variant fail to enumerate on
+  # Windows (Code 10). The SDK 2.2.0 submodule itself pins an even older 0.18.0, so
+  # we override to this post-0.20.0 commit.
+  TINYUSB_REF: 08f9855e3dc51291a8c30e2eeccab31f8f07d0a9
   PICO_SDK_PATH: ${{ github.workspace }}/pico-sdk
   APT_PACKAGES: >-
     cmake
@@ -76,10 +82,10 @@ jobs:
           git clone --depth 1 --branch "$PICO_SDK_REF" https://github.com/raspberrypi/pico-sdk.git "$PICO_SDK_PATH"
           git -C "$PICO_SDK_PATH" submodule update --init --recursive
 
-      - name: Switch TinyUSB to configured tag
+      - name: Switch TinyUSB to pinned commit
         run: |
-          if ! git -C "$PICO_SDK_PATH/lib/tinyusb" rev-parse -q --verify "refs/tags/$TINYUSB_REF" >/dev/null; then
-            git -C "$PICO_SDK_PATH/lib/tinyusb" fetch --depth 1 origin "refs/tags/$TINYUSB_REF:refs/tags/$TINYUSB_REF"
+          if ! git -C "$PICO_SDK_PATH/lib/tinyusb" cat-file -e "$TINYUSB_REF^{commit}" 2>/dev/null; then
+            git -C "$PICO_SDK_PATH/lib/tinyusb" fetch --depth 1 origin "$TINYUSB_REF"
           fi
           git -C "$PICO_SDK_PATH/lib/tinyusb" checkout --detach "$TINYUSB_REF"
 

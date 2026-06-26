@@ -163,9 +163,10 @@ enum {
 // interfaces are grouped under ONE Interface Association Descriptor so the
 // Windows composite parent (usbccgp) creates a single child function for them
 // instead of collapsing the consecutive same-class interfaces into one unnamed
-// unknown device. A WinUSB compatible-ID on the IAD's bFirstInterface (see
-// desc_ms_os_20) then binds that function to WinUSB -> no yellow bang. 8 (IAD) +
-// 3*9 (interfaces) = 35 bytes.
+// unknown device. A WinUSB compatible-ID on the IAD's bFirstInterface (see the
+// MINIMAL-only desc_ms_os_20_minimal) then binds that function to WinUSB -> no
+// yellow bang. That tag is MINIMAL-only on purpose: in FULL interface 0 is audio
+// and must NOT be tagged WinUSB. 8 (IAD) + 3*9 (interfaces) = 35 bytes.
 #define DS5_INERT_PAD_DESC(first_itf) \
     /* IAD: groups the 3 inert vendor interfaces into one function */ \
     0x08, TUSB_DESC_INTERFACE_ASSOCIATION, (first_itf), 0x03, 0xFF, 0x00, 0x00, 0x00, \
@@ -1303,22 +1304,35 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
 #define MS_OS_20_COMPATID_LEN      20
 // One WinUSB function subset = header + CompatibleID feature.
 #define MS_OS_20_WINUSB_FUNC_LEN   (MS_OS_20_FUNC_SUBSET_HDR_LEN + MS_OS_20_COMPATID_LEN)
-#ifdef ENABLE_WEBCONFIG
-// MINIMAL pads interfaces 0-2 with ONE IAD-grouped inert vendor function; tag it
-// as WinUSB (driverless) so Windows shows no "unknown device" / yellow bang. The
-// compatible-ID targets the function's bFirstInterface (0). In FULL interface 0
-// is the audio function, which the audio class driver claims regardless of this
-// compat-id, so the tag is a no-op there.
-#define MS_OS_20_NUM_WINUSB_FUNCS  1
-#else
-#define MS_OS_20_NUM_WINUSB_FUNCS  0
-#endif
-#define MS_OS_20_CONFIG_SUBSET_TOTAL_LEN \
-    (MS_OS_20_CONFIG_SUBSET_LEN + MS_OS_20_AUDIO_FUNC_LEN \
-     + MS_OS_20_NUM_WINUSB_FUNCS * MS_OS_20_WINUSB_FUNC_LEN)
-// Total length of the MS OS 2.0 descriptor set, used in the BOS platform
-// capability descriptor; verified by the TU_VERIFY_STATIC below.
-#define MS_OS_20_DESC_LEN (MS_OS_20_SET_HEADER_LEN + MS_OS_20_CONFIG_SUBSET_TOTAL_LEN)
+// What interface 0 IS differs by variant, and the MS OS 2.0 set must describe
+// EXACTLY one function subset per function -- never two subsets for the same
+// bFirstInterface, which Windows treats as malformed and ignores:
+//
+//   FULL    : itf 0-2 = USB-Audio function. The set carries ONE function subset
+//             for itf 0 = the audio subset (SelectiveSuspendEnabled reg-prop,
+//             needed for wake). NO WinUSB tag -- a WinUSB compat-id on itf 0 would
+//             make Windows prefer WinUSB over the audio class driver and bang it.
+//
+//   MINIMAL : itf 0-2 = IAD-grouped inert vendor pad (Class_ff). The set carries
+//             ONE function subset for itf 0 = the WinUSB compat-id, so the pad
+//             gets a (driverless) WinUSB binding instead of a Code 28 "unknown
+//             device" bang. There is NO audio function here, so the audio/
+//             SelectiveSuspend subset must NOT appear (it would be a second subset
+//             for itf 0, and would target a non-audio interface).
+//
+// tud_vendor_control_xfer_cb()/tud_descriptor_bos_cb() serve the matching set;
+// every variant swap re-enumerates, so the host re-reads BOS + the right set.
+
+// Config-subset length: FULL = audio subset only; MINIMAL = WinUSB subset only.
+#define MS_OS_20_CONFIG_SUBSET_TOTAL_LEN_FULL \
+    (MS_OS_20_CONFIG_SUBSET_LEN + MS_OS_20_AUDIO_FUNC_LEN)
+#define MS_OS_20_CONFIG_SUBSET_TOTAL_LEN_MINIMAL \
+    (MS_OS_20_CONFIG_SUBSET_LEN + MS_OS_20_WINUSB_FUNC_LEN)
+
+#define MS_OS_20_DESC_LEN_FULL \
+    (MS_OS_20_SET_HEADER_LEN + MS_OS_20_CONFIG_SUBSET_TOTAL_LEN_FULL)
+#define MS_OS_20_DESC_LEN_MINIMAL \
+    (MS_OS_20_SET_HEADER_LEN + MS_OS_20_CONFIG_SUBSET_TOTAL_LEN_MINIMAL)
 
 // One WinUSB function subset for interface `itf` (used for the inert pads).
 #define MS_OS_20_WINUSB_FUNC(itf) \
@@ -1334,61 +1348,94 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
 
 #define BOS_TOTAL_LEN        (TUD_BOS_DESC_LEN + TUD_BOS_MICROSOFT_OS_DESC_LEN)
 
-uint8_t const desc_bos[] = {
-    // BOS header
-    TUD_BOS_DESCRIPTOR(BOS_TOTAL_LEN, 1),
-    // Platform capability: MS OS 2.0
-    TUD_BOS_MS_OS_20_DESCRIPTOR(MS_OS_20_DESC_LEN, MS_OS_20_VENDOR_CODE)
-};
-
-uint8_t const *tud_descriptor_bos_cb(void) {
-    return desc_bos;
+// The BOS platform-capability descriptor embeds wMSOSDescriptorSetTotalLength,
+// which Windows uses as wLength for the follow-up vendor request. It MUST equal
+// the Set-Header wTotalLength of the set actually returned, or Windows rejects
+// the whole MS OS 2.0 set -- and since this is a USB 2.1 device (BOS required),
+// the composite parent fails to start (Code 10). The FULL and MINIMAL sets differ
+// in length (MINIMAL carries the extra WinUSB function), so BOS is variant-aware
+// too. Both arrays are the same size (only the embedded length value differs), so
+// the device sees a consistent BOS size. Every variant swap re-enumerates, so the
+// host re-reads BOS and gets the length matching the set it will then fetch.
+#define DS5_DESC_BOS(ms_os_20_set_len) { \
+    TUD_BOS_DESCRIPTOR(BOS_TOTAL_LEN, 1), \
+    TUD_BOS_MS_OS_20_DESCRIPTOR(ms_os_20_set_len, MS_OS_20_VENDOR_CODE) \
 }
 
-uint8_t const desc_ms_os_20[] = {
-    // --- Set Header (10 bytes) ---
-    U16_TO_U8S_LE(0x000A),                                    // wLength
-    U16_TO_U8S_LE(MS_OS_20_SET_HEADER_DESCRIPTOR),            // wDescriptorType
-    U32_TO_U8S_LE(0x06030000),                                // dwWindowsVersion = Win 8.1+
-    U16_TO_U8S_LE(MS_OS_20_DESC_LEN),                         // wTotalLength
+uint8_t const desc_bos_full[]    = DS5_DESC_BOS(MS_OS_20_DESC_LEN_FULL);
+#ifdef ENABLE_WEBCONFIG
+uint8_t const desc_bos_minimal[] = DS5_DESC_BOS(MS_OS_20_DESC_LEN_MINIMAL);
+#endif
 
-    // --- Configuration Subset (8 bytes) ---
-    U16_TO_U8S_LE(0x0008),                                    // wLength
-    U16_TO_U8S_LE(MS_OS_20_SUBSET_HEADER_CONFIGURATION),      // wDescriptorType
-    0x00,                                                     // bConfigurationValue (config index, 0)
-    0x00,                                                     // bReserved
-    U16_TO_U8S_LE(MS_OS_20_CONFIG_SUBSET_TOTAL_LEN),          // wTotalLength of this subset
+uint8_t const *tud_descriptor_bos_cb(void) {
+#ifdef ENABLE_WEBCONFIG
+    if (active_variant == DESC_VARIANT_MINIMAL) return desc_bos_minimal;
+#endif
+    return desc_bos_full;
+}
 
-    // --- Function Subset for the Audio function (8 bytes) ---
-    // Audio Control is interface 0; AudioStreaming OUT/IN are 1/2 -- this
-    // subset covers all three because they belong to the same function.
-    U16_TO_U8S_LE(0x0008),                                    // wLength
-    U16_TO_U8S_LE(MS_OS_20_SUBSET_HEADER_FUNCTION),           // wDescriptorType
-    0x00,                                                     // bFirstInterface (audio control)
-    0x00,                                                     // bReserved
-    U16_TO_U8S_LE(MS_OS_20_AUDIO_FUNC_LEN),                   // wSubsetLength (this subset + its reg property)
+// Audio function subset (identical in both variants): groups interfaces 0-2 as
+// one function and sets SelectiveSuspendEnabled=1 on it (needed for wake). This
+// does NOT bind a driver -- the audio class driver claims interface 0 by class.
+#define MS_OS_20_AUDIO_SUBSET \
+    /* --- Function Subset for the Audio function (8 bytes) --- */ \
+    /* Audio Control is interface 0; AudioStreaming OUT/IN are 1/2 -- this */ \
+    /* subset covers all three because they belong to the same function. */ \
+    U16_TO_U8S_LE(0x0008),                  /* wLength */ \
+    U16_TO_U8S_LE(MS_OS_20_SUBSET_HEADER_FUNCTION),  /* wDescriptorType */ \
+    0x00,                                   /* bFirstInterface (audio control) */ \
+    0x00,                                   /* bReserved */ \
+    U16_TO_U8S_LE(MS_OS_20_AUDIO_FUNC_LEN), /* wSubsetLength (this subset + its reg property) */ \
+    /* --- Feature: Registry Property "SelectiveSuspendEnabled" = 1 (62 bytes) --- */ \
+    U16_TO_U8S_LE(0x003E),                  /* wLength = 62 */ \
+    U16_TO_U8S_LE(MS_OS_20_FEATURE_REG_PROPERTY),    /* wDescriptorType */ \
+    U16_TO_U8S_LE(0x0004),                  /* wPropertyDataType = REG_DWORD_LITTLE_ENDIAN */ \
+    U16_TO_U8S_LE(48),                      /* wPropertyNameLength = 48 bytes (24 UTF-16 chars) */ \
+    /* PropertyName "SelectiveSuspendEnabled\0" UTF-16LE (48 bytes) */ \
+    'S',0, 'e',0, 'l',0, 'e',0, 'c',0, 't',0, 'i',0, 'v',0, \
+    'e',0, 'S',0, 'u',0, 's',0, 'p',0, 'e',0, 'n',0, 'd',0, \
+    'E',0, 'n',0, 'a',0, 'b',0, 'l',0, 'e',0, 'd',0,  0,0, \
+    U16_TO_U8S_LE(0x0004),                  /* wPropertyDataLength = 4 bytes */ \
+    U32_TO_U8S_LE(0x00000001)               /* PropertyData = 1 (enabled) */
 
-    // --- Feature: Registry Property "SelectiveSuspendEnabled" = 1 (62 bytes) ---
-    U16_TO_U8S_LE(0x003E),                                    // wLength = 62
-    U16_TO_U8S_LE(MS_OS_20_FEATURE_REG_PROPERTY),             // wDescriptorType
-    U16_TO_U8S_LE(0x0004),                                    // wPropertyDataType = REG_DWORD_LITTLE_ENDIAN
-    U16_TO_U8S_LE(48),                                        // wPropertyNameLength = 48 bytes (24 UTF-16 chars)
-    // PropertyName "SelectiveSuspendEnabled\0" UTF-16LE (48 bytes)
-    'S',0, 'e',0, 'l',0, 'e',0, 'c',0, 't',0, 'i',0, 'v',0,
-    'e',0, 'S',0, 'u',0, 's',0, 'p',0, 'e',0, 'n',0, 'd',0,
-    'E',0, 'n',0, 'a',0, 'b',0, 'l',0, 'e',0, 'd',0,  0,0,
-    U16_TO_U8S_LE(0x0004),                                    // wPropertyDataLength = 4 bytes
-    U32_TO_U8S_LE(0x00000001),                                // PropertyData = 1 (enabled)
+// MS OS 2.0 Set Header + Configuration Subset header, parameterised by the set's
+// total length and config-subset total length (which differ between variants).
+#define MS_OS_20_SET_AND_CONFIG_HEADER(desc_len, cfg_subset_len) \
+    /* --- Set Header (10 bytes) --- */ \
+    U16_TO_U8S_LE(0x000A),                  /* wLength */ \
+    U16_TO_U8S_LE(MS_OS_20_SET_HEADER_DESCRIPTOR),   /* wDescriptorType */ \
+    U32_TO_U8S_LE(0x06030000),              /* dwWindowsVersion = Win 8.1+ */ \
+    U16_TO_U8S_LE(desc_len),                /* wTotalLength */ \
+    /* --- Configuration Subset (8 bytes) --- */ \
+    U16_TO_U8S_LE(0x0008),                  /* wLength */ \
+    U16_TO_U8S_LE(MS_OS_20_SUBSET_HEADER_CONFIGURATION),  /* wDescriptorType */ \
+    0x00,                                   /* bConfigurationValue (config index, 0) */ \
+    0x00,                                   /* bReserved */ \
+    U16_TO_U8S_LE(cfg_subset_len)           /* wTotalLength of this subset */
+
+// FULL variant: interface 0 is audio -> audio subset only, NO WinUSB tag.
+uint8_t const desc_ms_os_20_full[] = {
+    MS_OS_20_SET_AND_CONFIG_HEADER(MS_OS_20_DESC_LEN_FULL,
+                                   MS_OS_20_CONFIG_SUBSET_TOTAL_LEN_FULL),
+    MS_OS_20_AUDIO_SUBSET,
+};
+TU_VERIFY_STATIC(sizeof(desc_ms_os_20_full) == MS_OS_20_DESC_LEN_FULL,
+                 "MS OS 2.0 FULL descriptor length mismatch");
 
 #ifdef ENABLE_WEBCONFIG
-    // --- WinUSB (driverless) function subset for MINIMAL's IAD-grouped inert
-    // pad function (interfaces 0-2), so Windows shows no yellow-bang "unknown
-    // device" for it while idle. Targets the function's bFirstInterface (0).
-    // No-op in FULL (audio class driver claims interface 0).
+// MINIMAL variant: interface 0 is the IAD-grouped inert vendor pad -> ONLY a
+// WinUSB compatible-ID on interface 0, so the pad gets a (driverless) binding and
+// Windows shows no "unknown device" yellow bang for it. No audio subset here:
+// there is no audio function in MINIMAL, and a second subset for itf 0 would make
+// the whole set malformed (the cause of the lingering MI_00 Code 28 bang).
+uint8_t const desc_ms_os_20_minimal[] = {
+    MS_OS_20_SET_AND_CONFIG_HEADER(MS_OS_20_DESC_LEN_MINIMAL,
+                                   MS_OS_20_CONFIG_SUBSET_TOTAL_LEN_MINIMAL),
     MS_OS_20_WINUSB_FUNC(0),
-#endif
 };
-TU_VERIFY_STATIC(sizeof(desc_ms_os_20) == MS_OS_20_DESC_LEN, "MS OS 2.0 descriptor length mismatch");
+TU_VERIFY_STATIC(sizeof(desc_ms_os_20_minimal) == MS_OS_20_DESC_LEN_MINIMAL,
+                 "MS OS 2.0 MINIMAL descriptor length mismatch");
+#endif
 
 // Vendor-class control transfer hook. Windows reads BOS, sees the MS OS 2.0
 // platform capability, then issues this vendor request to fetch the
@@ -1398,7 +1445,20 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
     if (request->bmRequestType_bit.type != TUSB_REQ_TYPE_VENDOR) return false;
     if (request->bRequest == MS_OS_20_VENDOR_CODE && request->wIndex == 7) {
         // wIndex == 7 -> MS_OS_20_DESCRIPTOR_INDEX
-        return tud_control_xfer(rhport, request, (void *)(uintptr_t)desc_ms_os_20, sizeof(desc_ms_os_20));
+        // Serve the set matching the variant the host is currently enumerating.
+        // Only MINIMAL carries the WinUSB tag on interface 0 (the inert pad);
+        // FULL must NOT, or Windows binds WinUSB to the audio control interface
+        // and bangs it (Code 28). The WinUSB-bearing MINIMAL set only exists with
+        // ENABLE_WEBCONFIG (the inert pad is a webconfig-only construct).
+        const uint8_t *set = desc_ms_os_20_full;
+        size_t set_len = sizeof(desc_ms_os_20_full);
+#ifdef ENABLE_WEBCONFIG
+        if (active_variant == DESC_VARIANT_MINIMAL) {
+            set = desc_ms_os_20_minimal;
+            set_len = sizeof(desc_ms_os_20_minimal);
+        }
+#endif
+        return tud_control_xfer(rhport, request, (void *)(uintptr_t)set, set_len);
     }
     return false;
 }

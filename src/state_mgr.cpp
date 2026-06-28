@@ -69,10 +69,15 @@ void state_get(uint8_t *data, const uint8_t size) {
 }
 
 void state_update(const uint8_t *data, const uint8_t size) {
-    if (size < sizeof(SetStateData)) {
+    // macOS sends a shorter SetStateData (47 bytes) than the full struct; the
+    // trailing fields it omits are unused here, so accept anything >= 47 and let
+    // the memcpy below over-read into zero-init padding. Rejecting short reports
+    // broke rumble/LED control from macOS hosts.
+    // (Ported from upstream awalol/DS5Dongle c47b7ed.)
+    if (size < 47) {
         printf(
-            "[StateMgr] Error: SetStateData at least %u bytes\n",
-            static_cast<unsigned>(sizeof(SetStateData))
+            "[StateMgr] Error: SetStateData needs at least 47 bytes, got %u\n",
+            static_cast<unsigned>(size)
         );
         return;
     }

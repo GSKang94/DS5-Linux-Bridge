@@ -416,6 +416,13 @@ int bt_init() {
     gap_ssp_set_io_capability(SSP_IO_CAPABILITY_DISPLAY_YES_NO);
     gap_ssp_set_authentication_requirement(SSP_IO_AUTHREQ_MITM_PROTECTION_NOT_REQUIRED_GENERAL_BONDING);
 
+    // Faster reconnect: answer the controller's page on an interlaced page scan
+    // with an 11.25ms interval instead of the BTstack default standard-mode scan
+    // (~1.28s). The controller pages the dongle on PS-button reconnect, so a
+    // tighter page-scan window cuts reconnect latency substantially.
+    // (Ported from upstream awalol/DS5Dongle 1d4dbad.)
+    gap_set_page_scan_activity(0x0012, 0x0012); // 11.25ms
+    gap_set_page_scan_type(PAGE_SCAN_MODE_INTERLACED);
     gap_connectable_control(1);
     gap_discoverable_control(1);
 

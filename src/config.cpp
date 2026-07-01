@@ -143,11 +143,17 @@ void config_valid() {
   }
 }
 
-// Reset the in-RAM config to all defaults (does NOT touch flash). config_valid()
-// fills every field with its default because a zeroed body fails every range
-// check. Used for uninitialized/corrupt flash and by config_factory_reset().
+// Reset the in-RAM config to all defaults (does NOT touch flash). Most fields
+// get their default from config_valid()'s range check on the zeroed body, but
+// fields whose 0 value is itself valid must be defaulted explicitly here (a
+// range check can't distinguish "unset" from "user picked 0"). Used for
+// uninitialized/corrupt flash and by config_factory_reset().
 void config_default() {
   memset(&config, 0, sizeof(config));
+  // 0 is a valid selection for these, so config_valid() would leave the zeroed
+  // body as DS5 / 250 Hz. Default to the preferred out-of-box behavior instead.
+  config.body.controller_mode = 2;   // Auto (0: DS5, 1: DSE, 2: Auto)
+  config.body.polling_rate_mode = 2; // Real-time / 1000 Hz (0: 250, 1: 500, 2: RT)
   config_valid();
 }
 

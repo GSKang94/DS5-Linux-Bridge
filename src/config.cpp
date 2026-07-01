@@ -18,6 +18,11 @@ constexpr uint32_t CONFIG_MAGIC = 0x66ccff00;
 constexpr uint16_t CONFIG_VERSION = 5; // v5 added webconfig_custom_ip; v4 bond_names
 constexpr uint32_t CONFIG_FLASH_OFFSET =
     PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE;
+// flash_safe_execute() timeout per attempt, and how many times we retry when
+// core1 (audio) fails to park in time. Total worst-case block ~= product of the
+// two; kept modest so a wedged core1 can't stall the web request indefinitely.
+constexpr uint32_t CONFIG_SAVE_TIMEOUT_MS = 1000;
+constexpr int CONFIG_SAVE_RETRIES = 3;
 static Config config{};
 bool is_dse = false;
 
@@ -138,9 +143,24 @@ bool config_save() {
   memset(page, 0xff, sizeof(page));
   memcpy(page, &config, sizeof(Config));
 
-  const int rc = flash_safe_execute(config_save_flash_op, page, 1000);
+  // flash_safe_execute() parks core1 (the audio core) before touching flash. If
+  // core1 is asleep in __wfe() (idle audio loop) it can miss the lockout request
+  // and the call returns PICO_ERROR_TIMEOUT -- the erase/program never happens.
+  // Historically the single failure was ignored by callers, so the web UI would
+  // report "saved" (RAM was updated) while flash kept the old bytes; the change
+  // then vanished on the next boot. Retry a few times, nudging core1 awake with
+  // __sev() before each attempt so its flash-safe IRQ handler can run.
+  int rc = PICO_ERROR_TIMEOUT;
+  for (int attempt = 0; attempt < CONFIG_SAVE_RETRIES; attempt++) {
+    __sev(); // wake core1 out of __wfe() so it can honour the flash-safe lockout
+    rc = flash_safe_execute(config_save_flash_op, page, CONFIG_SAVE_TIMEOUT_MS);
+    if (rc == PICO_OK) break;
+    printf("[Config] config_save flash_safe_execute failed (attempt %d/%d): %d\n",
+           attempt + 1, CONFIG_SAVE_RETRIES, rc);
+  }
   if (rc != PICO_OK) {
-    printf("[Config] config_save flash_safe_execute failed: %d\n", rc);
+    printf("[Config] config_save FAILED after %d attempts: %d (config NOT persisted)\n",
+           CONFIG_SAVE_RETRIES, rc);
     return false;
   }
 
@@ -151,7 +171,7 @@ bool config_save() {
     printf("[Config] Config write flash verify success\n");
     return true;
   }
-  printf("[Config] Config write flash verify failed\n");
+  printf("[Config] Config write flash verify FAILED (config NOT persisted)\n");
   return false;
 }
 

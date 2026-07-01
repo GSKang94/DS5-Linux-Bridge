@@ -199,7 +199,7 @@ async function save(){
   try{
     const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});
     if(r.ok){$('save').disabled=true;setStatus('Saved ✓','ok')}
-    else setStatus('save failed','err');
+    else setStatus('save failed — not written to flash, try again','err');
   }catch(e){setStatus('save failed','err')}
 }
 

@@ -370,6 +370,13 @@ extern "C" int fs_open_custom(struct fs_file *file, const char *name) {
         const int len = json_status(body, sizeof(body));
         return make_file(file, "200 OK", "application/json", body, len);
     }
+    // POST /api/config redirects here when config_save() failed to reach flash.
+    // Returning a non-2xx status makes the page's `r.ok` check false so it shows
+    // an error instead of "Saved ✓" for a change that never persisted.
+    if (strcmp(name, "/api/save-failed") == 0) {
+        static const char sf[] = "config save failed: flash not written";
+        return make_file(file, "500 Internal Server Error", "text/plain", sf, sizeof(sf) - 1);
+    }
     if (strcmp(name, "/404.html") == 0) {
         static const char nf[] = "not found";
         return make_file(file, "404 Not Found", "text/plain", nf, sizeof(nf) - 1);
@@ -404,6 +411,7 @@ static char post_buf[POST_BUFSIZE];
 static u16_t post_pos;
 static void *post_conn;
 static bool post_is_bonds; // which endpoint the in-flight POST targets
+static bool last_save_ok = true; // result of the most recent config_save()
 
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -469,8 +477,12 @@ static void apply_post(char *body) {
     set_config(c); // validates + stores in RAM
     // The sector erase blocks with interrupts off; feed the watchdog first.
     watchdog_update();
-    config_save();
-    printf("[NET] config saved via web UI\n");
+    // config_save() can fail (core1 won't park -> flash write skipped). If it
+    // does, RAM holds the new values but flash does not, so the change would
+    // silently vanish on the next boot. Record the result so the response can
+    // tell the user instead of falsely reporting success.
+    last_save_ok = config_save();
+    printf("[NET] config save via web UI: %s\n", last_save_ok ? "OK" : "FAILED");
 }
 
 // POST /api/bonds -- form fields:
@@ -483,6 +495,7 @@ static void apply_bonds_post(char *body) {
     char action[16] = "";
     char addr_hex[16] = "";
     char name[CONFIG_BOND_NAME_LEN] = "";
+    last_save_ok = true; // actions that don't persist (e.g. pair) leave this true
 
     for (char *tok = strtok(body, "&"); tok; tok = strtok(nullptr, "&")) {
         char *eq = strchr(tok, '=');
@@ -513,8 +526,8 @@ static void apply_bonds_post(char *body) {
         memset(c.bond_names, 0, sizeof(c.bond_names));
         set_config(c);
         watchdog_update();
-        config_save();
-        printf("[NET] forget all bonds via web UI\n");
+        last_save_ok = config_save();
+        printf("[NET] forget all bonds via web UI: %s\n", last_save_ok ? "OK" : "FAILED");
         return;
     }
 
@@ -528,13 +541,13 @@ static void apply_bonds_post(char *body) {
         bt_bond_forget(addr);
         config_clear_bond_name(addr);
         watchdog_update();
-        config_save();
-        printf("[NET] forget bond via web UI\n");
+        last_save_ok = config_save();
+        printf("[NET] forget bond via web UI: %s\n", last_save_ok ? "OK" : "FAILED");
     } else if (strcmp(action, "rename") == 0) {
         config_set_bond_name(addr, name);
         watchdog_update();
-        config_save();
-        printf("[NET] rename bond via web UI\n");
+        last_save_ok = config_save();
+        printf("[NET] rename bond via web UI: %s\n", last_save_ok ? "OK" : "FAILED");
     }
 }
 
@@ -572,10 +585,12 @@ extern "C" void httpd_post_finished(void *connection, char *response_uri, u16_t 
     post_conn = nullptr;
     if (post_is_bonds) {
         apply_bonds_post(post_buf);
-        snprintf(response_uri, response_uri_len, "/api/bonds");
+        snprintf(response_uri, response_uri_len,
+                 last_save_ok ? "/api/bonds" : "/api/save-failed");
     } else {
         apply_post(post_buf);
-        snprintf(response_uri, response_uri_len, "/api/config");
+        snprintf(response_uri, response_uri_len,
+                 last_save_ok ? "/api/config" : "/api/save-failed");
     }
 }
 

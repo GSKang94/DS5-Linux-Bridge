@@ -12,6 +12,7 @@
 #include "hardware/sync.h"
 #include "pico/cyw43_arch.h"
 #include "pico/flash.h" // flash_safe_execute(): park core1 during the flash op
+#include "pico/btstack_flash_bank.h" // PICO_FLASH_BANK_STORAGE_OFFSET (collision guard)
 #include "usb_net.h" // WEBCONFIG_SUBNET_COUNT (subnet-index bound, always defined)
 #include "utils.h"
 
@@ -20,8 +21,18 @@ constexpr uint32_t CONFIG_MAGIC = 0x66ccff00;
 // append-only note in config.h); NOT a reset trigger. v5 added
 // webconfig_custom_ip; v4 bond_names.
 constexpr uint16_t CONFIG_VERSION = 5;
+// Config lives just BELOW BTstack's link-key bank, NOT in the last flash sector.
+// The RP2350 BOOTSEL/picotool UF2 loader erases the top of flash (the last
+// sector) on download -- even though the UF2 image ends far below it -- so a
+// config kept there is wiped on every reflash while it survives plain reboots.
+// BTstack's TLV bank (which survives reflash in practice) is at
+//   PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE - PICO_FLASH_BANK_TOTAL_SIZE
+//   = FLASH - 3*sector  (bank is 2 sectors: -3*sector .. -1*sector)
+// so we sit one sector under it at FLASH - 4*sector, still clear of the image
+// (which ends < 1 MB). This is the fix for "config resets on reflash".
+//   Layout (4 MB build): image .. | cfg(-4) | btstack(-3,-2) | bootrom-erased(-1)
 constexpr uint32_t CONFIG_FLASH_OFFSET =
-    PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE;
+    PICO_FLASH_SIZE_BYTES - 4u * FLASH_SECTOR_SIZE;
 // Bytes of the reserved sector that config actually occupies. Must be a
 // multiple of FLASH_PAGE_SIZE (the save programs it page-by-page) and fit in
 // one erase sector. 512 leaves comfortable headroom for future append-only
@@ -43,6 +54,10 @@ static_assert(CONFIG_STORE_SIZE % FLASH_PAGE_SIZE == 0);
 static_assert(CONFIG_STORE_SIZE <= FLASH_SECTOR_SIZE);
 // Config region must start on a flash sector boundary.
 static_assert(CONFIG_FLASH_OFFSET % FLASH_SECTOR_SIZE == 0);
+// Must not collide with BTstack's link-key bank that sits just above us, and
+// must not itself land in the last (bootrom-erased) sector.
+static_assert(CONFIG_FLASH_OFFSET + FLASH_SECTOR_SIZE <= PICO_FLASH_BANK_STORAGE_OFFSET);
+static_assert(CONFIG_FLASH_OFFSET < PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE);
 
 // Append-only enforcement: pin the offset of every field that has ever shipped.
 // Adding a field at the END leaves these untouched; inserting/reordering one in
@@ -246,6 +261,13 @@ bool config_save() {
   Config verify{};
   memcpy(&verify, flash_config(), sizeof(verify));
   const auto verify_crc32 = calc_config_crc(verify, sizeof(Config_body));
+  // Diagnostic: read the magic straight off the XIP mapping so a future boot log
+  // can be compared byte-for-byte. If this reads 0x66ccff00 here but 0xffffffff
+  // after a power-cycle, the write isn't reaching physical flash (vs. an external
+  // erase). offset is where the config sector lives (see CONFIG_FLASH_OFFSET).
+  printf("[Config] post-write XIP magic @0x%08lx = 0x%08lx\n",
+         (unsigned long) (XIP_BASE + CONFIG_FLASH_OFFSET),
+         (unsigned long) flash_config()->magic);
   if (verify_crc32 == config.crc32) {
     printf("[Config] Config write flash verify success\n");
     return true;

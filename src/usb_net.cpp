@@ -439,6 +439,17 @@ static void url_decode(char *s) {
 }
 
 static void apply_post(char *body) {
+    // Deliberate settings wipe. Resets Config to defaults and persists; leaves
+    // BT bonds untouched (forgetting controllers is the /api/bonds "forgetall"
+    // action). This is the sanctioned reset path -- CONFIG_VERSION is layout
+    // metadata, not a reset knob.
+    if (strstr(body, "factory_reset=1")) {
+        watchdog_update();
+        last_save_ok = config_factory_reset();
+        printf("[NET] factory reset via web UI: %s\n", last_save_ok ? "OK" : "FAILED");
+        return;
+    }
+
     Config_body c = get_config(); // start from current, overwrite parsed fields
 
     for (char *tok = strtok(body, "&"); tok; tok = strtok(nullptr, "&")) {

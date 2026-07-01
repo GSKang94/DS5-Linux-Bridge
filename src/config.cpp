@@ -5,6 +5,7 @@
 #include "config.h"
 
 #include <cmath>
+#include <cstddef> // offsetof
 #include <cstring>
 
 #include "hardware/flash.h"
@@ -15,9 +16,18 @@
 #include "utils.h"
 
 constexpr uint32_t CONFIG_MAGIC = 0x66ccff00;
-constexpr uint16_t CONFIG_VERSION = 5; // v5 added webconfig_custom_ip; v4 bond_names
+// Layout version. Only bump on a genuinely incompatible layout change (see the
+// append-only note in config.h); NOT a reset trigger. v5 added
+// webconfig_custom_ip; v4 bond_names.
+constexpr uint16_t CONFIG_VERSION = 5;
 constexpr uint32_t CONFIG_FLASH_OFFSET =
     PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE;
+// Bytes of the reserved sector that config actually occupies. Must be a
+// multiple of FLASH_PAGE_SIZE (the save programs it page-by-page) and fit in
+// one erase sector. 512 leaves comfortable headroom for future append-only
+// growth (the whole struct is well under this today) without ballooning the
+// on-stack save buffer.
+constexpr size_t CONFIG_STORE_SIZE = 512;
 // flash_safe_execute() timeout per attempt, and how many times we retry when
 // core1 (audio) fails to park in time. Total worst-case block ~= product of the
 // two; kept modest so a wedged core1 can't stall the web request indefinitely.
@@ -26,15 +36,33 @@ constexpr int CONFIG_SAVE_RETRIES = 3;
 static Config config{};
 bool is_dse = false;
 
-// 编译期保护
-// 判断Config结构体是否能放进flash 256bytes
-static_assert(sizeof(Config) <= FLASH_PAGE_SIZE);
-// 配置区起始地址必须按 flash sector 对齐。
+// The whole Config (header + body) must fit in the reserved store, which in
+// turn must page-align and fit the erase sector.
+static_assert(sizeof(Config) <= CONFIG_STORE_SIZE);
+static_assert(CONFIG_STORE_SIZE % FLASH_PAGE_SIZE == 0);
+static_assert(CONFIG_STORE_SIZE <= FLASH_SECTOR_SIZE);
+// Config region must start on a flash sector boundary.
 static_assert(CONFIG_FLASH_OFFSET % FLASH_SECTOR_SIZE == 0);
 
-uint32_t calc_config_crc(const Config &con) {
-  return crc32(reinterpret_cast<const uint8_t *>(&con.body),
-               sizeof(Config_body));
+// Append-only enforcement: pin the offset of every field that has ever shipped.
+// Adding a field at the END leaves these untouched; inserting/reordering one in
+// the middle shifts a later offset and fails the build (see config.h note).
+static_assert(offsetof(Config_body, config_version) == 0);
+static_assert(offsetof(Config_body, speaker_volume) == 1);
+static_assert(offsetof(Config_body, inactive_time) == 5);
+static_assert(offsetof(Config_body, disable_inactive_disconnect) == 6);
+static_assert(offsetof(Config_body, disable_pico_led) == 7);
+static_assert(offsetof(Config_body, polling_rate_mode) == 8);
+static_assert(offsetof(Config_body, audio_buffer_length) == 9);
+static_assert(offsetof(Config_body, controller_mode) == 10);
+static_assert(offsetof(Config_body, webconfig_subnet) == 11);
+static_assert(offsetof(Config_body, webconfig_custom_ip) == 12);
+static_assert(offsetof(Config_body, bond_names) == 16);
+
+// CRC over the first `len` bytes of the body. `len` is the stored size, so an
+// older/shorter blob still validates against the bytes it actually wrote.
+static uint32_t calc_config_crc(const Config &con, size_t len) {
+  return crc32(reinterpret_cast<const uint8_t *>(&con.body), len);
 }
 
 const Config *flash_config() {
@@ -42,19 +70,12 @@ const Config *flash_config() {
 }
 
 void config_valid() {
-  // valid config and set default value
-  if (config.magic != CONFIG_MAGIC) {
-    config.magic = CONFIG_MAGIC;
-    printf("[Config] Config Magic Header is invalid\n");
-  }
-  if (config.version != CONFIG_VERSION) {
-    config.version = CONFIG_VERSION;
-    printf("[Config] Config Version is invalid\n");
-  }
-  if (config.size != sizeof(Config_body)) {
-    config.size = sizeof(Config_body);
-    printf("[Config] Config Body size is invalid\n");
-  }
+  // Clamp/default every body field to a sane value. The header (magic/version/
+  // size) is set by config_load()/config_save(), not here -- migration already
+  // ran by the time we reach this point, so a stale header is not "invalid".
+  config.magic = CONFIG_MAGIC;
+  config.version = CONFIG_VERSION;
+  config.size = sizeof(Config_body);
   auto body = &config.body;
   if (std::isnan(body->speaker_volume) || body->speaker_volume < -100 ||
       body->speaker_volume > 0) {
@@ -97,10 +118,9 @@ void config_valid() {
     body->webconfig_subnet = 0;
     printf("[Config] webconfig_custom_ip invalid; using default preset\n");
   }
-  if (body->config_version != CONFIG_VERSION) {
-    body->config_version = CONFIG_VERSION;
-    printf("[Config] Warning: Config may breaking change\n");
-  }
+  // Legacy in-body version byte, kept in sync with the header for compatibility
+  // with older firmware that read it. Not authoritative; the header version is.
+  body->config_version = CONFIG_VERSION;
   // Defensive: guarantee every bond name is NUL-terminated so corrupt flash
   // can never yield an unbounded C string when the web UI reads it.
   for (auto &b : body->bond_names) {
@@ -108,20 +128,72 @@ void config_valid() {
   }
 }
 
-void config_load() {
-  memcpy(&config, flash_config(), sizeof(Config));
+// Reset the in-RAM config to all defaults (does NOT touch flash). config_valid()
+// fills every field with its default because a zeroed body fails every range
+// check. Used for uninitialized/corrupt flash and by config_factory_reset().
+void config_default() {
+  memset(&config, 0, sizeof(config));
+  config_valid();
+}
 
-  // Migration: on any version mismatch (older format, or uninitialized/0xFF
-  // flash) the trailing struct region is garbage. v5 inserted webconfig_custom_ip
-  // ahead of bond_names, shifting their offsets, so zero both: the custom IP
-  // becomes 0.0.0.0 (invalid -> config_valid() falls back to the default preset)
-  // and nicknames start empty rather than random. config_valid() (below) then
-  // bumps the version and clamps every other field.
-  if (config.version != CONFIG_VERSION) {
-    memset(config.body.webconfig_custom_ip, 0, sizeof(config.body.webconfig_custom_ip));
-    memset(config.body.bond_names, 0, sizeof(config.body.bond_names));
+void config_load() {
+  // The header is at a fixed offset and always safe to read; the body may be
+  // shorter (older firmware) or longer (newer) than ours. Read the raw stored
+  // header first to decide how to migrate.
+  const Config *stored = flash_config();
+
+  // Uninitialized or foreign flash -> start from defaults. (Erased flash reads
+  // 0xFF, so magic won't match; a genuinely different magic can't be trusted.)
+  if (stored->magic != CONFIG_MAGIC) {
+    printf("[Config] no valid config in flash (magic=0x%08lx) -> defaults\n",
+           (unsigned long) stored->magic);
+    config_default();
+    return;
   }
 
+  // `stored->size` is how many body bytes were valid when it was saved. A newer
+  // firmware may have written MORE than we know about, an older one FEWER. Bound
+  // it to the body region that actually fits the reserved store so a corrupt
+  // size can't make us read past the sector.
+  constexpr size_t MAX_STORED_BODY = CONFIG_STORE_SIZE - sizeof(Config) +
+                                     sizeof(Config_body); // body bytes that fit
+  size_t stored_body = stored->size;
+  if (stored_body > MAX_STORED_BODY) {
+    printf("[Config] stored size %u exceeds store; treating as corrupt -> defaults\n",
+           (unsigned) stored_body);
+    config_default();
+    return;
+  }
+
+  // Validate the CRC over exactly the bytes the writer covered (which may be
+  // more than sizeof(Config_body) if it came from newer firmware). A mismatch
+  // means corruption (or a pre-CRC blob) -> fall back to defaults.
+  const uint32_t stored_crc =
+      crc32(reinterpret_cast<const uint8_t *>(&stored->body), stored_body);
+  if (stored_crc != stored->crc32) {
+    printf("[Config] config CRC mismatch (size=%u) -> defaults\n",
+           (unsigned) stored_body);
+    config_default();
+    return;
+  }
+
+  // CRC good: adopt the overlapping body bytes; default-init the tail we have
+  // that the writer didn't (older blob), or ignore the extra bytes it had that
+  // we don't understand (newer blob).
+  const size_t copy_body =
+      stored_body < sizeof(Config_body) ? stored_body : sizeof(Config_body);
+  memcpy(&config, stored, sizeof(uint32_t) + sizeof(uint16_t) +
+                              sizeof(uint32_t) + sizeof(uint16_t)); // header
+  memcpy(&config.body, &stored->body, copy_body);
+  if (copy_body < sizeof(Config_body)) {
+    memset(reinterpret_cast<uint8_t *>(&config.body) + copy_body, 0,
+           sizeof(Config_body) - copy_body);
+    printf("[Config] migrated older config (%u -> %u body bytes)\n",
+           (unsigned) copy_body, (unsigned) sizeof(Config_body));
+  } else if (stored_body > sizeof(Config_body)) {
+    printf("[Config] config from newer firmware (%u body bytes); using first %u\n",
+           (unsigned) stored_body, (unsigned) sizeof(Config_body));
+  }
   config_valid();
 }
 
@@ -130,16 +202,23 @@ void config_load() {
 // the core1 park this races the audio core and corrupts audio (buzzing) -- or
 // faults -- when saving during playback (e.g. bond rename while connected).
 static void config_save_flash_op(void *param) {
-  const uint8_t *page = static_cast<const uint8_t *>(param);
+  const uint8_t *store = static_cast<const uint8_t *>(param);
   const uint32_t interrupts = save_and_disable_interrupts();
   flash_range_erase(CONFIG_FLASH_OFFSET, FLASH_SECTOR_SIZE);
-  flash_range_program(CONFIG_FLASH_OFFSET, page, FLASH_PAGE_SIZE);
+  // Program the whole reserved store (multiple pages) in one call; the SDK
+  // splits it into page-sized writes internally.
+  flash_range_program(CONFIG_FLASH_OFFSET, store, CONFIG_STORE_SIZE);
   restore_interrupts(interrupts);
 }
 
 bool config_save() {
-  config.crc32 = calc_config_crc(config);
-  alignas(4) uint8_t page[FLASH_PAGE_SIZE];
+  // Stamp the header so a future load can migrate this blob by size and verify
+  // it by CRC over exactly the bytes we write.
+  config.magic = CONFIG_MAGIC;
+  config.version = CONFIG_VERSION;
+  config.size = sizeof(Config_body);
+  config.crc32 = calc_config_crc(config, sizeof(Config_body));
+  alignas(4) uint8_t page[CONFIG_STORE_SIZE];
   memset(page, 0xff, sizeof(page));
   memcpy(page, &config, sizeof(Config));
 
@@ -166,13 +245,18 @@ bool config_save() {
 
   Config verify{};
   memcpy(&verify, flash_config(), sizeof(verify));
-  const auto verify_crc32 = calc_config_crc(verify);
+  const auto verify_crc32 = calc_config_crc(verify, sizeof(Config_body));
   if (verify_crc32 == config.crc32) {
     printf("[Config] Config write flash verify success\n");
     return true;
   }
   printf("[Config] Config write flash verify FAILED (config NOT persisted)\n");
   return false;
+}
+
+bool config_factory_reset() {
+  config_default();
+  return config_save();
 }
 
 const Config_body &get_config() { return config.body; }

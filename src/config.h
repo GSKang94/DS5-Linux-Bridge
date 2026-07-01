@@ -9,10 +9,27 @@
 
 // User-assignable nicknames for paired controllers, shown in the web UI.
 // Keyed by Bluetooth address; capacity mirrors btstack's NVM_NUM_LINK_KEYS (4).
-// Kept small so the whole Config still fits in one 256-byte flash page.
 #define CONFIG_MAX_BOND_NAMES 4
 #define CONFIG_BOND_ADDR_LEN  6
 #define CONFIG_BOND_NAME_LEN  16 // 15 chars + NUL
+
+//--------------------------------------------------------------------+
+// Config_body layout is APPEND-ONLY. To stay compatible with configs
+// already written to flash by older firmware, obey these rules:
+//   * Only ever add new fields at the END of Config_body.
+//   * Never reorder, resize, remove, or repurpose an existing field.
+//   * When you add a field, give it a sane default in config_valid().
+// Reads are migrated by size: newer firmware keeps every field an older
+// blob contained and default-initializes the newly-appended tail (see
+// config_load()). The offsetof() static_asserts in config.cpp pin the
+// original field layout so an accidental mid-struct insertion fails the
+// build instead of silently corrupting persisted config.
+//
+// CONFIG_VERSION is a *layout* number, NOT a reset trigger. Bump it only on
+// a genuinely incompatible change (which append-only should make rare). To
+// intentionally wipe settings, call config_factory_reset() -- do not abuse
+// the version for that.
+//--------------------------------------------------------------------+
 
 struct __attribute__((packed)) BondName {
     uint8_t addr[CONFIG_BOND_ADDR_LEN]; // all-zero == empty slot
@@ -37,19 +54,23 @@ struct __attribute__((packed)) Config_body {
     // "unset" -> falls back to the default preset.
     uint8_t webconfig_custom_ip[4];
     BondName bond_names[CONFIG_MAX_BOND_NAMES]; // nicknames for paired controllers
+    // --- append new fields BELOW this line only (see append-only note above) ---
 };
 
 struct __attribute__((packed)) Config {
     uint32_t magic;
-    uint16_t version;
-    uint32_t crc32; // Config_body crc32, only calc and verify when save
-    uint16_t size;  // Config_body size
+    uint16_t version;   // layout version (see append-only note); NOT a reset trigger
+    uint32_t crc32;     // crc32 of the first `size` bytes of body; set/verified on save
+    uint16_t size;      // number of valid body bytes written == sizeof(Config_body) at save time
     Config_body body;
 };
 
 void config_default();
 void config_load();
 bool config_save();
+// Reset every setting to defaults and persist. This is the deliberate wipe
+// path (e.g. a web-UI "factory reset"); bumping CONFIG_VERSION is not.
+bool config_factory_reset();
 const Config_body& get_config();
 void set_config(const uint8_t *new_config, const uint16_t len);
 void config_valid();

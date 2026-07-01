@@ -33,7 +33,7 @@ h2{font-size:1.1rem;margin-bottom:.3rem}
 .bond .addr{color:#888;font-size:.78rem;font-family:monospace}
 .bond .dot{color:#4ade80;font-size:.78rem;white-space:nowrap}
 .bond button{margin:0;padding:.35rem .7rem;font-size:.85rem;background:#3a3a3a;flex:none}
-.bond button.fg{background:#7f1d1d}
+.bond button.fg,button.fg{background:#7f1d1d}
 .btns{display:flex;gap:.5rem;align-items:center}
 #bonds_empty{color:#888;font-size:.9rem}
 #statuscard{display:flex;align-items:center;gap:1rem;flex-wrap:wrap;background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:.7rem 1rem;margin:1rem 0}
@@ -133,8 +133,11 @@ footer .kofi:hover{text-decoration:none;opacity:.9}
 
 <div>
   <button id="save">Save</button>
+  <button id="factoryreset" class="fg">Factory reset</button>
   <span id="status"></span>
 </div>
+<div class="hint">Factory reset restores all settings above to defaults. Paired
+  controllers are kept (use <b>Forget all</b> below to remove those).</div>
 
 <hr>
 
@@ -204,6 +207,17 @@ async function save(){
 }
 
 $('save').onclick=save;
+
+async function factoryReset(){
+  if(!confirm('Reset all settings to defaults? Paired controllers are kept.'))return;
+  setStatus('resetting…','dirty');
+  try{
+    const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'factory_reset=1'});
+    if(r.ok){setStatus('Reset ✓ — reloading','ok');setTimeout(()=>location.reload(),600)}
+    else setStatus('reset failed — not written to flash, try again','err');
+  }catch(e){setStatus('reset failed','err')}
+}
+$('factoryreset').onclick=factoryReset;
 
 // ----- Paired controllers -----
 function fmtAddr(h){return h.match(/.{2}/g).join(':')}

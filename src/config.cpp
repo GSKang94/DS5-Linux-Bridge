@@ -261,13 +261,6 @@ bool config_save() {
   Config verify{};
   memcpy(&verify, flash_config(), sizeof(verify));
   const auto verify_crc32 = calc_config_crc(verify, sizeof(Config_body));
-  // Diagnostic: read the magic straight off the XIP mapping so a future boot log
-  // can be compared byte-for-byte. If this reads 0x66ccff00 here but 0xffffffff
-  // after a power-cycle, the write isn't reaching physical flash (vs. an external
-  // erase). offset is where the config sector lives (see CONFIG_FLASH_OFFSET).
-  printf("[Config] post-write XIP magic @0x%08lx = 0x%08lx\n",
-         (unsigned long) (XIP_BASE + CONFIG_FLASH_OFFSET),
-         (unsigned long) flash_config()->magic);
   if (verify_crc32 == config.crc32) {
     printf("[Config] Config write flash verify success\n");
     return true;

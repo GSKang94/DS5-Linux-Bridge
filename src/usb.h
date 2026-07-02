@@ -18,11 +18,14 @@ void usb_set_descriptor_variant_full(void);
 void usb_set_descriptor_variant_minimal(void);
 bool usb_descriptor_variant_is_full(void);
 
+#ifdef WAKE_VIA_USB_KBD
 // TinyUSB HID instance index of the boot keyboard. STABLE at 1 in both
 // variants: in full the gamepad is instance 0 (parsed first); in minimal a
 // dummy placeholder HID holds instance 0 so the kbd stays instance 1. Kept as a
-// function so callers stay decoupled from the constant.
+// function so callers stay decoupled from the constant. Absent in the WiFi-WOL
+// build (no keyboard).
 uint8_t usb_kbd_hid_instance(void);
+#endif
 
 // Request a variant swap: orchestrator notes the desired variant, then
 // usb_variant_task() drives a tud_disconnect()/settle/swap/tud_connect()
@@ -48,6 +51,18 @@ bool usb_variant_swap_in_progress(void);
 // state; usb_variant_task queries this before starting/continuing a
 // swap so we don't yank the bus during S3/S5.
 void usb_set_host_suspended(bool suspended);
+
+// True while the USB host has the bus suspended (S3/S4/S5) -- i.e. the PC the
+// dongle is plugged into is asleep/off. The WiFi WOL transport reads this to
+// gate the PS-button wake trigger: only fire WOL when the host is actually
+// down, so a normal PS press during play (Steam menu) never sends a packet.
+bool usb_host_suspended(void);
+#else
+// Without the wake subsystem there is no authoritative suspend tracking, so
+// report "not suspended" -- the WiFi PS-button WOL trigger then stays inert
+// (web-button WOL is unaffected). Keeps the WiFi build linkable with
+// -DENABLE_WAKE_HID=OFF.
+static inline bool usb_host_suspended(void) { return false; }
 #endif
 
 #endif //DS5_BRIDGE_USB_H

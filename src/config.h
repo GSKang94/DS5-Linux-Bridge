@@ -31,6 +31,24 @@
 // the version for that.
 //--------------------------------------------------------------------+
 
+// mDNS / network hostname (the "<name>.local" the dongle advertises). User-set
+// so two dongles on one LAN don't both claim ds5wol.local. Max 10 chars + NUL;
+// validated to a DNS label (lowercase a-z, 0-9, hyphen; no leading/trailing
+// hyphen) in config_valid(). See CONFIG_HOSTNAME_DEFAULT.
+#define CONFIG_HOSTNAME_LEN     11
+#define CONFIG_HOSTNAME_DEFAULT "ds5wol"
+
+// Home-WLAN credentials for the WiFi-WOL transport's STA join (ENABLE_WIFI_WOL).
+// Filled by the onboarding captive portal and persisted to flash, replacing the
+// old gitignored wifi_secrets.h. SSID is 32 octets max (802.11) + NUL; a WPA2
+// PSK passphrase is 8..63 chars + NUL. wifi_provisioned gates STA vs AP mode:
+// 0 == no usable creds yet -> come up in AP + captive portal so the user can
+// onboard; 1 == creds present -> join the home WLAN. Present in EVERY build so
+// the flash layout/Config_body size is identical across transports (only the
+// WiFi build reads them), same convention as the WOL fields above.
+#define CONFIG_WIFI_SSID_LEN    33  // 32 chars + NUL
+#define CONFIG_WIFI_PSK_LEN     64  // 63 chars + NUL (WPA2 passphrase max)
+
 struct __attribute__((packed)) BondName {
     uint8_t addr[CONFIG_BOND_ADDR_LEN]; // all-zero == empty slot
     char    name[CONFIG_BOND_NAME_LEN]; // NUL-terminated; "" == unnamed
@@ -45,16 +63,40 @@ struct __attribute__((packed)) Config_body {
     uint8_t polling_rate_mode; // 0: 250Hz, 1: 500Hz, 2: real-time
     uint8_t audio_buffer_length; // [16,128]
     uint8_t controller_mode; // 0: DS5, 1: DSE, 2: Auto
-    // Config-page address selector. 0..2 = vetted /29 presets; WEBCONFIG_SUBNET_CUSTOM
-    // (3) = use webconfig_custom_ip below. See usb_net.cpp build_subnet().
-    uint8_t webconfig_subnet;
-    // Custom dongle IP (4 octets) used only when webconfig_subnet == CUSTOM. Must
-    // be a private (RFC-1918) host address; validated in config_valid(). The host
-    // DHCP lease lands in the same /29 (mirrors the preset scheme). 0.0.0.0 means
-    // "unset" -> falls back to the default preset.
-    uint8_t webconfig_custom_ip[4];
+    // Reserved: config-page address selector + custom IP from the retired
+    // USB-NCM web transport (the config page is served over WiFi now). Blobs
+    // written by NCM-era firmware carry them at these offsets, so they stay
+    // (append-only rule: never remove or repurpose). Do not reuse.
+    uint8_t webconfig_subnet;       // reserved (NCM-era; unread)
+    uint8_t webconfig_custom_ip[4]; // reserved (NCM-era; unread)
     BondName bond_names[CONFIG_MAX_BOND_NAMES]; // nicknames for paired controllers
     // --- append new fields BELOW this line only (see append-only note above) ---
+    // Wake-on-LAN target (ENABLE_WIFI_WOL builds). wol_target_mac is the NIC of
+    // the PC to wake; all-zero == unset (no MAC configured -> WOL is a no-op).
+    // Present in EVERY build so the flash layout/Config_body size is identical
+    // across transports -- only the WiFi build reads it.
+    uint8_t wol_target_mac[6];
+    // Static addressing knobs from the retired W5500 Ethernet transport. The
+    // WiFi transport is DHCP-only and never reads them, but blobs written by
+    // W5500-era firmware carry them at these offsets, so they stay (append-only
+    // rule: never remove or repurpose). Do not reuse for anything else.
+    uint8_t wol_use_static_ip;   // reserved (W5500-era; unread)
+    uint8_t wol_static_ip[4];    // reserved (W5500-era; unread)
+    uint8_t wol_static_netmask[4]; // reserved (W5500-era; unread, was RAM-only)
+    // Network hostname advertised over mDNS as "<hostname>.local" (and set as the
+    // netif hostname). Defaults to CONFIG_HOSTNAME_DEFAULT. User-editable in the
+    // web UI so multiple dongles on one LAN don't collide on ds5wol.local.
+    // config_valid() sanitizes it to a valid DNS label and re-defaults if empty.
+    char hostname[CONFIG_HOSTNAME_LEN];
+    // Home-WLAN credentials (WiFi-WOL onboarding). wifi_provisioned: 0 = no creds
+    // -> AP + captive portal; 1 = creds set -> STA join. wifi_ssid is NOT
+    // necessarily a DNS label, so it is NUL-terminated and length-bounded but not
+    // otherwise sanitized; the password is stored verbatim. config_valid() forces
+    // termination and clears wifi_provisioned if the SSID is empty. NEVER emitted
+    // back to the web UI in cleartext (the portal only ever writes them).
+    uint8_t wifi_provisioned;            // bool: 0 = onboard via AP, 1 = STA creds set
+    char    wifi_ssid[CONFIG_WIFI_SSID_LEN];
+    char    wifi_psk[CONFIG_WIFI_PSK_LEN];
 };
 
 struct __attribute__((packed)) Config {
@@ -90,6 +132,13 @@ bool config_set_bond_name(const uint8_t *addr, const char *name);
 
 // Clear the name slot for `addr` (e.g. when its bond is forgotten).
 void config_clear_bond_name(const uint8_t *addr);
+
+// Store home-WLAN credentials from the onboarding portal and mark the device
+// provisioned (wifi_provisioned=1) so the next boot joins as STA instead of
+// opening the captive portal. `ssid`/`psk` are copied length-bounded and
+// NUL-terminated. An empty `ssid` clears provisioning instead. Mutates the
+// in-RAM config only; the caller persists with config_save().
+void config_set_wifi_creds(const char *ssid, const char *psk);
 
 extern bool is_dse;
 

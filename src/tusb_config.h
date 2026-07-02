@@ -92,20 +92,22 @@
 
 //------------- CLASS -------------//
 #define CFG_TUD_AUDIO             1
-#ifdef ENABLE_WAKE_HID
+// HID class instance count. The boot-keyboard build (WAKE_VIA_USB_KBD) needs 2:
+// FULL carries gamepad (instance 0) + keyboard (instance 1). Without the
+// keyboard there is only ever ONE HID at a time -- gamepad in FULL, inert dummy
+// in MINIMAL -- so 1 suffices and we don't reserve a second HID instance's
+// endpoint buffers. (The dynamic-descriptor machinery, ENABLE_WAKE_HID, does not
+// by itself add a second HID; only the keyboard does.)
+#ifdef WAKE_VIA_USB_KBD
 #define CFG_TUD_HID               2
 #else
 #define CFG_TUD_HID               1
 #endif
 #define CFG_TUD_CDC               0
-// CDC-NCM network interface carrying the onboard config web UI (ENABLE_WEBCONFIG,
-// default on in release). Diagnostics go over UART0 (GP0 TX, 115200 8N1), never
-// USB-CDC -- USB serial perturbed the very USB timing we needed to measure.
-#ifdef ENABLE_WEBCONFIG
-#define CFG_TUD_NCM               1
-#else
+// No CDC-NCM: the config web UI is served over WiFi (ENABLE_WIFI_WOL), keeping
+// the USB face DualSense-only. Diagnostics go over UART0 (GP0 TX, 115200 8N1),
+// never USB-CDC -- USB serial perturbed the very USB timing we needed to measure.
 #define CFG_TUD_NCM               0
-#endif
 #define CFG_TUD_ECM_RNDIS         0
 #define CFG_TUD_MSC               0
 #define CFG_TUD_MIDI              0

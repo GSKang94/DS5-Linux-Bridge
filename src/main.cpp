@@ -17,7 +17,11 @@
 
 #include "config.h"
 #include "dse.h"
-#include "usb_net.h"
+#include "wifi_net.h"
+
+#if defined(ENABLE_WIFI_WOL)
+#include "bootsel_button.h" // BOOTSEL-held-at-boot -> force WiFi onboarding (AP)
+#endif
 
 #if ENABLE_BATT_LED
 #include "battery_led.h"
@@ -140,6 +144,10 @@ void on_bt_data(CHANNEL_TYPE channel, uint8_t *data, uint16_t len) {
     // mode: the wake feature has its own state to maintain (button-byte
     // diff for edge detection) and short-circuiting it on non-2 polling
     // modes silently breaks wake while the host is suspended.
+    // Wake path: USB remote-wakeup (wake.cpp) AND, on ENABLE_WIFI_WOL builds, a
+    // companion Wake-on-LAN packet fired from the same request_host_wake()
+    // chokepoint inside wake.cpp. Both run when the host is suspended -- USB wake
+    // covers S3, WOL covers S4/S5 (indistinguishable over USB; see wake.cpp).
     wake_on_bt_input(data + 3, len - 3);
 
     // interrupt_in_data[53] = dualsense_input_report.status[1]:
@@ -182,7 +190,7 @@ void on_bt_data(CHANNEL_TYPE channel, uint8_t *data, uint16_t len) {
 uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id,
                                hid_report_type_t report_type, uint8_t *buffer,
                                uint16_t reqlen) {
-#ifdef ENABLE_WAKE_HID
+#ifdef WAKE_VIA_USB_KBD
   if (itf == usb_kbd_hid_instance()) {
     if (reqlen >= 8) {
       memset(buffer, 0, 8);
@@ -190,6 +198,8 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id,
     }
     return 0;
   }
+#endif
+#ifdef ENABLE_WAKE_HID
   // MINIMAL instance 0 is the inert dummy HID, NOT the gamepad. Don't route its
   // GET_REPORT into the BT feature path (which would query a controller that
   // isn't connected). Return 0 (STALL); the host never reads it.
@@ -241,11 +251,13 @@ bool tud_audio_set_itf_cb(uint8_t rhport,
 void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id,
                            hid_report_type_t report_type, uint8_t const *buffer,
                            uint16_t bufsize) {
-#ifdef ENABLE_WAKE_HID
+#ifdef WAKE_VIA_USB_KBD
   if (itf == usb_kbd_hid_instance()) {
     // Drop keyboard SET_REPORT (host LED state).
     return;
   }
+#endif
+#ifdef ENABLE_WAKE_HID
   // MINIMAL instance 0 is the inert dummy HID; ignore any report to it.
   if (!usb_descriptor_variant_is_full()) {
     return;
@@ -313,20 +325,44 @@ int main() {
   tud_disconnect();
   board_init_after_tusb();
 
+#if defined(ENABLE_WIFI_WOL) && defined(WIFI_BOOTSEL_REONBOARD)
+  // OPTIONAL WiFi re-onboard trigger: hold BOOTSEL during the first ~2s of boot
+  // to force AP + captive portal even when creds are saved. DISABLED BY DEFAULT
+  // (WIFI_BOOTSEL_REONBOARD undefined) because the RP2350 BOOTSEL read in
+  // bootsel_button.h was observed to FALSE-TRIGGER on every boot -- it reported
+  // "held" with nothing pressed, stranding the device in AP mode forever. The
+  // logic-based fallback below (provisioned -> STA; if the join fails within the
+  // budget, wifi_net_task() clears creds + reboots to AP) makes this unnecessary.
+  // DO NOT re-enable until bootsel_button_pressed() is fixed + verified on HW.
+  // Sampled before cyw43_arch_init/BT/audio.
+  {
+    bool held = true;
+    for (int i = 0; i < 20 && held; i++) { // ~2s @ 100ms
+      held = bootsel_button_pressed();
+      sleep_ms(100);
+    }
+    if (held) {
+      printf("[BOOT] BOOTSEL held -> forcing WiFi onboarding (AP mode)\n");
+      wifi_net_request_ap_onboarding();
+    }
+  }
+#endif
+
   if (cyw43_arch_init()) {
     printf("Failed to initialize CYW43\n");
     return 1;
   }
 
-  // Load persisted config from flash BEFORE usb_net_init(): the web server
-  // picks its subnet from get_config().webconfig_subnet, so the saved value
-  // must be in place first (otherwise it always reads the default).
+  // Load persisted config from flash BEFORE wifi_net_init(): it reads the
+  // stored WiFi credentials (STA vs AP onboarding) and the mDNS hostname, so
+  // the saved values must be in place first.
   config_load();
 
-  // Bring up the onboard config web server (USB CDC-NCM + lwIP). No-op when
-  // ENABLE_WEBCONFIG is off. lwIP is ours alone here (CYW43_LWIP=0).
-  // Diagnostics print to UART0 (GP0 TX, 115200 8N1), not USB.
-  usb_net_init();
+  // Bring up the config web server (no-op with ENABLE_WIFI_WOL off). The SDK's
+  // cyw43_arch_init() already brought lwIP up (CYW43_LWIP=1), so
+  // wifi_net_init() must NOT re-init it. Diagnostics print to UART0 (GP0 TX,
+  // 115200 8N1), not USB.
+  wifi_net_init();  // Wi-Fi/WOL transport (ENABLE_WIFI_WOL)
 
   // Power-On Self Test (POST) LED pattern: 3 rapid flashes to confirm
   // successful CPU overclocking and CYW43 Bluetooth module initialization.
@@ -359,24 +395,51 @@ int main() {
   critical_section_init(&report_cs);
   wake_init();
 
-  bt_init();
-  bt_register_data_callback(on_bt_data);
+  // WiFi onboarding (AP + captive portal) is a dedicated setup mode: no
+  // controller, no audio. Crucially, BT classic page-scan/inquiry contends with
+  // the SoftAP on the single shared CYW43 radio -- with BT up, the AP beacons
+  // but never admits a station (observed: stas=0, client loops DHCP forever).
+  // So in AP mode we skip BT + audio entirely, handing the radio to the AP (and
+  // freeing ~110 KB of heap). Normal STA operation brings BT/audio up as usual.
+  const bool ap_onboarding = wifi_net_in_ap_mode();
+  if (!ap_onboarding) {
+    bt_init();
+    bt_register_data_callback(on_bt_data);
 
-  audio_init();
-  state_init();
+    audio_init();
+    state_init();
+  } else {
+    printf("[BOOT] AP onboarding mode: skipping BT + audio (radio handed to SoftAP)\n");
+  }
 
 #ifdef ENABLE_WAKE_HID
-  // Enumerate immediately as the MINIMAL variant (kbd + inert pads + CDC-NCM),
-  // even before any controller connects. tusb_init() left us tud_disconnect()'d;
-  // without this the dongle would stay invisible to the host on a cold plug-in
-  // until the first controller connection flipped it to FULL -- which made the
-  // config web page (carried on NCM, present in MINIMAL too) unreachable from a
-  // cold start, and is also needed so the device is enumerated before the host
-  // suspends (remote-wakeup). active_variant/desired_variant are already MINIMAL.
+  // Enumerate immediately as the MINIMAL variant (inert HID placeholder, plus
+  // the boot keyboard in WAKE_VIA_USB_KBD builds), even before any controller
+  // connects. tusb_init() left us tud_disconnect()'d; without this the dongle
+  // would stay invisible to the host on a cold plug-in until the first
+  // controller connection flipped it to FULL -- and the device must be
+  // enumerated before the host suspends for USB remote-wakeup to work.
+  // active_variant/desired_variant are already MINIMAL.
   tud_connect();
 #endif
 
   watchdog_enable(1000, true);
+
+  // Onboarding loop: a stripped main loop with BT/audio/HID skipped (they were
+  // never initialised in AP mode). Pump only the radio/lwIP (cyw43_arch_poll +
+  // wifi_net_task drive the SoftAP RX, DHCP/DNS servers, scan, captive portal)
+  // plus tud_task to keep USB alive, and feed the watchdog. The device leaves
+  // this loop by rebooting into STA mode once the user provisions (wifi_net_task
+  // fires the deferred watchdog_reboot).
+  if (ap_onboarding) {
+    while (1) {
+      watchdog_update();
+      cyw43_arch_poll();
+      tud_task();
+      wifi_net_task();
+      sleep_us(250);
+    }
+  }
 
   while (1) {
     watchdog_update();
@@ -389,9 +452,10 @@ int main() {
 #ifdef ENABLE_WAKE_HID
     usb_variant_task();
 #endif
-    // Service lwIP timers for the onboard config web server (no-op when
-    // ENABLE_WEBCONFIG is off). Cheap; not in the audio hot path.
-    usb_net_task();
+    // Service lwIP for the config web server (no-op unless the WiFi transport
+    // is built). Cheap; not in the audio hot path. wifi_net_task pumps the
+    // WiFi link state + lwIP timers.
+    wifi_net_task();
     audio_loop();
     interrupt_loop();
     // DSE Edge profile snapshot prefetch/unlock state machine.

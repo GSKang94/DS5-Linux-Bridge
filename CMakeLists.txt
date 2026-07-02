@@ -62,8 +62,19 @@ message(STATUS "DS5-Linux-Bridge build target -- WAVESHARE_RP2350B_PLUS_W_BUILD=
 # no USB-CDC serial. USB serial was removed because it perturbed the very USB
 # timing it was meant to diagnose (and was unreliable). See README "Debugging".
 
-# Onboard web config UI over a USB CDC-NCM network interface. Default ON.
-option(ENABLE_WEBCONFIG "Serve the config web page over a USB network interface" ON)
+# Config web UI + Wake-on-LAN over the onboard CYW43 radio in STA mode, joining
+# the home WLAN by DHCP (onboarded via a captive portal on first boot). This is
+# the ONLY config transport -- the old USB CDC-NCM web transport was removed so
+# the dongle's USB face can be a pure DualSense (see WAKE_VIA_USB_KBD below).
+# WOL wakes a PC in S4/S5 (when USB remote-wake is unsupported) by broadcasting
+# a magic packet to its NIC. Needs NO extra hardware -- the radio is the same
+# one BTstack already drives (the WiFi firmware blob is ALREADY in the flash
+# image, linked by pico_cyw43_arch regardless of use). Sets CYW43_LWIP=1 so the
+# SDK's cyw43_arch owns the lwIP netif/DHCP for WiFi. BT (Opus,
+# latency-critical) and WiFi share one chip + one PIO-SPI bus -- see the
+# audio-contention notes. Turning this OFF leaves NO config UI (settings keep
+# their flash values); it exists for a zero-WiFi minimal build only.
+option(ENABLE_WIFI_WOL "Serve the config page + send Wake-on-LAN over the onboard CYW43 Wi-Fi (STA mode)" ON)
 option(ENABLE_VERBOSE "Enable Log Verbose" OFF)
 if(ENABLE_VERBOSE)
     set(ENABLE_VERBOSE_VALUE 1)
@@ -127,21 +138,45 @@ add_executable(ds5-bridge
 set_source_files_properties(src/ram_mem.c PROPERTIES COMPILE_OPTIONS
         "-fno-builtin;-fno-tree-loop-distribute-patterns")
 
-if (ENABLE_WEBCONFIG)
+# Wi-Fi/WOL transport: config page + WOL over the onboard CYW43 in STA mode. No
+# extra driver sources -- the cyw43 driver + WiFi firmware are already linked
+# (pico_cyw43_arch, used for BT). We just add our STA/lwIP glue and ask the SDK
+# to wire lwIP to the WiFi netif (CYW43_LWIP=1, set below where the other CYW43
+# defs live). mDNS for ds5wol.local discovery. web_api.cpp is the httpd core
+# (fs_open_custom / JSON API / POST handlers), kept in a separate file from the
+# netif glue.
+if (ENABLE_WIFI_WOL)
     target_sources(ds5-bridge PRIVATE
-            src/usb_net.cpp
-            # TinyUSB's tiny DHCP server, used to hand the host an address on
-            # the USB NCM link.
-            ${PICO_TINYUSB_PATH}/lib/networking/dhserver.c
+            src/web_api.cpp
+            src/wifi_net.cpp
+            # Onboarding captive portal (AP mode): tiny DHCP + DNS servers so an
+            # unprovisioned dongle can hand a phone a lease and redirect every
+            # lookup to its own page. Vendored from pico-examples; only compiled
+            # for the WiFi build (the AP path is the sole user). See lib/portal.
+            lib/portal/dhcpserver.c
+            lib/portal/dnsserver.c
     )
     target_include_directories(ds5-bridge PRIVATE
-            ${PICO_TINYUSB_PATH}/lib/networking
+            lib/portal
     )
-    target_compile_definitions(ds5-bridge PRIVATE ENABLE_WEBCONFIG)
+    target_compile_definitions(ds5-bridge PRIVATE
+            ENABLE_WIFI_WOL
+            # The web UI exists in this build (web_api.cpp + httpd).
+            ENABLE_WEBUI
+            # Regulatory country code for the CYW43 radio. The SDK default is
+            # CYW43_COUNTRY_WORLDWIDE ('XX'), which makes the SoftAP BEACON but
+            # REFUSE to admit stations (onboarding symptom: AP link up, but
+            # cyw43_wifi_ap_get_stas stays 0 and clients loop DHCP forever). AP
+            # mode needs a real regulatory domain. STA mode is unaffected (the
+            # router's domain governs there), but this applies to both. Set to US
+            # (permissive, widest 2.4GHz channel set).
+            PICO_CYW43_ARCH_DEFAULT_COUNTRY_CODE=CYW43_COUNTRY\('U','S',0\)
+    )
     target_link_libraries(ds5-bridge
             pico_unique_id
             pico_lwip_nosys
             pico_lwip_http
+            pico_lwip_mdns
     )
 endif ()
 
@@ -230,8 +265,17 @@ if (WAVESHARE_RP2350B_PLUS_W_BUILD)
         target_compile_definitions(ds5-bridge PRIVATE PICO_EMBED_XIP_SETUP=1)
 endif ()
 
+# CYW43_LWIP: the WiFi transport needs the SDK's cyw43_arch to own an lwIP netif
+# for the radio (=1). Every other build keeps the radio BT-only and lets our code
+# own lwIP alone -- or no lwIP at all -- so =0.
+if (ENABLE_WIFI_WOL)
+    set(CYW43_LWIP_VALUE 1)
+else ()
+    set(CYW43_LWIP_VALUE 0)
+endif ()
+
 target_compile_definitions(ds5-bridge PRIVATE
-        CYW43_LWIP=0
+        CYW43_LWIP=${CYW43_LWIP_VALUE}
         # 0 (not 1): flash_safe_execute() must really park core1 while flash is
         # erased/programmed (config_save). With =1 the lockout is skipped and the
         # flash op races the audio core -> buzzing / crash when saving during
@@ -244,7 +288,7 @@ target_compile_definitions(ds5-bridge PRIVATE
         DISABLE_SPEAKER_PROC=${DISABLE_SPEAKER_PROC_VALUE}
 )
 
-option(ENABLE_WAKE_HID "Wake the Windows host on PS-button press" ON)
+option(ENABLE_WAKE_HID "Wake the host when the controller connects / PS button is pressed" ON)
 if(ENABLE_WAKE_HID)
     target_compile_definitions(ds5-bridge PRIVATE
             ENABLE_WAKE_HID
@@ -252,6 +296,31 @@ if(ENABLE_WAKE_HID)
     target_sources(ds5-bridge PRIVATE
             src/wake.cpp
     )
+    # ENABLE_WAKE_HID is the wake DECISION machinery: the dynamic descriptor +
+    # host-suspend tracking (MINIMAL/FULL variant swap, usb_host_suspended(),
+    # the BT-event wake triggers, the DualSense power-off-on-suspend debounce).
+    # The wake ACTIONS layer on top of it:
+    #   - WOL over WiFi (ENABLE_WIFI_WOL above) -- covers S4/S5, no USB footprint.
+    #   - USB boot keyboard (WAKE_VIA_USB_KBD) -- an F15 keystroke + USB
+    #     remote-wakeup, covers S3 on boards without WOL. Adds a keyboard
+    #     interface to the DualSense's own VID/PID, which some anticheats treat
+    #     as suspicious -- hence OFF by default: the default USB face is a PURE
+    #     DualSense (audio + gamepad, nothing else).
+    #   - Companion-Pico link (ENABLE_WAKE_LINK) -- scaffolding for a second,
+    #     separate Pico that enumerates as a plain boot keyboard on its own USB
+    #     port/VID:PID and types the wake keystroke when this dongle signals it
+    #     over a GPIO line. Keeps this dongle's enumeration pure while still
+    #     having USB-HID wake. The companion firmware is future work; this side
+    #     only emits the signal (see src/wake_link.h).
+    option(WAKE_VIA_USB_KBD "Enumerate a USB boot keyboard for host wake (breaks pure-DualSense enumeration)" OFF)
+    if(WAKE_VIA_USB_KBD)
+        target_compile_definitions(ds5-bridge PRIVATE WAKE_VIA_USB_KBD)
+    endif()
+    option(ENABLE_WAKE_LINK "Signal a companion wake-keyboard Pico over GPIO on host-wake (scaffolding)" OFF)
+    if(ENABLE_WAKE_LINK)
+        target_compile_definitions(ds5-bridge PRIVATE ENABLE_WAKE_LINK)
+        target_sources(ds5-bridge PRIVATE src/wake_link.cpp)
+    endif()
 endif()
 
 option(WAKE_DEBUG "Print wake-FSM transitions to UART (developer use)" OFF)

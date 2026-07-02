@@ -1,0 +1,756 @@
+//
+// web_api.cpp -- transport-agnostic config web UI (lwIP httpd).
+//
+// Nothing here knows or cares which netif delivered the request -- the WiFi
+// transport (wifi_net.cpp) brings up lwIP + the netif and calls web_api_init().
+// See web_api.h.
+//
+
+#include "web_api.h"
+
+#ifdef ENABLE_WEBUI
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+#include "lwip/apps/fs.h"
+#include "lwip/apps/httpd.h"
+#include "lwip/pbuf.h"
+
+#include "hardware/watchdog.h"
+
+#include "bt.h"
+#include "config.h"
+#include "web_api.h"
+#include "web_page.h"
+#ifdef ENABLE_WIFI_WOL
+#include "wifi_net.h"   // AP-mode detection + scan/provision hooks
+#include "web_portal.h" // onboarding captive-portal page
+// Result of the most recent provision POST, reported by the synthetic
+// /api/wifi_provision_result route. Set in apply_wifi_provision_post() (below
+// fs_open_custom, which reads it), so forward-declare here.
+static bool provision_ok;
+static bool wifi_reset_ok;
+#endif
+
+//--------------------------------------------------------------------+
+// WOL send hook: weak no-op default. The WiFi transport provides a strong
+// definition (see wifi_net.cpp). With only the NCM transport linked, this
+// no-op is used and /api/wol simply reports "no transport" -- the NCM link
+// can't reach the home LAN, so there is nothing to send.
+//--------------------------------------------------------------------+
+extern "C" __attribute__((weak)) bool web_api_wol_send_impl(const uint8_t mac[6]) {
+    (void) mac;
+    return false;
+}
+bool web_api_wol_send(const uint8_t mac[6]) { return web_api_wol_send_impl(mac); }
+
+//--------------------------------------------------------------------+
+// ARP resolve hooks: weak no-op defaults, strong overrides in wifi_net.cpp.
+// See web_api.h for rationale (non-blocking start/poll split).
+//--------------------------------------------------------------------+
+extern "C" __attribute__((weak)) void web_api_resolve_mac_start_impl(const uint8_t ip[4]) {
+    (void) ip;
+}
+extern "C" __attribute__((weak)) int web_api_resolve_mac_poll_impl(uint8_t out_mac[6]) {
+    (void) out_mac;
+    return -1;
+}
+void web_api_resolve_mac_start(const uint8_t ip[4]) { web_api_resolve_mac_start_impl(ip); }
+int web_api_resolve_mac_poll(uint8_t out_mac[6]) { return web_api_resolve_mac_poll_impl(out_mac); }
+
+//--------------------------------------------------------------------+
+// HTTP content: / (page) + JSON API -- via fs_open_custom
+//--------------------------------------------------------------------+
+
+// Build a complete response (headers + body) into a malloc'd buffer owned by
+// the fs_file (freed in fs_close_custom). Used for the SMALL dynamic JSON
+// responses (<=512 B). NOT used for the ~5 KB static page -- see
+// make_static_page() below, which avoids copying the page into the heap.
+static int make_file(struct fs_file *file, const char *status, const char *content_type,
+                     const char *body, int body_len) {
+    const int hdr_max = 160;
+    char *buf = (char *) malloc(hdr_max + body_len);
+    if (!buf) return 0;
+    int hdr_len = snprintf(buf, hdr_max,
+                           "HTTP/1.1 %s\r\nContent-Type: %s\r\nCache-Control: no-store\r\n"
+                           "Connection: close\r\nContent-Length: %d\r\n\r\n",
+                           status, content_type, body_len);
+    memcpy(buf + hdr_len, body, body_len);
+    memset(file, 0, sizeof(*file));
+    file->data = buf; // malloc'd; reclaimed in fs_close_custom via file->data
+    file->len = (int) (hdr_len + body_len);
+    file->index = file->len;
+    file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
+    return 1;
+}
+
+// Serve the static config page WITHOUT ever copying its ~18.5 KB body into the
+// heap. The old make_file() malloc'd 160 + ~18.5 KB PER GET; two clients loading
+// the page at once summed to ~37 KB of transient heap against the WiFi+BT build's
+// ~27 KB free-heap cushion -> OOM panic.
+//
+// Fix: stream the page from flash via fs_read_custom() in small (~MSS) chunks.
+// With FS_FILE_FLAGS_CUSTOM and file->data == NULL, httpd skips its in-memory
+// fast path entirely and pulls every byte through fs_read() -> fs_read_custom()
+// into a per-connection ~536 B hs->buf (httpd.c http_check_eof). Peak heap per
+// page load drops from ~18.5 KB to ~0.5 KB. The header is emitted by
+// fs_read_custom() too (HEADER_INCLUDED, so httpd doesn't generate its own):
+// file->index 0..PAGE_HDR_LEN-1 = header bytes, then WEB_PAGE[index-PAGE_HDR_LEN].
+// Requires LWIP_HTTPD_DYNAMIC_FILE_READ=1 (set in lwipopts.h).
+// The streamer can serve more than one flash page (the config page, and -- in
+// the WiFi build -- the onboarding portal page). httpd serves one custom file at
+// a time, so the active page is tracked module-statically: fs_open_custom()
+// picks it, fs_read_custom() reads from it. `cur_page_*` are the body bytes;
+// PAGE_HDR holds the matching response header (its Content-Length differs per
+// page, so it's rebuilt whenever the active page changes).
+static const char *cur_page_body = nullptr;
+static int         cur_page_len  = 0;
+static char PAGE_HDR[160];
+static int  PAGE_HDR_LEN = 0;
+
+// Point the streamer at `body`/`len` and (re)build its response header.
+static int make_static_page(struct fs_file *file, const char *body, int len) {
+    cur_page_body = body;
+    cur_page_len  = len;
+    PAGE_HDR_LEN = snprintf(PAGE_HDR, sizeof(PAGE_HDR),
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+                            "Cache-Control: no-store\r\nConnection: close\r\n"
+                            "Content-Length: %d\r\n\r\n", len);
+    memset(file, 0, sizeof(*file));
+    file->data = NULL;                 // NULL + CUSTOM -> httpd streams via fs_read_custom
+    file->len = PAGE_HDR_LEN + len;
+    file->index = 0;                   // cursor: header bytes, then flash body
+    file->flags = FS_FILE_FLAGS_CUSTOM | FS_FILE_FLAGS_HEADER_INCLUDED;
+    return 1;
+}
+
+// "AABBCCDDEEFF" (12 hex, no separators).
+static void mac_to_hex(const uint8_t *a, char out[13]) {
+    static const char h[] = "0123456789ABCDEF";
+    for (int i = 0; i < 6; i++) {
+        out[i * 2]     = h[(a[i] >> 4) & 0xf];
+        out[i * 2 + 1] = h[a[i] & 0xf];
+    }
+    out[12] = '\0';
+}
+
+static int json_config(char *out, size_t cap) {
+    const Config_body &c = get_config();
+    char wol_hex[13];
+    mac_to_hex(c.wol_target_mac, wol_hex);
+    return snprintf(out, cap,
+                    "{\"version\":\"%s\","
+                    "\"inactive_time\":%u,"
+                    "\"disable_inactive_disconnect\":%u,"
+                    "\"disable_pico_led\":%u,"
+                    "\"polling_rate_mode\":%u,"
+                    "\"audio_buffer_length\":%u,"
+                    "\"controller_mode\":%u,"
+                    "\"wol_target_mac\":\"%s\","
+                    // hostname is sanitized to [a-z0-9-] in config_valid(), so it
+                    // never needs JSON string escaping here.
+                    "\"hostname\":\"%s\","
+                    // The web UI only exists on the WiFi transport now, so a
+                    // served page always has WOL + WiFi controls available.
+                    "\"wol_capable\":true,"
+                    "\"wifi_capable\":true}",
+                    PICO_PROGRAM_VERSION_STRING,
+                    c.inactive_time,
+                    c.disable_inactive_disconnect,
+                    c.disable_pico_led,
+                    c.polling_rate_mode,
+                    c.audio_buffer_length,
+                    c.controller_mode,
+                    wol_hex,
+                    c.hostname);
+}
+
+//--------------------------------------------------------------------+
+// Paired-controller (bond) management helpers
+//--------------------------------------------------------------------+
+
+static void addr_to_hex(const uint8_t *a, char out[13]) {
+    static const char h[] = "0123456789ABCDEF";
+    for (int i = 0; i < 6; i++) {
+        out[i * 2]     = h[(a[i] >> 4) & 0xf];
+        out[i * 2 + 1] = h[a[i] & 0xf];
+    }
+    out[12] = '\0';
+}
+
+// Parse exactly 12 hex chars into a[6]. Returns true on success.
+static bool hex_to_addr(const char *s, uint8_t a[6]) {
+    if (!s) return false;
+    uint8_t bytes[6];
+    auto nib = [](char x) -> int {
+        if (x >= '0' && x <= '9') return x - '0';
+        if (x >= 'a' && x <= 'f') return x - 'a' + 10;
+        if (x >= 'A' && x <= 'F') return x - 'A' + 10;
+        return -1;
+    };
+    for (int i = 0; i < 6; i++) {
+        char c = s[i * 2], d = s[i * 2 + 1];
+        if (!c || !d) return false;
+        int hi = nib(c), lo = nib(d);
+        if (hi < 0 || lo < 0) return false;
+        bytes[i] = (uint8_t) ((hi << 4) | lo);
+    }
+    if (s[12] != '\0') return false; // trailing junk
+    memcpy(a, bytes, 6);
+    return true;
+}
+
+// Append a JSON string literal (with quotes) for `s`, escaping " and \.
+static int json_str(char *out, size_t cap, const char *s) {
+    size_t i = 0;
+    if (cap < 3) return 0;
+    out[i++] = '"';
+    for (const char *p = s; *p; p++) {
+        char c = *p;
+        if (c == '"' || c == '\\') {
+            if (i + 2 >= cap - 1) break;
+            out[i++] = '\\';
+            out[i++] = c;
+        } else if ((unsigned char) c < 0x20) {
+            continue; // drop control chars
+        } else {
+            if (i + 1 >= cap - 1) break;
+            out[i++] = c;
+        }
+    }
+    out[i++] = '"';
+    out[i] = '\0';
+    return (int) i;
+}
+
+static int json_bonds(char *out, size_t cap) {
+    uint8_t list[CONFIG_MAX_BOND_NAMES][BT_ADDR_LEN];
+    const int n = bt_bond_list(list, CONFIG_MAX_BOND_NAMES);
+
+    uint8_t conn[BT_ADDR_LEN];
+    const bool have_conn = bt_connected_addr(conn);
+    char conn_hex[13] = "";
+    if (have_conn) addr_to_hex(conn, conn_hex);
+
+    int w = snprintf(out, cap, "{\"connected\":\"%s\",\"max\":%d,\"bonds\":[",
+                     conn_hex, CONFIG_MAX_BOND_NAMES);
+    for (int i = 0; i < n && w < (int) cap; i++) {
+        char hex[13];
+        addr_to_hex(list[i], hex);
+        const char *nm = config_bond_name(list[i]);
+        if (!nm) nm = "";
+        w += snprintf(out + w, cap - w, "%s{\"addr\":\"%s\",\"name\":",
+                      i ? "," : "", hex);
+        if (w < (int) cap) w += json_str(out + w, cap - w, nm);
+        if (w < (int) cap) w += snprintf(out + w, cap - w, "}");
+    }
+    if (w < (int) cap) w += snprintf(out + w, cap - w, "]}");
+    return w;
+}
+
+// GET /api/status -- live controller health (read-only).
+static int json_status(char *out, size_t cap) {
+    BtStatus s;
+    bt_get_status(&s);
+    return snprintf(out, cap,
+                    "{\"connected\":%s,"
+                    "\"model\":\"%s\","
+                    "\"battery_valid\":%s,"
+                    "\"battery_pct\":%u,"
+                    "\"charging\":%s}",
+                    s.connected ? "true" : "false",
+                    s.is_dse ? "DSE" : "DS5",
+                    s.battery_valid ? "true" : "false",
+                    s.battery_pct,
+                    s.charging ? "true" : "false");
+}
+
+// GET /api/resolve_mac -- reports the status of the most recent resolve
+// kicked off by POST /api/resolve_mac. The POST only starts the ARP lookup
+// (see web_api.h); the browser polls this GET afterward until it sees
+// "pending":false. {"pending":true} while in flight, then either
+// {"pending":false,"ok":true,"mac":"..."} or {"pending":false,"ok":false}.
+static int json_resolve_mac(char *out, size_t cap) {
+    uint8_t mac[6];
+    const int r = web_api_resolve_mac_poll(mac);
+    if (r == 0) return snprintf(out, cap, "{\"pending\":true}");
+    if (r > 0) {
+        char hex[13];
+        mac_to_hex(mac, hex);
+        return snprintf(out, cap, "{\"pending\":false,\"ok\":true,\"mac\":\"%s\"}", hex);
+    }
+    return snprintf(out, cap, "{\"pending\":false,\"ok\":false}");
+}
+
+extern "C" int fs_open_custom(struct fs_file *file, const char *name) {
+#ifdef ENABLE_WIFI_WOL
+    // Onboarding mode: serve the captive portal for essentially every GET.
+    if (wifi_net_in_ap_mode()) {
+        // The portal's own API routes must reach the shared JSON handlers below.
+        const bool is_portal_api =
+            (strncmp(name, "/api/", 5) == 0);
+        if (!is_portal_api) {
+            // Serve the portal page itself (200) for the root, the OS captive-probe
+            // URLs (Windows /connecttest.txt + /index.shtml; Apple
+            // /hotspot-detect.html; Android /generate_204; ...), AND any other GET.
+            // We deliberately do NOT 302-redirect: redirecting probe URLs to
+            // http://192.168.4.1/ on the SAME host made the captive mini-browser
+            // re-request /index.shtml in a tight loop and never render. Returning
+            // the page body directly for every path breaks that loop and makes the
+            // "Sign in to network" sheet show the form immediately.
+            return make_static_page(file, PORTAL_PAGE, (int)(sizeof(PORTAL_PAGE) - 1));
+        }
+    }
+#endif
+    if (strcmp(name, "/") == 0 || strcmp(name, "/index.html") == 0) {
+        // Streamed from flash (no per-request body malloc). See make_static_page.
+        return make_static_page(file, WEB_PAGE, (int)(sizeof(WEB_PAGE) - 1));
+    }
+    // Shared JSON scratch: make_file() copies the body into its own malloc'd
+    // buffer before returning, and httpd serves one custom file at a time, so a
+    // single static buffer is safe for all JSON routes (saves BSS -> heap).
+    static char body[512];
+#ifdef ENABLE_WIFI_WOL
+    if (strcmp(name, "/api/wifi_scan") == 0) {
+        // A scan is kicked off on first hit and on explicit ?start=1 (the portal's
+        // rescan button); subsequent polls just report the latest list + whether a
+        // scan is still running. (httpd strips the query string before matching,
+        // so we can't see ?start here -- starting on every poll is harmless: the
+        // scan-start is a no-op while one is already active.)
+        wifi_scan_start();
+        const int len = wifi_scan_json(body, sizeof(body));
+        return make_file(file, "200 OK", "application/json", body, len);
+    }
+    if (strcmp(name, "/api/wifi_provision_result") == 0) {
+        // Synthetic reply for the provision POST (see httpd_post_finished). Reports
+        // whether the creds were accepted; the device reboots into STA shortly after.
+        const int len = snprintf(body, sizeof(body), "{\"ok\":%s}",
+                                 provision_ok ? "true" : "false");
+        return make_file(file, "200 OK", "application/json", body, len);
+    }
+    if (strcmp(name, "/api/wifi_reset_result") == 0) {
+        // Synthetic reply for POST /api/wifi_reset. If ok, the device has cleared
+        // saved WLAN creds and will reboot into AP onboarding shortly.
+        const int len = snprintf(body, sizeof(body), "{\"ok\":%s}",
+                                 wifi_reset_ok ? "true" : "false");
+        return make_file(file, "200 OK", "application/json", body, len);
+    }
+#endif
+    if (strcmp(name, "/api/config") == 0) {
+        const int len = json_config(body, sizeof(body));
+        return make_file(file, "200 OK", "application/json", body, len);
+    }
+    if (strcmp(name, "/api/bonds") == 0) {
+        const int len = json_bonds(body, sizeof(body));
+        return make_file(file, "200 OK", "application/json", body, len);
+    }
+    if (strcmp(name, "/api/status") == 0) {
+        const int len = json_status(body, sizeof(body));
+        return make_file(file, "200 OK", "application/json", body, len);
+    }
+    if (strcmp(name, "/api/resolve_mac") == 0) {
+        const int len = json_resolve_mac(body, sizeof(body));
+        return make_file(file, "200 OK", "application/json", body, len);
+    }
+    // POST /api/config redirects here when config_save() failed to reach flash.
+    // Returning a non-2xx status makes the page's `r.ok` check false so it shows
+    // an error instead of "Saved ✓" for a change that never persisted.
+    if (strcmp(name, "/api/save-failed") == 0) {
+        static const char sf[] = "config save failed: flash not written";
+        return make_file(file, "500 Internal Server Error", "text/plain", sf, sizeof(sf) - 1);
+    }
+    if (strcmp(name, "/404.html") == 0) {
+        static const char nf[] = "not found";
+        return make_file(file, "404 Not Found", "text/plain", nf, sizeof(nf) - 1);
+    }
+    return 0;
+}
+
+extern "C" void fs_close_custom(struct fs_file *file) {
+    // JSON responses (make_file) own a malloc'd file->data; free it. The static
+    // page (make_static_page) sets data=NULL and streams from flash, so there's
+    // nothing to free for it.
+    if (file && file->data) {
+        free(const_cast<char *>(file->data));
+        file->data = NULL;
+    }
+}
+
+// Streams the static config page when httpd pulls bytes (data==NULL + CUSTOM).
+// file->index 0..PAGE_HDR_LEN-1 -> the response header; beyond that ->
+// WEB_PAGE[index - PAGE_HDR_LEN]. Copies up to `count` (~MSS) per call into the
+// per-connection buffer; never allocates the whole page. Only the page uses this
+// path -- JSON/404 responses carry their bytes in file->data (FS_READ_EOF here).
+extern "C" int fs_read_custom(struct fs_file *file, char *buffer, int count) {
+    if (!file || file->data != NULL) {
+        return FS_READ_EOF; // in-memory response (JSON/404): nothing to stream
+    }
+    int remaining = file->len - file->index;
+    if (remaining <= 0) return FS_READ_EOF;
+    int n = (count < remaining) ? count : remaining;
+
+    int written = 0;
+    // Header portion first.
+    if (file->index < PAGE_HDR_LEN) {
+        int hdr_avail = PAGE_HDR_LEN - file->index;
+        int hdr_n = (n < hdr_avail) ? n : hdr_avail;
+        memcpy(buffer, PAGE_HDR + file->index, hdr_n);
+        written += hdr_n;
+    }
+    // Then the flash body (may continue within the same call once header drains).
+    if (written < n) {
+        int body_pos = (file->index + written) - PAGE_HDR_LEN; // >= 0 here
+        int body_n = n - written;
+        memcpy(buffer + written, cur_page_body + body_pos, body_n);
+        written += body_n;
+    }
+    file->index += written;
+    return written;
+}
+
+//--------------------------------------------------------------------+
+// POST handling: /api/config, /api/bonds, /api/wol
+//--------------------------------------------------------------------+
+
+#define POST_BUFSIZE 512
+static char post_buf[POST_BUFSIZE];
+static u16_t post_pos;
+static void *post_conn;
+static bool last_save_ok = true; // result of the most recent config_save()
+
+// Which endpoint the in-flight POST targets.
+enum PostTarget {
+    POST_CONFIG,
+    POST_BONDS,
+    POST_WOL,
+    POST_RESOLVE_MAC,
+    POST_WIFI_PROVISION,
+    POST_WIFI_RESET
+};
+static PostTarget post_target;
+
+static int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+// In-place URL-decode (%XX and '+' -> space) of a form field value.
+static void url_decode(char *s) {
+    char *w = s;
+    auto nib = [](char x) -> int {
+        if (x >= '0' && x <= '9') return x - '0';
+        if (x >= 'a' && x <= 'f') return x - 'a' + 10;
+        if (x >= 'A' && x <= 'F') return x - 'A' + 10;
+        return -1;
+    };
+    for (char *r = s; *r; r++) {
+        if (*r == '+') {
+            *w++ = ' ';
+        } else if (*r == '%' && r[1] && r[2]) {
+            int hi = nib(r[1]), lo = nib(r[2]);
+            if (hi >= 0 && lo >= 0) { *w++ = (char) ((hi << 4) | lo); r += 2; }
+            else *w++ = *r;
+        } else {
+            *w++ = *r;
+        }
+    }
+    *w = '\0';
+}
+
+static void apply_post(char *body) {
+    // Deliberate settings wipe. Resets Config to defaults and persists; leaves
+    // BT bonds untouched (forgetting controllers is the /api/bonds "forgetall"
+    // action). This is the sanctioned reset path -- CONFIG_VERSION is layout
+    // metadata, not a reset knob.
+    if (strstr(body, "factory_reset=1")) {
+        watchdog_update();
+        last_save_ok = config_factory_reset();
+        printf("[WEB] factory reset via web UI: %s\n", last_save_ok ? "OK" : "FAILED");
+        return;
+    }
+
+    Config_body c = get_config(); // start from current, overwrite parsed fields
+
+    for (char *tok = strtok(body, "&"); tok; tok = strtok(nullptr, "&")) {
+        char *eq = strchr(tok, '=');
+        if (!eq) continue;
+        *eq++ = 0;
+        const int val = atoi(eq);
+        if (strcmp(tok, "inactive_time") == 0) {
+            c.inactive_time = (uint8_t) clampi(val, 5, 60);
+        } else if (strcmp(tok, "disable_inactive_disconnect") == 0) {
+            c.disable_inactive_disconnect = val ? 1 : 0;
+        } else if (strcmp(tok, "disable_pico_led") == 0) {
+            c.disable_pico_led = val ? 1 : 0;
+        } else if (strcmp(tok, "polling_rate_mode") == 0) {
+            c.polling_rate_mode = (uint8_t) clampi(val, 0, 2);
+        } else if (strcmp(tok, "audio_buffer_length") == 0) {
+            c.audio_buffer_length = (uint8_t) clampi(val, 16, 128);
+        } else if (strcmp(tok, "controller_mode") == 0) {
+            c.controller_mode = (uint8_t) clampi(val, 0, 2);
+        } else if (strcmp(tok, "wol_target_mac") == 0) {
+            // 12 hex chars, no separators (the page strips ':'/'-' client-side).
+            // Reject anything malformed so a bad POST can't store a junk MAC; an
+            // all-zero MAC is the canonical "unset" and is allowed (clears it).
+            uint8_t mac[6];
+            if (hex_to_addr(eq, mac)) memcpy(c.wol_target_mac, mac, 6);
+        } else if (strcmp(tok, "hostname") == 0) {
+            // mDNS / netif hostname. url_decode then copy raw; set_config() ->
+            // config_valid() -> sanitize_hostname() folds case and strips any
+            // non-DNS-label chars (and re-defaults if empty), so we don't filter
+            // here. Takes effect on next boot (the netif/mDNS name is set at init).
+            url_decode(eq);
+            strncpy(c.hostname, eq, CONFIG_HOSTNAME_LEN - 1);
+            c.hostname[CONFIG_HOSTNAME_LEN - 1] = '\0';
+        }
+    }
+
+    set_config(c); // validates + stores in RAM
+    // The sector erase blocks with interrupts off; feed the watchdog first.
+    watchdog_update();
+    // config_save() can fail (core1 won't park -> flash write skipped). If it
+    // does, RAM holds the new values but flash does not, so the change would
+    // silently vanish on the next boot. Record the result so the response can
+    // tell the user instead of falsely reporting success.
+    last_save_ok = config_save();
+    printf("[WEB] config save via web UI: %s\n", last_save_ok ? "OK" : "FAILED");
+}
+
+static void apply_bonds_post(char *body) {
+    char action[16] = "";
+    char addr_hex[16] = "";
+    char name[CONFIG_BOND_NAME_LEN] = "";
+    last_save_ok = true; // actions that don't persist (e.g. pair) leave this true
+
+    for (char *tok = strtok(body, "&"); tok; tok = strtok(nullptr, "&")) {
+        char *eq = strchr(tok, '=');
+        if (!eq) continue;
+        *eq++ = 0;
+        if (strcmp(tok, "action") == 0) {
+            strncpy(action, eq, sizeof(action) - 1);
+        } else if (strcmp(tok, "addr") == 0) {
+            strncpy(addr_hex, eq, sizeof(addr_hex) - 1);
+        } else if (strcmp(tok, "name") == 0) {
+            url_decode(eq);
+            strncpy(name, eq, sizeof(name) - 1);
+        }
+    }
+
+    if (strcmp(action, "pair") == 0) {
+        bt_start_pairing();
+        printf("[WEB] start pairing (open inquiry) via web UI\n");
+        return;
+    }
+
+    if (strcmp(action, "forgetall") == 0) {
+        bt_bond_forget_all();
+        Config_body c = get_config();
+        memset(c.bond_names, 0, sizeof(c.bond_names));
+        set_config(c);
+        watchdog_update();
+        last_save_ok = config_save();
+        printf("[WEB] forget all bonds via web UI: %s\n", last_save_ok ? "OK" : "FAILED");
+        return;
+    }
+
+    uint8_t addr[6];
+    if (!hex_to_addr(addr_hex, addr)) {
+        printf("[WEB] bonds POST: bad addr '%s'\n", addr_hex);
+        return;
+    }
+
+    if (strcmp(action, "forget") == 0) {
+        bt_bond_forget(addr);
+        config_clear_bond_name(addr);
+        watchdog_update();
+        last_save_ok = config_save();
+        printf("[WEB] forget bond via web UI: %s\n", last_save_ok ? "OK" : "FAILED");
+    } else if (strcmp(action, "rename") == 0) {
+        config_set_bond_name(addr, name);
+        watchdog_update();
+        last_save_ok = config_save();
+        printf("[WEB] rename bond via web UI: %s\n", last_save_ok ? "OK" : "FAILED");
+    }
+}
+
+// POST /api/wol -- action=wake[&mac=AABBCCDDEEFF]. With no mac, uses the stored
+// Config_body.wol_target_mac. Fires the transport's WOL send hook (no-op unless
+// the WiFi transport is linked).
+static void apply_wol_post(char *body) {
+    char action[16] = "";
+    uint8_t mac[6];
+    bool have_mac = false;
+
+    for (char *tok = strtok(body, "&"); tok; tok = strtok(nullptr, "&")) {
+        char *eq = strchr(tok, '=');
+        if (!eq) continue;
+        *eq++ = 0;
+        if (strcmp(tok, "action") == 0) {
+            strncpy(action, eq, sizeof(action) - 1);
+        } else if (strcmp(tok, "mac") == 0) {
+            if (hex_to_addr(eq, mac)) have_mac = true;
+        }
+    }
+
+    if (strcmp(action, "wake") != 0) return;
+
+    if (!have_mac) {
+        memcpy(mac, get_config().wol_target_mac, 6);
+        // all-zero == unset
+        bool zero = true;
+        for (int i = 0; i < 6; i++) if (mac[i]) { zero = false; break; }
+        if (zero) {
+            printf("[WEB] WOL requested but no target MAC configured\n");
+            return;
+        }
+    }
+
+    const bool sent = web_api_wol_send(mac);
+    printf("[WEB] WOL %s via web UI\n", sent ? "sent" : "send failed (no transport)");
+}
+
+// POST /api/resolve_mac -- ip=A.B.C.D. Kicks off an ARP lookup for that address
+// (the WiFi transport's resolve-start hook) so the UI can auto-fill the WOL
+// target MAC instead of the user hunting it down by hand. Non-blocking: this
+// only starts the lookup. The browser polls GET /api/resolve_mac afterward for
+// the result (json_resolve_mac() above) once the transport's main-loop task
+// has had a chance to drive the ARP query/cache-check/timeout -- see
+// wifi_net.cpp for why this can't just block here.
+static void apply_resolve_mac_post(char *body) {
+    unsigned a = 0, b = 0, cc = 0, d = 0;
+    char *eq = strchr(body, '=');
+    const bool parsed = eq &&
+             sscanf(eq + 1, "%u.%u.%u.%u", &a, &b, &cc, &d) == 4 &&
+             a <= 255 && b <= 255 && cc <= 255 && d <= 255;
+    if (!parsed) {
+        printf("[WEB] resolve_mac POST: bad ip\n");
+        return;
+    }
+    const uint8_t ip[4] = {(uint8_t) a, (uint8_t) b, (uint8_t) cc, (uint8_t) d};
+    web_api_resolve_mac_start(ip);
+    printf("[WEB] resolving %u.%u.%u.%u...\n", a, b, cc, d);
+}
+
+#ifdef ENABLE_WIFI_WOL
+// POST /api/wifi_provision -- ssid=...&psk=... from the onboarding portal. Saves
+// the home-WLAN credentials and schedules a reboot into STA mode (wifi_net.cpp
+// owns the persist + deferred reset). The JSON reply is sent before the reboot
+// fires so the phone sees success. Only meaningful while in AP mode; harmless
+// otherwise (it would just store creds + reboot). Returns ok=true if accepted.
+static void apply_wifi_provision_post(char *body) {
+    char ssid[CONFIG_WIFI_SSID_LEN] = "";
+    char psk[CONFIG_WIFI_PSK_LEN] = "";
+    bool too_long = false;
+    for (char *tok = strtok(body, "&"); tok; tok = strtok(nullptr, "&")) {
+        char *eq = strchr(tok, '=');
+        if (!eq) continue;
+        *eq++ = 0;
+        if (strcmp(tok, "ssid") == 0) {
+            url_decode(eq);
+            if (strlen(eq) >= sizeof(ssid)) {
+                too_long = true;
+            } else {
+                strcpy(ssid, eq);
+            }
+        } else if (strcmp(tok, "psk") == 0) {
+            url_decode(eq);
+            if (strlen(eq) >= sizeof(psk)) {
+                too_long = true;
+            } else {
+                strcpy(psk, eq);
+            }
+        }
+    }
+    provision_ok = !too_long && wifi_provision_apply(ssid, psk);
+    printf("[WEB] wifi provision %s\n", provision_ok ? "accepted" : "rejected");
+}
+
+// POST /api/wifi_reset -- from the normal config page after the device is on
+// the home WLAN. Clears stored WiFi credentials and schedules a reboot; the next
+// boot is unprovisioned, so it starts the AP captive portal.
+static void apply_wifi_reset_post(void) {
+    wifi_reset_ok = wifi_reset_provisioning_apply();
+    printf("[WEB] wifi reset %s\n", wifi_reset_ok ? "accepted" : "rejected");
+}
+#endif
+
+extern "C" err_t httpd_post_begin(void *connection, const char *uri, const char *http_request,
+                                  u16_t http_request_len, int content_len, char *response_uri,
+                                  u16_t response_uri_len, u8_t *post_auto_wnd) {
+    (void) http_request;
+    (void) http_request_len;
+    (void) response_uri;
+    (void) response_uri_len;
+    (void) post_auto_wnd;
+    PostTarget t;
+    if (strcmp(uri, "/api/config") == 0)      t = POST_CONFIG;
+    else if (strcmp(uri, "/api/bonds") == 0)  t = POST_BONDS;
+    else if (strcmp(uri, "/api/wol") == 0)    t = POST_WOL;
+    else if (strcmp(uri, "/api/resolve_mac") == 0) t = POST_RESOLVE_MAC;
+#ifdef ENABLE_WIFI_WOL
+    else if (strcmp(uri, "/api/wifi_provision") == 0) t = POST_WIFI_PROVISION;
+    else if (strcmp(uri, "/api/wifi_reset") == 0) t = POST_WIFI_RESET;
+#endif
+    else return ERR_VAL;
+    if (content_len >= POST_BUFSIZE) return ERR_VAL;
+    if (post_conn) return ERR_USE; // one POST at a time
+    post_conn = connection;
+    post_pos = 0;
+    post_target = t;
+    return ERR_OK;
+}
+
+extern "C" err_t httpd_post_receive_data(void *connection, struct pbuf *p) {
+    if (connection == post_conn && p) {
+        const u16_t space = POST_BUFSIZE - 1 - post_pos;
+        const u16_t take = p->tot_len < space ? p->tot_len : space;
+        post_pos += pbuf_copy_partial(p, post_buf + post_pos, take, 0);
+        post_buf[post_pos] = 0;
+    }
+    if (p) pbuf_free(p);
+    return ERR_OK;
+}
+
+extern "C" void httpd_post_finished(void *connection, char *response_uri, u16_t response_uri_len) {
+    if (connection != post_conn) return;
+    post_conn = nullptr;
+    switch (post_target) {
+        case POST_BONDS:
+            apply_bonds_post(post_buf);
+            snprintf(response_uri, response_uri_len,
+                     last_save_ok ? "/api/bonds" : "/api/save-failed");
+            break;
+        case POST_WOL:
+            apply_wol_post(post_buf);
+            snprintf(response_uri, response_uri_len, "/api/config");
+            break;
+        case POST_RESOLVE_MAC:
+            apply_resolve_mac_post(post_buf);
+            snprintf(response_uri, response_uri_len, "/api/resolve_mac");
+            break;
+#ifdef ENABLE_WIFI_WOL
+        case POST_WIFI_PROVISION:
+            apply_wifi_provision_post(post_buf);
+            // The reply is served from the synthetic route below, which reports
+            // provision_ok set just above. (The reboot is deferred ~1.2s by
+            // wifi_net.cpp so this response reaches the phone first.)
+            snprintf(response_uri, response_uri_len, "/api/wifi_provision_result");
+            break;
+        case POST_WIFI_RESET:
+            apply_wifi_reset_post();
+            snprintf(response_uri, response_uri_len, "/api/wifi_reset_result");
+            break;
+#endif
+        case POST_CONFIG:
+        default:
+            apply_post(post_buf);
+            snprintf(response_uri, response_uri_len,
+                     last_save_ok ? "/api/config" : "/api/save-failed");
+            break;
+    }
+}
+
+void web_api_init() {
+    httpd_init();
+}
+
+#endif // ENABLE_WEBUI

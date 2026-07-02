@@ -14,7 +14,9 @@
 #include "pico/time.h"
 #include "bt.h"
 #include "usb.h"
+#include "wake_link.h"
 
+#ifdef WAKE_VIA_USB_KBD
 // The boot keyboard is HID instance 1 in BOTH descriptor variants (a dummy
 // placeholder HID holds instance 0 in minimal — see usb_descriptors.cpp), so
 // this is stable across variant swaps.
@@ -29,6 +31,7 @@
 #define WAKE_KEY_UP_SETTLE_US 200000   // 200 ms between attempts (or before DONE)
 #define WAKE_REQUEST_TIMEOUT_US 5000000
 #define WAKE_KEY_ATTEMPTS     2
+#endif // WAKE_VIA_USB_KBD
 
 #ifdef WAKE_DEBUG
 #  define WAKE_DBG(fmt, ...) printf("[wake] " fmt "\n", ##__VA_ARGS__)
@@ -68,18 +71,76 @@ static uint8_t prev_b7 = 0x08;
 static uint8_t prev_b8 = 0x00;
 static uint8_t prev_b9 = 0x00;
 
+#ifdef WAKE_VIA_USB_KBD
 static void enter_state(wake_state_t s) {
     state = s;
     state_entered_us = time_us_64();
 }
+#endif
 
-// Issue a USB remote-wakeup to the host and, on success, advance the wake FSM
-// to WAKE_REQUESTED so wake_task() drives the follow-up keystroke sequence.
-// Shared by the button-event path (wake_on_bt_input) and the connect path
-// (wake_on_bt_connect). Callers are responsible for the gating checks
-// (armable state, !variant-swap, etc.) before calling.
+// Wake-on-LAN companion send (ENABLE_WIFI_WOL). Weak no-op default; the WiFi
+// transport provides the strong override (wifi_net.cpp). wake.cpp owns the
+// decision of WHEN to wake; the transport owns HOW to emit the packet.
+extern "C" __attribute__((weak)) bool wake_emit_wol(void) { return false; }
+
+// Rate-limit WOL to once per suspend spell, with a hard time floor surviving the
+// connect/disconnect churn during a single wake. Mirrors the PC-wake-dongle
+// model: we CANNOT distinguish S3 from S4/S5 over USB on this hardware (the
+// suspend callback fires for all, the device may or may not also unmount, with
+// no signal telling them apart). So on every warranted wake-while-suspended we
+// fire BOTH the USB remote-wakeup (wakes S3 / USB-HID-wake boards) AND a WOL
+// packet (wakes S4/S5 via the NIC). A stray WOL during S3 is harmless.
+static volatile bool     wol_fired_this_spell = false;
+static volatile bool     link_fired_this_spell = false; // companion-Pico pulse latch
+static volatile uint64_t last_wol_us = 0;
+static constexpr uint64_t WAKE_WOL_MIN_INTERVAL_US = 10ULL * 1000000ULL; // 10 s
+
+static void maybe_emit_wol(const char *reason) {
+    (void) reason;
+    // CRITICAL: only emit WOL when the host is actually suspended. Unlike the
+    // USB tud_remote_wakeup() below -- which is a harmless no-op when the bus is
+    // awake, so request_host_wake() calls it speculatively even from the
+    // button-event path while the host is up -- a WOL packet is NOT a no-op: it
+    // broadcasts onto the LAN. Without this gate, every controller button press
+    // during normal gameplay (host awake) would fire a magic packet. (Observed:
+    // a stray "wake WOL sent" with the PC fully working, before any suspend.)
+    if (!host_suspended) return;
+    const uint64_t now = time_us_64();
+    if (wol_fired_this_spell) return;
+    if (last_wol_us != 0 && (now - last_wol_us) < WAKE_WOL_MIN_INTERVAL_US) return;
+    // The companion-Pico wake signal (ENABLE_WAKE_LINK, no-op otherwise) rides
+    // the same policy: suspend-gated, once per spell. Its own latch, so a WOL
+    // send that keeps failing (e.g. no target MAC stored) can't re-pulse the
+    // companion on every subsequent button press. The companion types the wake
+    // keystroke on its own USB port, so this dongle stays kbd-free.
+    if (!link_fired_this_spell) {
+        wake_link_pulse();
+        link_fired_this_spell = true;
+    }
+    if (wake_emit_wol()) {
+        wol_fired_this_spell = true;
+        last_wol_us = now;
+        WAKE_DBG("%s -> WOL sent", reason);
+    }
+}
+
+// Request a host wake. Shared by the button-event path (wake_on_bt_input) and
+// the connect path (wake_on_bt_connect). Callers do the gating checks (armable
+// state, !variant-swap, etc.) before calling.
+//
+// Always fires a Wake-on-LAN packet (rate-limited, suspend-gated -- see
+// maybe_emit_wol). ALSO ALWAYS issues a USB remote-wakeup to resume the bus.
+// This last part is REQUIRED even without the keyboard: the WiFi build's no-DS5
+// MINIMAL config (a single inert HID with no traffic) gets SELECTIVE-SUSPENDED
+// by an awake Windows host, which sets host_suspended -> usb_variant_task()
+// refuses to re-enumerate -> the controller never appears. Resuming the bus on
+// controller-connect clears that gate so the MINIMAL->FULL swap can proceed.
+// (Earlier this whole block was wrongly tied to WAKE_VIA_USB_KBD; only the F15
+// keystroke FSM below is keyboard-specific.)
 static void request_host_wake(const char *reason) {
     (void)reason;
+    maybe_emit_wol(reason);
+
     bool ok = tud_remote_wakeup();
 
     // Linux quirk: Sometimes Linux fails to set the REMOTE_WAKEUP feature
@@ -91,6 +152,10 @@ static void request_host_wake(const char *reason) {
         ok = true;
     }
 
+#ifdef WAKE_VIA_USB_KBD
+    // Keyboard build only: advance the FSM to drive the F15 keystroke that wakes
+    // the host from S3 over USB. The WiFi build has no keyboard (WOL is the sole
+    // S3/S4/S5 wake); it just needed the bus resume above.
     if (ok) {
         critical_section_enter_blocking(&wake_cs);
         state = WAKE_REQUESTED;
@@ -108,6 +173,9 @@ static void request_host_wake(const char *reason) {
         }
     }
 #endif
+#else
+    (void)ok;
+#endif // WAKE_VIA_USB_KBD
 }
 
 // Resume the USB bus WITHOUT advancing the wake-FSM keystroke sequence.
@@ -142,6 +210,7 @@ bool wake_request_bus_resume(void) {
 
 void wake_init(void) {
     critical_section_init(&wake_cs);
+    wake_link_init(); // companion-Pico wake line (no-op unless ENABLE_WAKE_LINK)
 }
 
 // Debounced DualSense power-off on host suspend.
@@ -159,6 +228,8 @@ extern "C" void tud_suspend_cb(bool remote_wakeup_en) {
     host_suspended = true;
     host_resumed_event = false;
     usb_set_host_suspended(true);
+    wol_fired_this_spell = false;  // new suspend spell -> allow one WOL again
+    link_fired_this_spell = false; // ... and one companion-Pico pulse
 
     // Arm the deferred DualSense power-off. wake_task() will fire it after
     // POWER_OFF_DEBOUNCE_US unless tud_resume_cb / tud_mount_cb cancel it
@@ -293,6 +364,10 @@ void wake_reset_for_variant_swap(void) {
 void wake_task(void) {
     const uint64_t now = time_us_64();
 
+    // Drop the companion-Pico wake pulse once its width elapses (no-op unless
+    // ENABLE_WAKE_LINK).
+    wake_link_task();
+
     // Fire the deferred DualSense power-off if the debounce window has
     // elapsed without a resume cancelling it. Checked before the early-return
     // on idle FSM states so it still fires regardless of wake-FSM state.
@@ -310,6 +385,10 @@ void wake_task(void) {
                  (unsigned long long)(POWER_OFF_DEBOUNCE_US / 1000));
     }
 
+#ifdef WAKE_VIA_USB_KBD
+    // The keyboard wake FSM (drive the F15 keystroke after a USB remote-wakeup).
+    // Absent in the WiFi-WOL build: WOL is the sole wake, fired directly in
+    // request_host_wake(), so there is no keystroke sequence to pump here.
     critical_section_enter_blocking(&wake_cs);
     const wake_state_t s = state;
     const uint64_t entered = state_entered_us;
@@ -413,6 +492,7 @@ void wake_task(void) {
             return;
         }
     }
+#endif // WAKE_VIA_USB_KBD
 }
 
 #endif // ENABLE_WAKE_HID

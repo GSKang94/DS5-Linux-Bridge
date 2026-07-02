@@ -1,7 +1,7 @@
 #ifndef DS5_BRIDGE_WEB_PAGE_H
 #define DS5_BRIDGE_WEB_PAGE_H
 
-// Config UI served at http://10.55.55.105/ (default subnet; selectable in the UI).
+// Config UI served over WiFi at http://<hostname>.local/ (default ds5wol.local).
 // Single self-contained page; loads from GET /api/config and persists via
 // POST /api/config. Settings mirror Config_body (src/config.h); the firmware
 // re-validates every field, so the page is a convenience, not the source of
@@ -16,12 +16,14 @@ h1{font-size:1.4rem}h1 small{color:#888;font-weight:normal;font-size:.7em}
 .field{margin:1.1rem 0}
 label.lbl{display:block;margin-bottom:.3rem;font-size:.95rem}
 .hint{color:#888;font-size:.8rem;margin-top:.2rem}
-select,input[type=number]{background:#222;border:1px solid #444;color:#eee;padding:.4rem;border-radius:4px;width:100%;box-sizing:border-box;font-size:.95rem}
+select,input[type=number],input[type=text]{background:#222;border:1px solid #444;color:#eee;padding:.4rem;border-radius:4px;width:100%;box-sizing:border-box;font-size:.95rem}
 input[type=range]{width:100%}
 .chk{display:flex;align-items:center;gap:.5rem}
 .chk input{width:auto}
 button{background:#2563eb;border:0;color:#fff;padding:.55rem 1.3rem;border-radius:4px;cursor:pointer;font-size:1rem;margin-top:1rem}
 button:disabled{background:#333;color:#777;cursor:default}
+button.fg{background:#7f1d1d}
+button.fg:disabled{background:#333;color:#777}
 #status{min-height:1.2em;margin-left:1rem}
 .dirty{color:#facc15}
 .ok{color:#4ade80}
@@ -107,30 +109,6 @@ footer .kofi:hover{text-decoration:none;opacity:.9}
   <label for="disable_pico_led">Disable the onboard Pico LED</label>
 </div>
 
-<div class="field">
-  <label class="lbl">Config page address</label>
-  <select id="webconfig_subnet">
-    <option value="0">10.55.55.105 (default)</option>
-    <option value="1">172.31.55.105</option>
-    <option value="2">192.168.137.105</option>
-    <option value="3">Custom…</option>
-  </select>
-  <div class="hint">Where this page is served. Change only if it collides with
-  your network — or to give each of several adapters on one PC its own address.
-  Takes effect after you unplug and replug the adapter — then browse to the new
-  address.</div>
-  <div id="customip_wrap" style="display:none;margin-top:.5rem">
-    <input id="webconfig_custom_ip" type="text" inputmode="decimal"
-           placeholder="e.g. 10.20.30.105" pattern="\d{1,3}(\.\d{1,3}){3}">
-    <div class="hint">⚠️ <b>Advanced.</b> Must be a <b>private</b> address
-    (<code>10.x.x.x</code>, <code>172.16–31.x.x</code>, or
-    <code>192.168.x.x</code>), and not a <code>.0</code>/<code>.255</code>. If
-    you enter something unreachable the adapter falls back to the default
-    address — you won't get locked out, but you may not land where you expected.
-    The PC gets a DHCP lease in the same <code>/29</code> block.</div>
-  </div>
-</div>
-
 <div>
   <button id="save">Save</button>
   <button id="factoryreset" class="fg">Factory reset</button>
@@ -154,6 +132,52 @@ footer .kofi:hover{text-decoration:none;opacity:.9}
   <span id="bstatus"></span>
 </div>
 
+<div id="wol_section" style="display:none">
+<hr>
+<h2>Network</h2>
+<div class="field">
+  <label class="lbl">Device name</label>
+  <input id="hostname" type="text" inputmode="latin" maxlength="10"
+         placeholder="ds5wol" pattern="[A-Za-z0-9-]{1,10}">
+  <div class="hint">The name this adapter uses on your network — reach the page at
+    <code>http://&lt;name&gt;.local/</code>. Give each adapter a unique name if you
+    run more than one (otherwise they collide on <code>ds5wol.local</code>).
+    Letters, digits and hyphens only. Takes effect after the adapter reboots.</div>
+</div>
+<div class="btns">
+  <button id="net_save">Save</button>
+  <span id="nstatus"></span>
+</div>
+<div class="field" id="wifi_reset_field" style="display:none">
+  <button id="wifi_reset" type="button" class="fg">Reset saved WiFi</button>
+  <span id="wrstatus"></span>
+</div>
+
+<h2>Wake-on-LAN</h2>
+<div class="hint">Wake a PC over the network by sending it a magic packet. Useful
+  when the PC is fully off (S4/S5) and USB wake isn't supported by its
+  motherboard. Press the controller's PS button to wake, or use the button here.
+  The target PC must have Wake-on-LAN enabled in its BIOS and OS network driver.</div>
+<div class="field">
+  <label class="lbl">Target PC MAC address</label>
+  <input id="wol_target_mac" type="text" inputmode="latin"
+         placeholder="AA:BB:CC:DD:EE:FF" pattern="([0-9A-Fa-f]{2}[:\-]?){5}[0-9A-Fa-f]{2}">
+  <div class="hint">The network adapter (NIC) MAC of the PC to wake. Don't know
+    it? Enter the PC's IP address below and click "Find MAC" — the adapter will
+    look it up on your network automatically.</div>
+  <div style="margin-top:.4rem;display:flex;gap:.5rem;align-items:center">
+    <input id="wol_resolve_ip" type="text" inputmode="decimal" style="flex:1"
+           placeholder="PC's IP, e.g. 192.168.1.50" pattern="\d{1,3}(\.\d{1,3}){3}">
+    <button id="wol_resolve" type="button">Find MAC</button>
+  </div>
+</div>
+<div class="btns">
+  <button id="wol_save">Save</button>
+  <button id="wol_wake">Wake PC now</button>
+  <span id="wstatus"></span>
+</div>
+</div>
+
 <script>
 const $=id=>document.getElementById(id);
 function setStatus(msg,cls){const s=$('status');s.className=cls||'';s.textContent=msg}
@@ -162,11 +186,8 @@ function bindRange(id,out){const el=$(id);const fn=()=>$(out).textContent=el.val
 const upd=[bindRange('audio_buffer_length','ab_val'),bindRange('inactive_time','it_val')];
 
 function markDirty(){$('save').disabled=false;setStatus('unsaved changes','dirty')}
-['controller_mode','polling_rate_mode','disable_inactive_disconnect','disable_pico_led','webconfig_subnet']
+['controller_mode','polling_rate_mode','disable_inactive_disconnect','disable_pico_led']
   .forEach(id=>$(id).onchange=markDirty);
-function toggleCustomIp(){$('customip_wrap').style.display=$('webconfig_subnet').value==='3'?'':'none'}
-$('webconfig_subnet').addEventListener('change',toggleCustomIp);
-$('webconfig_custom_ip').oninput=markDirty;
 
 async function load(){
   try{
@@ -178,10 +199,21 @@ async function load(){
     $('inactive_time').value=c.inactive_time;
     $('disable_inactive_disconnect').checked=!!c.disable_inactive_disconnect;
     $('disable_pico_led').checked=!!c.disable_pico_led;
-    $('webconfig_subnet').value=c.webconfig_subnet;
-    if(c.webconfig_custom_ip&&c.webconfig_custom_ip!=='0.0.0.0')
-      $('webconfig_custom_ip').value=c.webconfig_custom_ip;
-    toggleCustomIp();
+    // Network/Wake-on-LAN section. wol_target_mac is 12 hex chars, all-zero ==
+    // unset. (wol_capable/wifi_capable are always true on current firmware; the
+    // gates keep the page working against older firmware.)
+    if(c.wol_capable){
+      $('wol_section').style.display='';
+      // Always reflect the current saved name (server returns a sanitized,
+      // never-empty hostname). Assign unconditionally so the box shows the real
+      // value, not the placeholder, after a rename.
+      $('hostname').value=c.hostname||'';
+      if(c.wol_target_mac&&c.wol_target_mac!=='000000000000')
+        $('wol_target_mac').value=fmtAddr(c.wol_target_mac);
+    }
+    if(c.wifi_capable){
+      $('wifi_reset_field').style.display='';
+    }
     upd.forEach(f=>f());
     $('save').disabled=true;setStatus('');
   }catch(e){setStatus('load failed','err')}
@@ -194,9 +226,7 @@ async function save(){
     'audio_buffer_length='+$('audio_buffer_length').value,
     'inactive_time='+$('inactive_time').value,
     'disable_inactive_disconnect='+($('disable_inactive_disconnect').checked?1:0),
-    'disable_pico_led='+($('disable_pico_led').checked?1:0),
-    'webconfig_subnet='+$('webconfig_subnet').value,
-    'webconfig_custom_ip='+encodeURIComponent($('webconfig_custom_ip').value.trim())
+    'disable_pico_led='+($('disable_pico_led').checked?1:0)
   ].join('&');
   setStatus('saving…','dirty');
   try{
@@ -273,6 +303,82 @@ $('pair').onclick=()=>{
 $('forgetall').onclick=()=>{
   if(!confirm('Forget ALL paired controllers?\nEach will need to be re-paired.'))return;
   postBonds('action=forgetall','forgetting all…');
+};
+
+// ----- Network (device name) -----
+function nstatus(msg,cls){const s=$('nstatus');s.className=cls||'';s.textContent=msg}
+$('net_save').onclick=async()=>{
+  const fields=[
+    'hostname='+encodeURIComponent($('hostname').value.trim())
+  ];
+  nstatus('saving…','dirty');
+  try{
+    const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:fields.join('&')});
+    if(r.ok)nstatus('Saved ✓ (reboot adapter to apply)','ok');
+    else nstatus('save failed','err');
+  }catch(e){nstatus('save failed','err')}
+};
+
+function wrstatus(msg,cls){const s=$('wrstatus');s.className=cls||'';s.textContent=msg}
+$('wifi_reset').onclick=async()=>{
+  if(!confirm('Reset saved WiFi credentials?\nThe adapter will reboot into setup AP mode.'))return;
+  wrstatus('resetting...','dirty');
+  $('wifi_reset').disabled=true;
+  try{
+    const r=await fetch('/api/wifi_reset',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'action=reset'});
+    const d=await r.json();
+    if(r.ok&&d.ok)wrstatus('Rebooting to setup AP...','ok');
+    else{wrstatus('reset failed','err');$('wifi_reset').disabled=false}
+  }catch(e){
+    wrstatus('Rebooting to setup AP...','ok');
+  }
+};
+
+// ----- Wake-on-LAN -----
+function wstatus(msg,cls){const s=$('wstatus');s.className=cls||'';s.textContent=msg}
+// Normalize "AA:BB:..", "aa-bb-..", "aabb.." -> 12 upper-hex chars, or '' if invalid.
+function macHex(s){const h=s.replace(/[:\-.\s]/g,'').toUpperCase();return /^[0-9A-F]{12}$/.test(h)?h:''}
+$('wol_save').onclick=async()=>{
+  const raw=$('wol_target_mac').value.trim();
+  // Empty MAC is allowed (clears the WOL target -> all-zero "unset"); only a
+  // non-empty-but-malformed MAC is an error.
+  let h='000000000000';
+  if(raw){h=macHex(raw);if(!h){wstatus('invalid MAC','err');return}}
+  wstatus('saving…','dirty');
+  try{
+    const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'wol_target_mac='+h});
+    if(r.ok){wstatus('Saved ✓','ok');if(raw)$('wol_target_mac').value=fmtAddr(h)}
+    else wstatus('save failed','err');
+  }catch(e){wstatus('save failed','err')}
+};
+$('wol_wake').onclick=async()=>{
+  const h=macHex($('wol_target_mac').value); // send the field value if set, else server uses stored
+  wstatus('sending magic packet…','dirty');
+  try{
+    const r=await fetch('/api/wol',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'action=wake'+(h?'&mac='+h:'')});
+    if(r.ok)wstatus('Magic packet sent ✓','ok');
+    else wstatus('send failed','err');
+  }catch(e){wstatus('send failed','err')}
+};
+$('wol_resolve').onclick=async()=>{
+  const ip=$('wol_resolve_ip').value.trim();
+  if(!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)){wstatus('enter a valid IP first','err');return}
+  wstatus('looking up MAC…','dirty');
+  $('wol_resolve').disabled=true;
+  try{
+    await fetch('/api/resolve_mac',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'ip='+encodeURIComponent(ip)});
+    // The POST only starts the ARP lookup (the adapter can't block the
+    // response on it); poll the GET until it reports a final answer.
+    let r=null;
+    for(let i=0;i<20;i++){
+      r=await (await fetch('/api/resolve_mac')).json();
+      if(!r.pending)break;
+      await new Promise(res=>setTimeout(res,100));
+    }
+    if(r&&!r.pending&&r.ok){$('wol_target_mac').value=fmtAddr(r.mac);wstatus('Found MAC '+fmtAddr(r.mac)+' ✓','ok')}
+    else wstatus('no reply from that IP (is it online?)','err');
+  }catch(e){wstatus('lookup failed','err')}
+  finally{$('wol_resolve').disabled=false}
 };
 
 // ----- Live status (GET /api/status) -----

@@ -56,7 +56,7 @@ void bt_connection_watchdog_tick();
 // Paired-device (bond) management, exposed to the web config UI.
 // Bonds are BR/EDR link keys persisted by BTstack in its flash TLV bank
 // (capacity NVM_NUM_LINK_KEYS). These wrap the BTstack gap_* link-key API so
-// usb_net.cpp doesn't pull in btstack headers. All run on the core0 main-loop
+// web_api.cpp doesn't pull in btstack headers. All run on the core0 main-loop
 // context (same as the btstack run loop), so no extra locking is needed.
 //--------------------------------------------------------------------+
 

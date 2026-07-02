@@ -13,14 +13,16 @@
 #include "pico/cyw43_arch.h"
 #include "pico/flash.h" // flash_safe_execute(): park core1 during the flash op
 #include "pico/btstack_flash_bank.h" // PICO_FLASH_BANK_STORAGE_OFFSET (collision guard)
-#include "usb_net.h" // WEBCONFIG_SUBNET_COUNT (subnet-index bound, always defined)
+#include "pico/multicore.h" // multicore_lockout_victim_is_initialized()
 #include "utils.h"
 
 constexpr uint32_t CONFIG_MAGIC = 0x66ccff00;
 // Layout version. Only bump on a genuinely incompatible layout change (see the
-// append-only note in config.h); NOT a reset trigger. v5 added
-// webconfig_custom_ip; v4 bond_names.
-constexpr uint16_t CONFIG_VERSION = 5;
+// append-only note in config.h); NOT a reset trigger. v9 added WiFi creds
+// (onboarding); v8 hostname; v7 wol static-IP (now reserved); v6
+// wol_target_mac; v5 webconfig_custom_ip; v4 bond_names. v6-v9 shipped only on
+// the wifi-wol experiment branch; this layout is byte-identical to that v9.
+constexpr uint16_t CONFIG_VERSION = 9;
 // Config lives just BELOW BTstack's link-key bank, NOT in the last flash sector.
 // The RP2350 BOOTSEL/picotool UF2 loader erases the top of flash (the last
 // sector) on download -- even though the UF2 image ends far below it -- so a
@@ -73,11 +75,43 @@ static_assert(offsetof(Config_body, controller_mode) == 10);
 static_assert(offsetof(Config_body, webconfig_subnet) == 11);
 static_assert(offsetof(Config_body, webconfig_custom_ip) == 12);
 static_assert(offsetof(Config_body, bond_names) == 16);
+static_assert(offsetof(Config_body, wol_target_mac) == 104);
+static_assert(offsetof(Config_body, wol_use_static_ip) == 110);
+static_assert(offsetof(Config_body, wol_static_ip) == 111);
+static_assert(offsetof(Config_body, wol_static_netmask) == 115);
+static_assert(offsetof(Config_body, hostname) == 119);
+static_assert(offsetof(Config_body, wifi_provisioned) == 130);
+static_assert(offsetof(Config_body, wifi_ssid) == 131);
+static_assert(offsetof(Config_body, wifi_psk) == 164);
 
 // CRC over the first `len` bytes of the body. `len` is the stored size, so an
 // older/shorter blob still validates against the bytes it actually wrote.
 static uint32_t calc_config_crc(const Config &con, size_t len) {
   return crc32(reinterpret_cast<const uint8_t *>(&con.body), len);
+}
+
+// Sanitize `host` in place to a valid single DNS label (RFC 952/1123 subset):
+// lowercase a-z, 0-9 and hyphen; uppercase folded to lowercase; any other
+// character dropped; no leading/trailing hyphen; NUL-terminated within
+// CONFIG_HOSTNAME_LEN. If nothing valid remains, reset to CONFIG_HOSTNAME_DEFAULT.
+// Used for the user-set mDNS hostname so a fat-fingered entry can't produce an
+// illegal "<name>.local" or strand discovery.
+static void sanitize_hostname(char *host) {
+  char clean[CONFIG_HOSTNAME_LEN];
+  size_t out = 0;
+  for (size_t i = 0; host[i] != '\0' && i < CONFIG_HOSTNAME_LEN - 1; i++) {
+    char c = host[i];
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a'); // fold to lowercase
+    const bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+                    (c == '-' && out > 0); // no leading hyphen
+    if (ok && out < CONFIG_HOSTNAME_LEN - 1) clean[out++] = c;
+  }
+  while (out > 0 && clean[out - 1] == '-') out--; // no trailing hyphen
+  clean[out] = '\0';
+  if (out == 0) strncpy(clean, CONFIG_HOSTNAME_DEFAULT, sizeof(clean) - 1);
+  clean[sizeof(clean) - 1] = '\0';
+  strncpy(host, clean, CONFIG_HOSTNAME_LEN - 1);
+  host[CONFIG_HOSTNAME_LEN - 1] = '\0';
 }
 
 const Config *flash_config() {
@@ -121,18 +155,10 @@ void config_valid() {
     body->controller_mode = 2;
     printf("[Config] controller_mode is invalid\n");
   }
-  if (body->webconfig_subnet > WEBCONFIG_SUBNET_MAX) {
-    body->webconfig_subnet = 0; // default: 10.55.55.x
-    printf("[Config] webconfig_subnet is invalid\n");
-  }
-  // If "custom IP" is selected, the stored address must be a valid private host
-  // address; otherwise fall back to the default preset so the page stays
-  // reachable (this is the safety net behind the custom-IP YOLO option).
-  if (body->webconfig_subnet == WEBCONFIG_SUBNET_CUSTOM &&
-      !webconfig_ip_is_valid(body->webconfig_custom_ip)) {
-    body->webconfig_subnet = 0;
-    printf("[Config] webconfig_custom_ip invalid; using default preset\n");
-  }
+  // webconfig_subnet / webconfig_custom_ip are reserved (NCM-transport-era,
+  // unread since the USB web transport was removed -- see config.h). Just keep
+  // the selector within its historical bounds in case an old blob carried junk.
+  if (body->webconfig_subnet > 3) body->webconfig_subnet = 0;
   // Legacy in-body version byte, kept in sync with the header for compatibility
   // with older firmware that read it. Not authoritative; the header version is.
   body->config_version = CONFIG_VERSION;
@@ -141,6 +167,25 @@ void config_valid() {
   for (auto &b : body->bond_names) {
     b.name[CONFIG_BOND_NAME_LEN - 1] = '\0';
   }
+  // Force-terminate then sanitize the hostname to a valid DNS label, defaulting
+  // it when empty/invalid. Runs on every load + save so corrupt flash or a bad
+  // web entry can never advertise an illegal "<name>.local".
+  body->hostname[CONFIG_HOSTNAME_LEN - 1] = '\0';
+  sanitize_hostname(body->hostname);
+  // WiFi creds (WiFi-WOL onboarding). Force NUL-termination so corrupt flash
+  // can't yield an unbounded SSID/PSK string. wifi_provisioned only ever means
+  // "STA creds present"; an empty SSID can't be a usable join target, so clear
+  // the flag in that case -> the WiFi build falls back to the AP captive portal
+  // instead of attempting a doomed join. (The PSK may legitimately be empty for
+  // an open network, so it is not part of this gate.)
+  body->wifi_ssid[CONFIG_WIFI_SSID_LEN - 1] = '\0';
+  body->wifi_psk[CONFIG_WIFI_PSK_LEN - 1] = '\0';
+  if (body->wifi_provisioned > 1) body->wifi_provisioned = 0;
+  if (body->wifi_ssid[0] == '\0') body->wifi_provisioned = 0;
+  // wol_use_static_ip / wol_static_ip / wol_static_netmask are reserved
+  // (W5500-era, unread by any current transport -- see config.h). Just keep the
+  // flag boolean-sane in case a blob written by that firmware carried junk.
+  if (body->wol_use_static_ip > 1) body->wol_use_static_ip = 0;
 }
 
 // Reset the in-RAM config to all defaults (does NOT touch flash). Most fields
@@ -243,20 +288,36 @@ bool config_save() {
   memset(page, 0xff, sizeof(page));
   memcpy(page, &config, sizeof(Config));
 
-  // flash_safe_execute() parks core1 (the audio core) before touching flash. If
-  // core1 is asleep in __wfe() (idle audio loop) it can miss the lockout request
-  // and the call returns PICO_ERROR_TIMEOUT -- the erase/program never happens.
-  // Historically the single failure was ignored by callers, so the web UI would
-  // report "saved" (RAM was updated) while flash kept the old bytes; the change
-  // then vanished on the next boot. Retry a few times, nudging core1 awake with
-  // __sev() before each attempt so its flash-safe IRQ handler can run.
+  // flash_safe_execute() coordinates a multicore lockout so core1 (the audio
+  // core) is parked while the sector is erased/programmed. That REQUIRES core1
+  // to have registered as a lockout victim (flash_safe_execute_core_init(),
+  // called from core1_entry). In WiFi AP onboarding mode core1 is never
+  // launched (BT/audio are skipped), so flash_safe_execute() finds no victim
+  // and fails with PICO_ERROR_TIMEOUT (-4) -> credentials never persist and
+  // the device loops back to AP. When core1 isn't a registered victim there is
+  // no second core touching XIP, so the erase/program is safe to run DIRECTLY
+  // (interrupts off, as the flash op already does).
+  //
+  // With core1 up, a parked-but-sleeping core1 (__wfe() in the idle audio loop)
+  // can miss the lockout request and time out -- the erase/program never
+  // happens. Historically that single failure was ignored by callers, so the
+  // web UI would report "saved" (RAM was updated) while flash kept the old
+  // bytes; the change then vanished on the next boot. Retry a few times,
+  // nudging core1 awake with __sev() before each attempt so its flash-safe IRQ
+  // handler can run.
   int rc = PICO_ERROR_TIMEOUT;
-  for (int attempt = 0; attempt < CONFIG_SAVE_RETRIES; attempt++) {
-    __sev(); // wake core1 out of __wfe() so it can honour the flash-safe lockout
-    rc = flash_safe_execute(config_save_flash_op, page, CONFIG_SAVE_TIMEOUT_MS);
-    if (rc == PICO_OK) break;
-    printf("[Config] config_save flash_safe_execute failed (attempt %d/%d): %d\n",
-           attempt + 1, CONFIG_SAVE_RETRIES, rc);
+  if (!multicore_lockout_victim_is_initialized(1)) {
+    // No core1 victim registered (AP onboarding): safe to write directly.
+    config_save_flash_op(page);
+    rc = PICO_OK;
+  } else {
+    for (int attempt = 0; attempt < CONFIG_SAVE_RETRIES; attempt++) {
+      __sev(); // wake core1 out of __wfe() so it can honour the flash-safe lockout
+      rc = flash_safe_execute(config_save_flash_op, page, CONFIG_SAVE_TIMEOUT_MS);
+      if (rc == PICO_OK) break;
+      printf("[Config] config_save flash_safe_execute failed (attempt %d/%d): %d\n",
+             attempt + 1, CONFIG_SAVE_RETRIES, rc);
+    }
   }
   if (rc != PICO_OK) {
     printf("[Config] config_save FAILED after %d attempts: %d (config NOT persisted)\n",
@@ -352,6 +413,19 @@ bool config_set_bond_name(const uint8_t *addr, const char *name) {
   strncpy(slot->name, name, CONFIG_BOND_NAME_LEN - 1);
   slot->name[CONFIG_BOND_NAME_LEN - 1] = '\0';
   return true;
+}
+
+void config_set_wifi_creds(const char *ssid, const char *psk) {
+  if (!ssid) ssid = "";
+  if (!psk) psk = "";
+  strncpy(config.body.wifi_ssid, ssid, CONFIG_WIFI_SSID_LEN - 1);
+  config.body.wifi_ssid[CONFIG_WIFI_SSID_LEN - 1] = '\0';
+  strncpy(config.body.wifi_psk, psk, CONFIG_WIFI_PSK_LEN - 1);
+  config.body.wifi_psk[CONFIG_WIFI_PSK_LEN - 1] = '\0';
+  // Provisioned only if there's actually an SSID to join. config_valid() (run by
+  // the save path) re-checks this, but set it here so the in-RAM view is
+  // immediately consistent for any code that reads it before the save.
+  config.body.wifi_provisioned = (config.body.wifi_ssid[0] != '\0') ? 1 : 0;
 }
 
 void set_config(const Config_body &new_config) {

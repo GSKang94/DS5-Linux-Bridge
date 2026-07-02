@@ -254,16 +254,17 @@ void __not_in_flash_func(on_bt_data)(CHANNEL_TYPE channel, uint8_t *data, uint16
 uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id,
                                hid_report_type_t report_type, uint8_t *buffer,
                                uint16_t reqlen) {
-#ifdef WAKE_VIA_USB_KBD
-  if (itf == usb_kbd_hid_instance()) {
+#ifdef ENABLE_WAKE_HID
+  // Route instance 1 to the wake keyboard only while the kbd is actually in
+  // the ENUMERATED configuration (usb_wake_kbd_active(), latched at swap time
+  // -- not the config value, which may differ while a swap is pending).
+  if (usb_wake_kbd_active() && itf == usb_kbd_hid_instance()) {
     if (reqlen >= 8) {
       memset(buffer, 0, 8);
       return 8;
     }
     return 0;
   }
-#endif
-#ifdef ENABLE_WAKE_HID
   // MINIMAL instance 0 is the inert dummy HID, NOT the gamepad. Don't route its
   // GET_REPORT into the BT feature path (which would query a controller that
   // isn't connected). Return 0 (STALL); the host never reads it.
@@ -315,13 +316,12 @@ bool tud_audio_set_itf_cb(uint8_t rhport,
 void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id,
                            hid_report_type_t report_type, uint8_t const *buffer,
                            uint16_t bufsize) {
-#ifdef WAKE_VIA_USB_KBD
-  if (itf == usb_kbd_hid_instance()) {
+#ifdef ENABLE_WAKE_HID
+  // Same enumerated-state gate as tud_hid_get_report_cb above.
+  if (usb_wake_kbd_active() && itf == usb_kbd_hid_instance()) {
     // Drop keyboard SET_REPORT (host LED state).
     return;
   }
-#endif
-#ifdef ENABLE_WAKE_HID
   // MINIMAL instance 0 is the inert dummy HID; ignore any report to it.
   if (!usb_descriptor_variant_is_full()) {
     return;
@@ -425,6 +425,11 @@ int main() {
   // the saved values must be in place first.
   config_load();
 
+  // Seed the USB descriptor target with the persisted wake-keyboard toggle
+  // BEFORE the first tud_connect() below, so the initial enumeration already
+  // carries (or omits) the keyboard -- no cosmetic re-plug right after boot.
+  usb_descriptor_init_from_config();
+
   // Bring up the config web server (no-op with ENABLE_WIFI_WOL off). The SDK's
   // cyw43_arch_init() already brought lwIP up (CYW43_LWIP=1), so
   // wifi_net_init() must NOT re-init it. Diagnostics print to UART0 (GP0 TX,
@@ -481,7 +486,7 @@ int main() {
 
 #ifdef ENABLE_WAKE_HID
   // Enumerate immediately as the MINIMAL variant (inert HID placeholder, plus
-  // the boot keyboard in WAKE_VIA_USB_KBD builds), even before any controller
+  // the boot keyboard if the runtime toggle is on), even before any controller
   // connects. tusb_init() left us tud_disconnect()'d; without this the dongle
   // would stay invisible to the host on a cold plug-in until the first
   // controller connection flipped it to FULL -- and the device must be

@@ -39,21 +39,17 @@ enum {
     ITF_NUM_AUDIO_STREAMING_OUT,
     ITF_NUM_AUDIO_STREAMING_IN,
     ITF_NUM_HID,
-#ifdef WAKE_VIA_USB_KBD
-    ITF_NUM_HID_KBD,
-#endif
-    ITF_NUM_TOTAL,
+    ITF_NUM_TOTAL, // interfaces in the canonical (kbd-less) FULL variant
 
+    // Header (9) + the canonical DualSense interface run (218). The boot
+    // keyboard -- a RUNTIME toggle now (Config_body.wake_kbd_enabled), no longer
+    // a compile option -- appends one more interface after the gamepad in FULL
+    // (interface ITF_NUM_TOTAL) and after the dummy in MINIMAL (interface 1).
     CONFIG_DESC_LEN_BASE = 0x00E3,
-    // Keyboard interface adds 25 bytes:
-    //   9 (interface) + 9 (HID class) + 7 (EP IN) = 25
-    CONFIG_DESC_LEN_WAKE_KBD =
-#ifdef WAKE_VIA_USB_KBD
-        25,
-#else
-        0,
-#endif
-    CONFIG_DESC_LEN_TOTAL = CONFIG_DESC_LEN_BASE + CONFIG_DESC_LEN_WAKE_KBD
+    // Keyboard interface adds 25 bytes: 9 (interface) + 9 (HID class) + 7 (EP IN)
+    DS5_KBD_ITF_DESC_LEN = 25,
+    // Dummy HID interface (MINIMAL placeholder), same 25-byte shape.
+    DS5_DUMMY_ITF_DESC_LEN = 25,
 };
 
 // String Descriptor Index
@@ -72,17 +68,18 @@ enum {
 // hand-counted blobs that can silently drift.
 //--------------------------------------------------------------------+
 
-#ifdef WAKE_VIA_USB_KBD
+#ifdef ENABLE_WAKE_HID
 // Boot-keyboard interface (HID), parameterised by interface number. EP IN 0x87.
-// 25 bytes: 9 (interface) + 9 (HID class) + 7 (EP IN). Only built when the USB
-// keyboard wake path is opted in (WAKE_VIA_USB_KBD); the default build wakes
-// over the LAN (WOL) and omits it entirely, keeping the enumeration a pure
-// DualSense.
+// 25 bytes: 9 (interface) + 9 (HID class) + 7 (EP IN). Compiled into the
+// *_kbd descriptor arrays; whether one of those is ever presented to the host
+// is the RUNTIME choice (Config_body.wake_kbd_enabled via the web UI). The
+// default (kbd off) keeps the enumeration a pure DualSense and wakes over the
+// LAN (WOL) instead.
 #define DS5_KBD_ITF_DESC(kbd_itf) \
     0x09, 0x04, (kbd_itf), 0x00, 0x01, 0x03, 0x01, 0x01, 0x00, \
     0x09, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22, 0x2D, 0x00, \
     0x07, 0x05, 0x87, 0x03, 0x08, 0x00, 0x0A
-#endif // WAKE_VIA_USB_KBD
+#endif // ENABLE_WAKE_HID
 
 #ifdef ENABLE_WAKE_HID
 // Inert dummy HID interface used in MINIMAL where the gamepad sits in FULL.
@@ -135,357 +132,397 @@ uint8_t const *tud_descriptor_device_cb(void) {
 
 //--------------------------------------------------------------------+
 // Configuration Descriptor
+//
+// Composed from macro fragments so the SAME byte run backs every variant
+// that shares an interface (no hand-counted duplicate blobs that can
+// silently drift):
+//   DS5_CFG_HDR_DESC       -- 9-byte configuration header (len/#itfs vary)
+//   DS5_FULL_ITFS          -- canonical DualSense run: audio(0-2)+gamepad(3)
+//   DS5_KBD_ITF_DESC       -- optional boot keyboard (runtime toggle)
+//   DS5_DUMMY_HID_ITF_DESC -- MINIMAL's inert placeholder
+// Kept as STATIC compile-time arrays, deliberately not runtime-assembled:
+// the static_asserts lock every wTotalLength against the emitted bytes, and
+// the FULL arrays stay ELF-diffable against a real DualSense descriptor
+// dump (Windows descriptor bugs are this repo's most expensive class).
 //--------------------------------------------------------------------+
-uint8_t descriptor_configuration[] = {
-    // --- CONFIGURATION DESCRIPTOR ---
-    0x09, // bLength
-    0x02, // bDescriptorType (CONFIGURATION)
-    U16_TO_U8S_LE(CONFIG_DESC_LEN_TOTAL), // wTotalLength
-    ITF_NUM_TOTAL, // bNumInterfaces
-    0x01, // bConfigurationValue: 1
-    0x00, // iConfiguration: 0
+
 #ifdef ENABLE_WAKE_HID
-    0xE0, // bmAttributes: SELF-POWERED + REMOTE-WAKEUP
+#define DS5_CFG_BMATTRIBUTES 0xE0 // SELF-POWERED + REMOTE-WAKEUP (needed for wake)
 #else
-    0xC0, // bmAttributes: SELF-POWERED, NO REMOTE-WAKEUP
+#define DS5_CFG_BMATTRIBUTES 0xC0 // SELF-POWERED, NO REMOTE-WAKEUP
 #endif
-    0xFA, // bMaxPower: 500mA (250 * 2mA)
 
-    // --- INTERFACE DESCRIPTOR (0.0): Audio Control ---
-    0x09, // bLength
-    0x04, // bDescriptorType (INTERFACE)
-    0x00, // bInterfaceNumber: 0
-    0x00, // bAlternateSetting: 0
-    0x00, // bNumEndpoints: 0
-    0x01, // bInterfaceClass: Audio (0x01)
-    0x01, // bInterfaceSubClass: Audio Control (0x01)
-    0x00, // bInterfaceProtocol: 0x00
-    0x00, // iInterface: 0
+// 9-byte configuration descriptor header.
+#define DS5_CFG_HDR_DESC(total_len, num_itfs) \
+    0x09,                     /* bLength */ \
+    0x02,                     /* bDescriptorType (CONFIGURATION) */ \
+    U16_TO_U8S_LE(total_len), /* wTotalLength */ \
+    (num_itfs),               /* bNumInterfaces */ \
+    0x01,                     /* bConfigurationValue: 1 */ \
+    0x00,                     /* iConfiguration: 0 */ \
+    DS5_CFG_BMATTRIBUTES,     /* bmAttributes */ \
+    0xFA                      /* bMaxPower: 500mA (250 * 2mA) */
 
-    // Class-specific AC Interface Header Descriptor
-    0x0A, // bLength: 10
-    0x24, // bDescriptorType: CS_INTERFACE (0x24)
-    0x01, // bDescriptorSubtype: Header (0x01)
-    0x00, 0x01, // bcdADC: 1.00
-    0x49, 0x00, // wTotalLength: 73 (0x0049)
-    0x02, // bInCollection: 2 streaming interfaces
-    0x01, // baInterfaceNr(1): Interface 1
-    0x02, // baInterfaceNr(2): Interface 2
+// The canonical DualSense interface run (218 bytes): Audio Control (0),
+// Audio Streaming OUT (1), Audio Streaming IN (2), gamepad HID (3). This
+// order/layout is FROZEN -- it matches a real DualSense, Windows rejects
+// non-ascending interface numbers, and audio-at-0/gamepad-at-3 is what the
+// Windows DualSense driver expects.
+#define DS5_FULL_ITFS \
+    /* --- INTERFACE DESCRIPTOR (0.0): Audio Control --- */ \
+    0x09, /* bLength */ \
+    0x04, /* bDescriptorType (INTERFACE) */ \
+    0x00, /* bInterfaceNumber: 0 */ \
+    0x00, /* bAlternateSetting: 0 */ \
+    0x00, /* bNumEndpoints: 0 */ \
+    0x01, /* bInterfaceClass: Audio (0x01) */ \
+    0x01, /* bInterfaceSubClass: Audio Control (0x01) */ \
+    0x00, /* bInterfaceProtocol: 0x00 */ \
+    0x00, /* iInterface: 0 */ \
+    \
+    /* Class-specific AC Interface Header Descriptor */ \
+    0x0A, /* bLength: 10 */ \
+    0x24, /* bDescriptorType: CS_INTERFACE (0x24) */ \
+    0x01, /* bDescriptorSubtype: Header (0x01) */ \
+    0x00, 0x01, /* bcdADC: 1.00 */ \
+    0x49, 0x00, /* wTotalLength: 73 (0x0049) */ \
+    0x02, /* bInCollection: 2 streaming interfaces */ \
+    0x01, /* baInterfaceNr(1): Interface 1 */ \
+    0x02, /* baInterfaceNr(2): Interface 2 */ \
+    \
+    /* Input Terminal Descriptor (Terminal ID 1: USB Streaming → Output to Speaker) */ \
+    0x0C, /* bLength: 12 */ \
+    0x24, /* bDescriptorType: CS_INTERFACE */ \
+    0x02, /* bDescriptorSubtype: Input Terminal */ \
+    0x01, /* bTerminalID: 1 */ \
+    0x01, 0x01, /* wTerminalType: USB Streaming (0x0101) */ \
+    0x06, /* bAssocTerminal: 6 (paired with USB OUT terminal) */ \
+    0x04, /* bNrChannels: 4 */ \
+    0x33, 0x00, /* wChannelConfig: L/R Front + L/R Surround (0x0033) */ \
+    0x00, /* iChannelNames: 0 */ \
+    0x00, /* iTerminal: 0 */ \
+    \
+    /* Feature Unit Descriptor (Unit ID 2 ← from Terminal 1) */ \
+    0x0C, /* bLength: 12 */ \
+    0x24, /* bDescriptorType: CS_INTERFACE */ \
+    0x06, /* bDescriptorSubtype: Feature Unit */ \
+    0x02, /* bUnitID: 2 */ \
+    0x01, /* bSourceID: 1 */ \
+    0x01, /* bControlSize: 1 byte per control */ \
+    0x03, /* bmaControls[0]: Master – Mute, Volume */ \
+    0x00, 0x00, 0x00, 0x00, 0x00, /* bmaControls[1..4]: No per-channel controls */ \
+    \
+    /* Output Terminal Descriptor (Terminal ID 3: Speaker ← from Unit 2) */ \
+    0x09, /* bLength: 9 */ \
+    0x24, /* bDescriptorType: CS_INTERFACE */ \
+    0x03, /* bDescriptorSubtype: Output Terminal */ \
+    0x03, /* bTerminalID: 3 */ \
+    0x01, 0x03, /* wTerminalType: Speaker (0x0301) */ \
+    0x04, /* bAssocTerminal: 4 (paired with mic input) */ \
+    0x02, /* bSourceID: 2 (Feature Unit) */ \
+    0x00, /* iTerminal: 0 */ \
+    \
+    /* Input Terminal Descriptor (Terminal ID 4: Headset Mic) */ \
+    0x0C, /* bLength: 12 */ \
+    0x24, /* bDescriptorType: CS_INTERFACE */ \
+    0x02, /* bDescriptorSubtype: Input Terminal */ \
+    0x04, /* bTerminalID: 4 */ \
+    0x02, 0x04, /* wTerminalType: Headset (0x0402) */ \
+    0x03, /* bAssocTerminal: 3 (paired with speaker) */ \
+    0x02, /* bNrChannels: 2 */ \
+    0x03, 0x00, /* wChannelConfig: L/R Front (0x0003) */ \
+    0x00, /* iChannelNames: 0 */ \
+    0x00, /* iTerminal: 0 */ \
+    \
+    /* Feature Unit Descriptor (Unit ID 5 ← from Terminal 4) */ \
+    0x09, /* bLength: 9 */ \
+    0x24, /* bDescriptorType: CS_INTERFACE */ \
+    0x06, /* bDescriptorSubtype: Feature Unit */ \
+    0x05, /* bUnitID: 5 */ \
+    0x04, /* bSourceID: 4 */ \
+    0x01, /* bControlSize: 1 */ \
+    0x03, /* bmaControls[0]: Master – Mute, Volume */ \
+    0x00, /* bmaControls[1]: Ch1 – no controls */ \
+    0x00, /* iFeature: 0 */ \
+    \
+    /* Output Terminal Descriptor (Terminal ID 6: USB Streaming ← from Unit 5) */ \
+    0x09, /* bLength: 9 */ \
+    0x24, /* bDescriptorType: CS_INTERFACE */ \
+    0x03, /* bDescriptorSubtype: Output Terminal */ \
+    0x06, /* bTerminalID: 6 */ \
+    0x01, 0x01, /* wTerminalType: USB Streaming (0x0101) */ \
+    0x01, /* bAssocTerminal: 1 */ \
+    0x05, /* bSourceID: 5 */ \
+    0x00, /* iTerminal: 0 */ \
+    \
+    /* --- INTERFACE DESCRIPTOR (1.0): Audio Streaming (OUT - Alternate 0) --- */ \
+    0x09, /* bLength */ \
+    0x04, /* bDescriptorType (INTERFACE) */ \
+    0x01, /* bInterfaceNumber: 1 */ \
+    0x00, /* bAlternateSetting: 0 */ \
+    0x00, /* bNumEndpoints: 0 */ \
+    0x01, /* bInterfaceClass: Audio */ \
+    0x02, /* bInterfaceSubClass: Audio Streaming */ \
+    0x00, /* bInterfaceProtocol */ \
+    0x00, /* iInterface */ \
+    \
+    /* --- INTERFACE DESCRIPTOR (1.1): Audio Streaming (OUT - Alternate 1) --- */ \
+    0x09, /* bLength */ \
+    0x04, /* bDescriptorType (INTERFACE) */ \
+    0x01, /* bInterfaceNumber: 1 */ \
+    0x01, /* bAlternateSetting: 1 */ \
+    0x01, /* bNumEndpoints: 1 */ \
+    0x01, /* bInterfaceClass: Audio */ \
+    0x02, /* bInterfaceSubClass: Audio Streaming */ \
+    0x00, /* bInterfaceProtocol */ \
+    0x00, /* iInterface */ \
+    \
+    /* AS General Descriptor (for Interface 1.1) */ \
+    0x07, /* bLength: 7 */ \
+    0x24, /* bDescriptorType: CS_INTERFACE */ \
+    0x01, /* bDescriptorSubtype: AS_GENERAL */ \
+    0x01, /* bTerminalLink: connected to Terminal ID 1 */ \
+    0x01, /* bDelay: 1 frame */ \
+    0x01, 0x00, /* wFormatTag: PCM (0x0001) */ \
+    \
+    /* Format Type Descriptor (4-channel, 16-bit, 48kHz) */ \
+    0x0B, /* bLength: 11 */ \
+    0x24, /* bDescriptorType: CS_INTERFACE */ \
+    0x02, /* bDescriptorSubtype: FORMAT_TYPE */ \
+    0x01, /* bFormatType: TYPE_I */ \
+    0x04, /* bNrChannels: 4 */ \
+    0x02, /* bSubframeSize: 2 bytes/sample */ \
+    0x10, /* bBitResolution: 16 bits */ \
+    0x01, /* bSamFreqType: 1 discrete frequency */ \
+    0x80, 0xBB, 0x00, /* tSamFreq: 48000 Hz (0x00BB80) */ \
+    \
+    /* Endpoint Descriptor (Audio OUT: EP1) */ \
+    0x09, /* bLength */ \
+    0x05, /* bDescriptorType (ENDPOINT) */ \
+    0x01, /* bEndpointAddress: OUT EP1 */ \
+    0x09, /* bmAttributes: Isochronous, Adaptive */ \
+    0x88, 0x01, /* wMaxPacketSize: 392 bytes */ \
+    0x01, /* bInterval: 1 */ \
+    0x00, /* bRefresh */ \
+    0x00, /* bSynchAddress */ \
+    \
+    /* Class-specific Audio Streaming Endpoint Descriptor (EP1) */ \
+    0x07, /* bLength */ \
+    0x25, /* bDescriptorType: CS_ENDPOINT */ \
+    0x01, /* bDescriptorSubtype: GENERAL */ \
+    0x00, /* Attributes: No pitch/sampling freq control */ \
+    0x00, /* Lock Delay Units: Undefined */ \
+    0x00, 0x00, /* Lock Delay: 0 */ \
+    \
+    /* --- INTERFACE DESCRIPTOR (2.0): Audio Streaming IN (Alternate 0) --- */ \
+    0x09, /* bLength */ \
+    0x04, /* bDescriptorType (INTERFACE) */ \
+    0x02, /* bInterfaceNumber: 2 */ \
+    0x00, /* bAlternateSetting: 0 */ \
+    0x00, /* bNumEndpoints: 0 */ \
+    0x01, /* bInterfaceClass: Audio */ \
+    0x02, /* bInterfaceSubClass: Audio Streaming */ \
+    0x00, /* bInterfaceProtocol */ \
+    0x00, /* iInterface */ \
+    \
+    /* --- INTERFACE DESCRIPTOR (2.1): Audio Streaming IN (Alternate 1) --- */ \
+    0x09, /* bLength */ \
+    0x04, /* bDescriptorType (INTERFACE) */ \
+    0x02, /* bInterfaceNumber: 2 */ \
+    0x01, /* bAlternateSetting: 1 */ \
+    0x01, /* bNumEndpoints: 1 */ \
+    0x01, /* bInterfaceClass: Audio */ \
+    0x02, /* bInterfaceSubClass: Audio Streaming */ \
+    0x00, /* bInterfaceProtocol */ \
+    0x00, /* iInterface */ \
+    \
+    /* AS General Descriptor (for Interface 2.1) */ \
+    0x07, /* bLength: 7 */ \
+    0x24, /* bDescriptorType: CS_INTERFACE */ \
+    0x01, /* bDescriptorSubtype: AS_GENERAL */ \
+    0x06, /* bTerminalLink: connected to Terminal ID 6 */ \
+    0x01, /* bDelay: 1 frame */ \
+    0x01, 0x00, /* wFormatTag: PCM (0x0001) */ \
+    \
+    /* Format Type Descriptor (2-channel, 16-bit, 48kHz) */ \
+    0x0B, /* bLength: 11 */ \
+    0x24, /* bDescriptorType: CS_INTERFACE */ \
+    0x02, /* bDescriptorSubtype: FORMAT_TYPE */ \
+    0x01, /* bFormatType: TYPE_I */ \
+    0x02, /* bNrChannels: 2 */ \
+    0x02, /* bSubframeSize: 2 */ \
+    0x10, /* bBitResolution: 16 */ \
+    0x01, /* bSamFreqType: 1 */ \
+    0x80, 0xBB, 0x00, /* tSamFreq: 48000 Hz */ \
+    \
+    /* Endpoint Descriptor (Audio IN: EP2) */ \
+    0x09, /* bLength */ \
+    0x05, /* bDescriptorType (ENDPOINT) */ \
+    0x82, /* bEndpointAddress: IN EP2 */ \
+    0x05, /* bmAttributes: Isochronous, Asynchronous */ \
+    0xC4, 0x00, /* wMaxPacketSize: 196 bytes (48kHz × 2ch × 2B) */ \
+    0x01, /* bInterval: 1 */ \
+    0x00, /* bRefresh */ \
+    0x00, /* bSynchAddress */ \
+    \
+    /* Class-specific Audio Streaming Endpoint Descriptor (EP2) */ \
+    0x07, /* bLength */ \
+    0x25, /* bDescriptorType: CS_ENDPOINT */ \
+    0x01, /* bDescriptorSubtype: GENERAL */ \
+    0x00, /* Attributes: No controls */ \
+    0x00, /* Lock Delay Units */ \
+    0x00, 0x00, /* Lock Delay */ \
+    \
+    /* --- INTERFACE DESCRIPTOR (3.0): HID (DualSense 5 Gamepad + Touchpad) --- */ \
+    0x09, /* bLength */ \
+    0x04, /* bDescriptorType (INTERFACE) */ \
+    0x03, /* bInterfaceNumber: 3 */ \
+    0x00, /* bAlternateSetting: 0 */ \
+    0x02, /* bNumEndpoints: 2 (IN + OUT) */ \
+    0x03, /* bInterfaceClass: HID */ \
+    0x00, /* bInterfaceSubClass: None */ \
+    0x00, /* bInterfaceProtocol: None */ \
+    0x00, /* iInterface */ \
+    \
+    /* HID Descriptor */ \
+    0x09, /* bLength: 9 */ \
+    0x21, /* bDescriptorType (HID) */ \
+    0x11, 0x01, /* bcdHID: 1.11 */ \
+    0x00, /* bCountryCode: Not localized */ \
+    0x01, /* bNumDescriptors: 1 report descriptor */ \
+    0x22, /* bDescriptorType: Report */ \
+    0x11, 0x01, /* wDescriptorLength: 273 (0x0111) DS */ \
+    /* 0x85, 0x01, // wDescriptorLength: 389 (0x0185) DSE */ \
+    \
+    /* Endpoint Descriptor (HID IN: EP4) */ \
+    0x07, /* bLength */ \
+    0x05, /* bDescriptorType (ENDPOINT) */ \
+    0x84, /* bEndpointAddress: IN EP4 */ \
+    0x03, /* bmAttributes: Interrupt */ \
+    0x40, 0x00, /* wMaxPacketSize: 64 */ \
+    0x01, /* bInterval: 1 (polling every 4ms -> 1ms) */ \
+    \
+    /* Endpoint Descriptor (HID OUT: EP3) */ \
+    0x07, /* bLength */ \
+    0x05, /* bDescriptorType (ENDPOINT) */ \
+    0x03, /* bEndpointAddress: OUT EP3 */ \
+    0x03, /* bmAttributes: Interrupt */ \
+    0x40, 0x00, /* wMaxPacketSize: 64 */ \
+    0x01  /* bInterval: 1 (polling every 4ms -> 1ms) */
 
-    // Input Terminal Descriptor (Terminal ID 1: USB Streaming → Output to Speaker)
-    0x0C, // bLength: 12
-    0x24, // bDescriptorType: CS_INTERFACE
-    0x02, // bDescriptorSubtype: Input Terminal
-    0x01, // bTerminalID: 1
-    0x01, 0x01, // wTerminalType: USB Streaming (0x0101)
-    0x06, // bAssocTerminal: 6 (paired with USB OUT terminal)
-    0x04, // bNrChannels: 4
-    0x33, 0x00, // wChannelConfig: L/R Front + L/R Surround (0x0033)
-    0x00, // iChannelNames: 0
-    0x00, // iTerminal: 0
-
-    // Feature Unit Descriptor (Unit ID 2 ← from Terminal 1)
-    0x0C, // bLength: 12
-    0x24, // bDescriptorType: CS_INTERFACE
-    0x06, // bDescriptorSubtype: Feature Unit
-    0x02, // bUnitID: 2
-    0x01, // bSourceID: 1
-    0x01, // bControlSize: 1 byte per control
-    0x03, // bmaControls[0]: Master – Mute, Volume
-    0x00, 0x00, 0x00, 0x00, 0x00, // bmaControls[1..4]: No per-channel controls
-
-    // Output Terminal Descriptor (Terminal ID 3: Speaker ← from Unit 2)
-    0x09, // bLength: 9
-    0x24, // bDescriptorType: CS_INTERFACE
-    0x03, // bDescriptorSubtype: Output Terminal
-    0x03, // bTerminalID: 3
-    0x01, 0x03, // wTerminalType: Speaker (0x0301)
-    0x04, // bAssocTerminal: 4 (paired with mic input)
-    0x02, // bSourceID: 2 (Feature Unit)
-    0x00, // iTerminal: 0
-
-    // Input Terminal Descriptor (Terminal ID 4: Headset Mic)
-    0x0C, // bLength: 12
-    0x24, // bDescriptorType: CS_INTERFACE
-    0x02, // bDescriptorSubtype: Input Terminal
-    0x04, // bTerminalID: 4
-    0x02, 0x04, // wTerminalType: Headset (0x0402)
-    0x03, // bAssocTerminal: 3 (paired with speaker)
-    0x02, // bNrChannels: 2
-    0x03, 0x00, // wChannelConfig: L/R Front (0x0003)
-    0x00, // iChannelNames: 0
-    0x00, // iTerminal: 0
-
-    // Feature Unit Descriptor (Unit ID 5 ← from Terminal 4)
-    0x09, // bLength: 9
-    0x24, // bDescriptorType: CS_INTERFACE
-    0x06, // bDescriptorSubtype: Feature Unit
-    0x05, // bUnitID: 5
-    0x04, // bSourceID: 4
-    0x01, // bControlSize: 1
-    0x03, // bmaControls[0]: Master – Mute, Volume
-    0x00, // bmaControls[1]: Ch1 – no controls
-    0x00, // iFeature: 0
-
-    // Output Terminal Descriptor (Terminal ID 6: USB Streaming ← from Unit 5)
-    0x09, // bLength: 9
-    0x24, // bDescriptorType: CS_INTERFACE
-    0x03, // bDescriptorSubtype: Output Terminal
-    0x06, // bTerminalID: 6
-    0x01, 0x01, // wTerminalType: USB Streaming (0x0101)
-    0x01, // bAssocTerminal: 1
-    0x05, // bSourceID: 5
-    0x00, // iTerminal: 0
-
-    // --- INTERFACE DESCRIPTOR (1.0): Audio Streaming (OUT - Alternate 0) ---
-    0x09, // bLength
-    0x04, // bDescriptorType (INTERFACE)
-    0x01, // bInterfaceNumber: 1
-    0x00, // bAlternateSetting: 0
-    0x00, // bNumEndpoints: 0
-    0x01, // bInterfaceClass: Audio
-    0x02, // bInterfaceSubClass: Audio Streaming
-    0x00, // bInterfaceProtocol
-    0x00, // iInterface
-
-    // --- INTERFACE DESCRIPTOR (1.1): Audio Streaming (OUT - Alternate 1) ---
-    0x09, // bLength
-    0x04, // bDescriptorType (INTERFACE)
-    0x01, // bInterfaceNumber: 1
-    0x01, // bAlternateSetting: 1
-    0x01, // bNumEndpoints: 1
-    0x01, // bInterfaceClass: Audio
-    0x02, // bInterfaceSubClass: Audio Streaming
-    0x00, // bInterfaceProtocol
-    0x00, // iInterface
-
-    // AS General Descriptor (for Interface 1.1)
-    0x07, // bLength: 7
-    0x24, // bDescriptorType: CS_INTERFACE
-    0x01, // bDescriptorSubtype: AS_GENERAL
-    0x01, // bTerminalLink: connected to Terminal ID 1
-    0x01, // bDelay: 1 frame
-    0x01, 0x00, // wFormatTag: PCM (0x0001)
-
-    // Format Type Descriptor (4-channel, 16-bit, 48kHz)
-    0x0B, // bLength: 11
-    0x24, // bDescriptorType: CS_INTERFACE
-    0x02, // bDescriptorSubtype: FORMAT_TYPE
-    0x01, // bFormatType: TYPE_I
-    0x04, // bNrChannels: 4
-    0x02, // bSubframeSize: 2 bytes/sample
-    0x10, // bBitResolution: 16 bits
-    0x01, // bSamFreqType: 1 discrete frequency
-    0x80, 0xBB, 0x00, // tSamFreq: 48000 Hz (0x00BB80)
-
-    // Endpoint Descriptor (Audio OUT: EP1)
-    0x09, // bLength
-    0x05, // bDescriptorType (ENDPOINT)
-    0x01, // bEndpointAddress: OUT EP1
-    0x09, // bmAttributes: Isochronous, Adaptive
-    0x88, 0x01, // wMaxPacketSize: 392 bytes
-    0x01, // bInterval: 1
-    0x00, // bRefresh
-    0x00, // bSynchAddress
-
-    // Class-specific Audio Streaming Endpoint Descriptor (EP1)
-    0x07, // bLength
-    0x25, // bDescriptorType: CS_ENDPOINT
-    0x01, // bDescriptorSubtype: GENERAL
-    0x00, // Attributes: No pitch/sampling freq control
-    0x00, // Lock Delay Units: Undefined
-    0x00, 0x00, // Lock Delay: 0
-
-    // --- INTERFACE DESCRIPTOR (2.0): Audio Streaming IN (Alternate 0) ---
-    0x09, // bLength
-    0x04, // bDescriptorType (INTERFACE)
-    0x02, // bInterfaceNumber: 2
-    0x00, // bAlternateSetting: 0
-    0x00, // bNumEndpoints: 0
-    0x01, // bInterfaceClass: Audio
-    0x02, // bInterfaceSubClass: Audio Streaming
-    0x00, // bInterfaceProtocol
-    0x00, // iInterface
-
-    // --- INTERFACE DESCRIPTOR (2.1): Audio Streaming IN (Alternate 1) ---
-    0x09, // bLength
-    0x04, // bDescriptorType (INTERFACE)
-    0x02, // bInterfaceNumber: 2
-    0x01, // bAlternateSetting: 1
-    0x01, // bNumEndpoints: 1
-    0x01, // bInterfaceClass: Audio
-    0x02, // bInterfaceSubClass: Audio Streaming
-    0x00, // bInterfaceProtocol
-    0x00, // iInterface
-
-    // AS General Descriptor (for Interface 2.1)
-    0x07, // bLength: 7
-    0x24, // bDescriptorType: CS_INTERFACE
-    0x01, // bDescriptorSubtype: AS_GENERAL
-    0x06, // bTerminalLink: connected to Terminal ID 6
-    0x01, // bDelay: 1 frame
-    0x01, 0x00, // wFormatTag: PCM (0x0001)
-
-    // Format Type Descriptor (2-channel, 16-bit, 48kHz)
-    0x0B, // bLength: 11
-    0x24, // bDescriptorType: CS_INTERFACE
-    0x02, // bDescriptorSubtype: FORMAT_TYPE
-    0x01, // bFormatType: TYPE_I
-    0x02, // bNrChannels: 2
-    0x02, // bSubframeSize: 2
-    0x10, // bBitResolution: 16
-    0x01, // bSamFreqType: 1
-    0x80, 0xBB, 0x00, // tSamFreq: 48000 Hz
-
-    // Endpoint Descriptor (Audio IN: EP2)
-    0x09, // bLength
-    0x05, // bDescriptorType (ENDPOINT)
-    0x82, // bEndpointAddress: IN EP2
-    0x05, // bmAttributes: Isochronous, Asynchronous
-    0xC4, 0x00, // wMaxPacketSize: 196 bytes (48kHz × 2ch × 2B)
-    0x01, // bInterval: 1
-    0x00, // bRefresh
-    0x00, // bSynchAddress
-
-    // Class-specific Audio Streaming Endpoint Descriptor (EP2)
-    0x07, // bLength
-    0x25, // bDescriptorType: CS_ENDPOINT
-    0x01, // bDescriptorSubtype: GENERAL
-    0x00, // Attributes: No controls
-    0x00, // Lock Delay Units
-    0x00, 0x00, // Lock Delay
-
-    // --- INTERFACE DESCRIPTOR (3.0): HID (DualSense 5 Gamepad + Touchpad) ---
-    0x09, // bLength
-    0x04, // bDescriptorType (INTERFACE)
-    0x03, // bInterfaceNumber: 3
-    0x00, // bAlternateSetting: 0
-    0x02, // bNumEndpoints: 2 (IN + OUT)
-    0x03, // bInterfaceClass: HID
-    0x00, // bInterfaceSubClass: None
-    0x00, // bInterfaceProtocol: None
-    0x00, // iInterface
-
-    // HID Descriptor
-    0x09, // bLength: 9
-    0x21, // bDescriptorType (HID)
-    0x11, 0x01, // bcdHID: 1.11
-    0x00, // bCountryCode: Not localized
-    0x01, // bNumDescriptors: 1 report descriptor
-    0x22, // bDescriptorType: Report
-    0x11, 0x01, // wDescriptorLength: 273 (0x0111) DS
-    // 0x85, 0x01, // wDescriptorLength: 389 (0x0185) DSE
-
-    // Endpoint Descriptor (HID IN: EP4)
-    0x07, // bLength
-    0x05, // bDescriptorType (ENDPOINT)
-    0x84, // bEndpointAddress: IN EP4
-    0x03, // bmAttributes: Interrupt
-    0x40, 0x00, // wMaxPacketSize: 64
-    0x01, // bInterval: 1 (polling every 4ms -> 1ms)
-
-    // Endpoint Descriptor (HID OUT: EP3)
-    0x07, // bLength
-    0x05, // bDescriptorType (ENDPOINT)
-    0x03, // bEndpointAddress: OUT EP3
-    0x03, // bmAttributes: Interrupt
-    0x40, 0x00, // wMaxPacketSize: 64
-    0x01, // bInterval: 1 (polling every 4ms -> 1ms)
-
-#ifdef WAKE_VIA_USB_KBD
-    // --- HID Boot Keyboard (wake key only) at ITF_NUM_HID_KBD ---
-    DS5_KBD_ITF_DESC(ITF_NUM_HID_KBD),
-#endif
+// FULL, canonical: audio + gamepad only -- THE pure-DualSense enumeration
+// (default, wake_kbd_enabled=0). Non-const: tud_descriptor_configuration_cb
+// patches the gamepad's polling bInterval + report-descriptor length in
+// place before serving.
+uint8_t descriptor_configuration[] = {
+    DS5_CFG_HDR_DESC(CONFIG_DESC_LEN_BASE, ITF_NUM_TOTAL),
+    DS5_FULL_ITFS,
 };
 
 // Lock the hand-computed wTotalLength against the actual emitted bytes. A
 // mismatch would silently break enumeration of the trailing interfaces.
-static_assert(sizeof(descriptor_configuration) == CONFIG_DESC_LEN_TOTAL,
-              "descriptor_configuration size != CONFIG_DESC_LEN_TOTAL");
+static_assert(sizeof(descriptor_configuration) == CONFIG_DESC_LEN_BASE,
+              "descriptor_configuration size != CONFIG_DESC_LEN_BASE");
 
 #ifdef ENABLE_WAKE_HID
-// Minimal config descriptor used when no DualSense is connected.
-// Presents no audio function and no real gamepad — so the Windows Sound applet
+// FULL + boot keyboard (runtime wake_kbd_enabled=1): the same canonical run
+// with the kbd appended as interface 4 -> HID instance 1. The gamepad stays
+// interface 3 / HID instance 0, byte-identical to the kbd-less FULL.
+uint8_t descriptor_configuration_full_kbd[] = {
+    DS5_CFG_HDR_DESC(CONFIG_DESC_LEN_BASE + DS5_KBD_ITF_DESC_LEN,
+                     ITF_NUM_TOTAL + 1),
+    DS5_FULL_ITFS,
+    DS5_KBD_ITF_DESC(ITF_NUM_TOTAL),
+};
+static_assert(sizeof(descriptor_configuration_full_kbd) ==
+                  CONFIG_DESC_LEN_BASE + DS5_KBD_ITF_DESC_LEN,
+              "descriptor_configuration_full_kbd size mismatch");
+#endif // ENABLE_WAKE_HID
+
+#ifdef ENABLE_WAKE_HID
+// Minimal config descriptors used when no DualSense is connected.
+// Present no audio function and no real gamepad — so the Windows Sound applet
 // and joy.cpl don't show ghost devices — while keeping the dongle enumerated
 // and remote-wakeup-capable (needed for wake-from-S3/S5).
 //
-// It keeps the keyboard at HID instance 1 in BOTH variants. TinyUSB numbers HID
-// instances by descriptor parse order, counting only HID interfaces; in FULL the
-// gamepad is HID instance 0 and the kbd is instance 1. MINIMAL therefore needs
-// exactly ONE HID before the kbd (a dummy placeholder) so the kbd stays instance
-// 1 -- without that the kbd became instance 0 in MINIMAL and a gamepad report
-// (addressed to instance 0/1) could land on it across a swap: the "rogue
-// keyboard on wake". The dummy reuses the gamepad's IN endpoint 0x84; it is never
-// written to.
+// The kbd-bearing pair keeps the keyboard at HID instance 1 in BOTH variants.
+// TinyUSB numbers HID instances by descriptor parse order, counting only HID
+// interfaces; in FULL the gamepad is HID instance 0 and the kbd is instance 1.
+// MINIMAL therefore needs exactly ONE HID before the kbd (a dummy placeholder)
+// so the kbd stays instance 1 -- without that the kbd became instance 0 in
+// MINIMAL and a gamepad report (addressed to instance 0/1) could land on it
+// across a swap: the "rogue keyboard on wake". For the same reason the kbd
+// must be in BOTH variants of a running pair or NEITHER -- the orchestrator
+// swaps variant and kbd as one atomic target (below). The dummy reuses the
+// gamepad's IN endpoint 0x84; it is never written to.
 //
-// Interface layout depends on WAKE_VIA_USB_KBD:
-//
-//   With the boot keyboard opted in:
+// Interface layout with the keyboard enabled (wake_kbd_enabled=1):
 //       0   dummy HID            (HID instance 0)
 //       1   boot keyboard        (HID instance 1)
-//
-//   Without it (default, pure-DualSense build): a single dummy HID.
+// Without it (default, pure-DualSense face): a single dummy HID -- no audio,
+// no gamepad, but the dongle stays enumerated (some hosts dislike a device
+// that enumerates an empty config) and HID instance numbering stays
+// consistent across the swap (FULL gamepad = instance 0, MINIMAL dummy =
+// instance 0). The alternative (fully un-enumerated) is a HW-tunable fallback
+// if a host mishandles the swap-to-FULL.
 //
 // FULL's interface order is canonical/frozen (matches a real DualSense); the
 // dummy lives entirely in MINIMAL. Interface numbers stay ascending, so Windows
 // accepts the config (it rejects out-of-order interfaces).
-#if defined(WAKE_VIA_USB_KBD) // ENABLE_WAKE_HID && kbd -- kbd minimal
-#define CONFIG_DESC_LEN_MINIMAL (9 + 25 + 25)
-uint8_t descriptor_configuration_minimal[CONFIG_DESC_LEN_MINIMAL] = {
-    // --- CONFIGURATION DESCRIPTOR ---
-    0x09, 0x02, U16_TO_U8S_LE(CONFIG_DESC_LEN_MINIMAL),
-    0x02, // bNumInterfaces: dummy + kbd
-    0x01, 0x00,
-    0xE0, // SELF-POWERED + REMOTE-WAKEUP (must keep for wake)
-    0xFA,
+#define CONFIG_DESC_LEN_MINIMAL (9 + DS5_DUMMY_ITF_DESC_LEN)
+uint8_t descriptor_configuration_minimal[] = {
+    DS5_CFG_HDR_DESC(CONFIG_DESC_LEN_MINIMAL, 1),
+    // Interface 0: dummy HID (HID instance 0; mirrors FULL's gamepad slot).
+    DS5_DUMMY_HID_ITF_DESC(0),
+};
+static_assert(sizeof(descriptor_configuration_minimal) == CONFIG_DESC_LEN_MINIMAL,
+              "descriptor_configuration_minimal size mismatch");
+
+#define CONFIG_DESC_LEN_MINIMAL_KBD \
+    (9 + DS5_DUMMY_ITF_DESC_LEN + DS5_KBD_ITF_DESC_LEN)
+uint8_t descriptor_configuration_minimal_kbd[] = {
+    DS5_CFG_HDR_DESC(CONFIG_DESC_LEN_MINIMAL_KBD, 2),
     // Interface 0: dummy HID (HID instance 0).
     DS5_DUMMY_HID_ITF_DESC(0),
     // Interface 1: boot keyboard (HID instance 1).
     DS5_KBD_ITF_DESC(1),
 };
-#else // ENABLE_WAKE_HID && !kbd -- pure DualSense: no kbd
-// No USB keyboard (WOL is the wake action). When no DualSense is connected,
-// present a SINGLE inert HID interface: no audio, no gamepad -> no ghost
-// devices in the OS, but the dongle stays enumerated (some hosts dislike a
-// device that enumerates an empty config) and HID instance numbering stays
-// consistent across the swap (FULL gamepad = instance 0, MINIMAL dummy =
-// instance 0). The alternative (fully un-enumerated) is a HW-tunable fallback
-// if a host mishandles the swap-to-FULL.
-#define CONFIG_DESC_LEN_MINIMAL (9 + 25)
-uint8_t descriptor_configuration_minimal[CONFIG_DESC_LEN_MINIMAL] = {
-    // --- CONFIGURATION DESCRIPTOR ---
-    0x09, 0x02, U16_TO_U8S_LE(CONFIG_DESC_LEN_MINIMAL),
-    0x01, // bNumInterfaces: dummy HID only
-    0x01, 0x00,
-    0xE0, // SELF-POWERED + REMOTE-WAKEUP (kept; harmless without the kbd path)
-    0xFA,
-    // Interface 0: dummy HID (HID instance 0; mirrors FULL's gamepad slot).
-    DS5_DUMMY_HID_ITF_DESC(0),
-};
-#endif
-static_assert(sizeof(descriptor_configuration_minimal) == CONFIG_DESC_LEN_MINIMAL,
-              "descriptor_configuration_minimal size mismatch");
+static_assert(sizeof(descriptor_configuration_minimal_kbd) == CONFIG_DESC_LEN_MINIMAL_KBD,
+              "descriptor_configuration_minimal_kbd size mismatch");
 
-// Runtime selector: which variant to present on the next GET_CONFIGURATION.
-// Updated by usb_set_descriptor_variant() (from BT connect/disconnect),
-// read by tud_descriptor_configuration_cb() when the host re-enumerates
-// after a tud_disconnect()/tud_connect() cycle.
+// Runtime selector: which descriptor to present on the next GET_CONFIGURATION.
+// ONE atomic target -- the variant (controller connected or not) AND whether
+// the boot keyboard rides along (web-UI wake toggle) -- so any difference
+// between desired and active drives the same disconnect/settle/swap/connect
+// bounce, and the kbd can never be present in one variant of a running pair
+// but not the other. `active` is latched by the orchestrator at swap time and
+// is the ONLY thing the descriptor callbacks read; live config is never
+// consulted mid-enumeration.
 typedef enum {
-    DESC_VARIANT_MINIMAL = 0, // kbd only
-    DESC_VARIANT_FULL,        // audio + gamepad + kbd
+    DESC_VARIANT_MINIMAL = 0, // no controller: dummy HID (+ kbd if enabled)
+    DESC_VARIANT_FULL,        // controller connected: audio + gamepad (+ kbd)
 } desc_variant_t;
-static volatile desc_variant_t active_variant = DESC_VARIANT_MINIMAL;
+typedef struct {
+    desc_variant_t variant;
+    bool kbd;
+} usb_desc_target;
+// Field-wise volatile access is enough: both fields are only written from
+// main-loop context (BT event handlers, httpd POST handlers, usb_variant_task).
+static volatile usb_desc_target active_target  = {DESC_VARIANT_MINIMAL, false};
+static volatile usb_desc_target desired_target = {DESC_VARIANT_MINIMAL, false};
 
-void usb_set_descriptor_variant_full(void)    { active_variant = DESC_VARIANT_FULL; }
-void usb_set_descriptor_variant_minimal(void) { active_variant = DESC_VARIANT_MINIMAL; }
-bool usb_descriptor_variant_is_full(void)     { return active_variant == DESC_VARIANT_FULL; }
-#ifdef WAKE_VIA_USB_KBD
+bool usb_descriptor_variant_is_full(void) {
+    return active_target.variant == DESC_VARIANT_FULL;
+}
 // The boot keyboard is HID instance 1 in BOTH variants: in FULL the gamepad is
 // instance 0 (its interface is parsed first), and MINIMAL keeps a dummy HID at
 // instance 0 so the kbd stays instance 1. Stable across variant swaps -- this
 // is what makes the "rogue keyboard on wake" structurally impossible.
 uint8_t usb_kbd_hid_instance(void) { return 1; }
-#endif
+// True while the ENUMERATED configuration carries the boot keyboard. This is
+// the gate for all kbd runtime behavior (F15 FSM, HID callback routing) -- NOT
+// the config value, which may already differ while a swap is still pending.
+bool usb_wake_kbd_active(void) { return active_target.kbd; }
 
 //--------------------------------------------------------------------+
 // Variant swap orchestrator
@@ -499,18 +536,19 @@ uint8_t usb_kbd_hid_instance(void) { return 1; }
 //   DISCONNECTING — called tud_disconnect(); wait SETTLE_US so the host
 //                   sees the disconnect cleanly before we present a
 //                   different descriptor.
-//   CONNECTING    — flipped active_variant, called tud_connect(); wait
-//                   for host re-enumeration to settle, then back to IDLE.
+//   CONNECTING    — latched active_target = desired_target, called
+//                   tud_connect(); wait for host re-enumeration to settle,
+//                   then back to IDLE.
 //
 // Refuses to start or continue a swap while the host is suspended: a
 // re-enumeration mid-suspend defeats the whole point of ENABLE_WAKE_HID
 // (the dongle needs to be enumerated when the host wakes so remote-
-// wakeup can fire).
+// wakeup can fire). A kbd toggle requested during suspend therefore stays
+// pending in desired_target and applies after resume.
 
 #include "pico/time.h"
 #include "wake.h"
 
-static volatile desc_variant_t desired_variant = DESC_VARIANT_MINIMAL;
 static volatile bool host_suspended_flag = false;
 
 typedef enum {
@@ -524,11 +562,29 @@ static uint64_t      swap_state_entered = 0;
 static constexpr uint64_t SWAP_DISCONNECT_SETTLE_US = 500000;  // 500 ms
 static constexpr uint64_t SWAP_CONNECT_SETTLE_US    = 1500000; // 1500 ms
 
-void usb_request_variant_full(void)    { desired_variant = DESC_VARIANT_FULL; }
-void usb_request_variant_minimal(void) { desired_variant = DESC_VARIANT_MINIMAL; }
+void usb_request_variant_full(void)    { desired_target.variant = DESC_VARIANT_FULL; }
+void usb_request_variant_minimal(void) { desired_target.variant = DESC_VARIANT_MINIMAL; }
+// Web-UI wake-keyboard toggle: ask for the kbd to (dis)appear. Applied live by
+// usb_variant_task() through the same bounce a variant change uses; a no-op if
+// the enumerated state already matches.
+void usb_request_wake_kbd(bool enabled) { desired_target.kbd = enabled; }
+// One-time boot init, called after config_load() and BEFORE the first
+// tud_connect(): seed BOTH desired and active with the persisted kbd choice so
+// the very first enumeration already matches the config (no cosmetic bounce a
+// few seconds after boot).
+void usb_descriptor_init_from_config(void) {
+    const bool kbd = get_config().wake_kbd_enabled != 0;
+    desired_target.kbd = kbd;
+    active_target.kbd  = kbd;
+}
 void usb_set_host_suspended(bool s)    { host_suspended_flag = s; }
 bool usb_host_suspended(void)          { return host_suspended_flag; }
 bool usb_variant_swap_in_progress(void) { return swap_state != SWAP_IDLE; }
+
+static bool desc_target_differs(void) {
+    return desired_target.variant != active_target.variant ||
+           desired_target.kbd != active_target.kbd;
+}
 
 // Cold-boot autosuspend recovery (issue #4). While the gate below holds a
 // pending UP-swap (MINIMAL->FULL) shut, periodically re-issue a USB bus resume
@@ -551,7 +607,8 @@ void usb_variant_task(void) {
         // pending and the host has us suspended, keep nudging the bus back up so
         // the gate can clear -- otherwise a host that suspends MINIMAL and never
         // re-mounts strands the controller in MINIMAL forever (issue #4).
-        if (desired_variant == DESC_VARIANT_FULL && active_variant == DESC_VARIANT_MINIMAL) {
+        if (desired_target.variant == DESC_VARIANT_FULL &&
+            active_target.variant == DESC_VARIANT_MINIMAL) {
             const uint64_t now = time_us_64();
             if (now - swap_gate_last_resume_us >= SWAP_GATE_RESUME_RETRY_US) {
                 swap_gate_last_resume_us = now;
@@ -563,7 +620,7 @@ void usb_variant_task(void) {
     const uint64_t now = time_us_64();
     switch (swap_state) {
         case SWAP_IDLE:
-            if (desired_variant != active_variant) {
+            if (desc_target_differs()) {
                 wake_reset_for_variant_swap();
                 tud_disconnect();
                 swap_state = SWAP_DISCONNECTING;
@@ -572,7 +629,11 @@ void usb_variant_task(void) {
             return;
         case SWAP_DISCONNECTING:
             if (now - swap_state_entered < SWAP_DISCONNECT_SETTLE_US) return;
-            active_variant = desired_variant;
+            // Latch the whole target atomically w.r.t. enumeration: the bus is
+            // down, so the descriptor callbacks can't observe a half-updated
+            // target.
+            active_target.variant = desired_target.variant;
+            active_target.kbd     = desired_target.kbd;
             tud_connect();
             swap_state = SWAP_CONNECTING;
             swap_state_entered = now;
@@ -591,9 +652,16 @@ void usb_variant_task(void) {
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
     (void) index; // for multiple configurations
 #ifdef ENABLE_WAKE_HID
-    if (active_variant == DESC_VARIANT_MINIMAL) {
-        return descriptor_configuration_minimal;
+    // Reads ONLY the latched active_target (set at swap time); never the live
+    // config, which could change mid-enumeration.
+    if (active_target.variant == DESC_VARIANT_MINIMAL) {
+        return active_target.kbd ? descriptor_configuration_minimal_kbd
+                                 : descriptor_configuration_minimal;
     }
+    uint8_t *desc_full = active_target.kbd ? descriptor_configuration_full_kbd
+                                           : descriptor_configuration;
+#else
+    uint8_t *desc_full = descriptor_configuration;
 #endif
     auto bInterval = 0x01;
     switch (get_config().polling_rate_mode) {
@@ -607,15 +675,18 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
             bInterval = 0x01;
             break;
     }
+    // Patch offsets are relative to the canonical FULL run (header + 218
+    // bytes); they land on the same bytes in both FULL arrays because the kbd
+    // is appended strictly AFTER the gamepad interface.
     constexpr auto offset = CONFIG_DESC_LEN_BASE;
-    descriptor_configuration[offset - 1] = bInterval;
-    descriptor_configuration[offset - 8] = bInterval;
+    desc_full[offset - 1] = bInterval;
+    desc_full[offset - 8] = bInterval;
     if (ds_mode()) {
-        descriptor_configuration[offset - 16] = 0x11; // DS report desc low byte (0x0111 = 273)
+        desc_full[offset - 16] = 0x11; // DS report desc low byte (0x0111 = 273)
     }else {
-        descriptor_configuration[offset - 16] = 0x85; // DSE report desc low byte (0x0185 = 389)
+        desc_full[offset - 16] = 0x85; // DSE report desc low byte (0x0185 = 389)
     }
-    return descriptor_configuration;
+    return desc_full;
 }
 
 //--------------------------------------------------------------------+
@@ -972,7 +1043,7 @@ uint8_t const desc_hid_report_dse[] = {
 };
 static_assert(sizeof(desc_hid_report_dse) == 0x0185);
 
-#ifdef WAKE_VIA_USB_KBD
+#ifdef ENABLE_WAKE_HID
 // 41-byte boot-keyboard report descriptor (modifier byte + reserved + 6 keycodes,
 // no Report ID -- boot protocol forbids one and avoids collision with the gamepad's Report ID 1).
 uint8_t const desc_hid_report_kbd[] = {
@@ -1001,9 +1072,7 @@ uint8_t const desc_hid_report_kbd[] = {
     0xC0              // End Collection
 };
 _Static_assert(sizeof(desc_hid_report_kbd) == 45, "keyboard report descriptor length must match wDescriptorLength in config descriptor");
-#endif // WAKE_VIA_USB_KBD
 
-#ifdef ENABLE_WAKE_HID
 // Dummy HID report descriptor for the MINIMAL variant's placeholder interface.
 // Its ONLY purpose is to occupy HID instance 0 in MINIMAL exactly as the
 // gamepad does in FULL, so the keyboard is HID instance 1 in BOTH variants and
@@ -1033,16 +1102,17 @@ _Static_assert(sizeof(desc_hid_report_dummy) == 21, "dummy report descriptor len
 // Application return pointer to descriptor
 // Descriptor contents must exist long enough for transfer to complete
 uint8_t const *tud_hid_descriptor_report_cb(uint8_t itf) {
-#ifdef WAKE_VIA_USB_KBD
-    // With a boot keyboard, HID instance indices are STABLE across variants:
+#ifdef ENABLE_WAKE_HID
+    // With the boot keyboard enumerated, HID instance indices are STABLE
+    // across variants:
     //   instance 1 = boot keyboard (both variants)
     //   instance 0 = real gamepad in FULL, inert dummy HID in MINIMAL
-    if (itf == usb_kbd_hid_instance()) return desc_hid_report_kbd;
-#endif
-#ifdef ENABLE_WAKE_HID
+    // Gate on the ENUMERATED state (active_target.kbd), not the config value:
+    // with the kbd off, instance 1 is idle and the host never asks for it.
+    if (usb_wake_kbd_active() && itf == usb_kbd_hid_instance())
+        return desc_hid_report_kbd;
     // Instance 0 in MINIMAL is the dummy placeholder; serve its descriptor.
-    // (No keyboard in the WiFi build, so the dummy is MINIMAL's only HID.)
-    if (active_variant == DESC_VARIANT_MINIMAL) return desc_hid_report_dummy;
+    if (active_target.variant == DESC_VARIANT_MINIMAL) return desc_hid_report_dummy;
 #endif
     (void) itf;
     if (ds_mode()) {

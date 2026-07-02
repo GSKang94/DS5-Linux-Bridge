@@ -132,6 +132,25 @@ footer .kofi:hover{text-decoration:none;opacity:.9}
   <span id="bstatus"></span>
 </div>
 
+<div id="wake_section" style="display:none">
+<hr>
+<h2>Wake</h2>
+<div class="field chk">
+  <input type="checkbox" id="wake_kbd_enabled">
+  <label for="wake_kbd_enabled">USB wake keyboard (wake the PC from sleep)</label>
+</div>
+<div class="hint">Adds a tiny keyboard to the adapter's USB identity that types a
+  silent key (F15) so a controller press can wake the PC from sleep (S3) on
+  machines where plain USB wake doesn't work. Trade-off: the adapter no longer
+  looks like a pure DualSense over USB &mdash; some anticheat software may notice
+  the extra keyboard. Wake-on-LAN (below) does not need this. Saving applies
+  immediately: the adapter briefly re-plugs itself.</div>
+<div class="btns">
+  <button id="wake_save">Save</button>
+  <span id="kstatus"></span>
+</div>
+</div>
+
 <div id="wol_section" style="display:none">
 <hr>
 <h2>Network</h2>
@@ -213,6 +232,12 @@ async function load(){
     }
     if(c.wifi_capable){
       $('wifi_reset_field').style.display='';
+    }
+    // Wake section: only firmware with the dynamic-descriptor machinery can
+    // enumerate the wake keyboard.
+    if(c.wake_kbd_capable){
+      $('wake_section').style.display='';
+      $('wake_kbd_enabled').checked=!!c.wake_kbd_enabled;
     }
     upd.forEach(f=>f());
     $('save').disabled=true;setStatus('');
@@ -303,6 +328,18 @@ $('pair').onclick=()=>{
 $('forgetall').onclick=()=>{
   if(!confirm('Forget ALL paired controllers?\nEach will need to be re-paired.'))return;
   postBonds('action=forgetall','forgetting all…');
+};
+
+// ----- Wake (USB wake keyboard) -----
+function kstatus(msg,cls){const s=$('kstatus');s.className=cls||'';s.textContent=msg}
+$('wake_kbd_enabled').onchange=()=>kstatus('unsaved change','dirty');
+$('wake_save').onclick=async()=>{
+  kstatus('saving…','dirty');
+  try{
+    const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'wake_kbd_enabled='+($('wake_kbd_enabled').checked?1:0)});
+    if(r.ok)kstatus('Saved ✓ — adapter re-plugs briefly','ok');
+    else kstatus('save failed — not written to flash, try again','err');
+  }catch(e){kstatus('save failed','err')}
 };
 
 // ----- Network (device name) -----

@@ -16,10 +16,12 @@
 #include "usb.h"
 #include "wake_link.h"
 
-#ifdef WAKE_VIA_USB_KBD
 // The boot keyboard is HID instance 1 in BOTH descriptor variants (a dummy
 // placeholder HID holds instance 0 in minimal — see usb_descriptors.cpp), so
-// this is stable across variant swaps.
+// this is stable across variant swaps. Whether the keyboard is enumerated at
+// all is a RUNTIME choice now (web-UI toggle -> usb_wake_kbd_active()); the
+// F15 FSM below compiles always and simply never advances while the kbd is
+// off.
 #define WAKE_KBD_INSTANCE     (usb_kbd_hid_instance())
 #define WAKE_KEYCODE_F15      0x68
 // Post-resume timings tuned for "wake-and-resleep" Windows behavior: the host
@@ -31,7 +33,6 @@
 #define WAKE_KEY_UP_SETTLE_US 200000   // 200 ms between attempts (or before DONE)
 #define WAKE_REQUEST_TIMEOUT_US 5000000
 #define WAKE_KEY_ATTEMPTS     2
-#endif // WAKE_VIA_USB_KBD
 
 #ifdef WAKE_DEBUG
 #  define WAKE_DBG(fmt, ...) printf("[wake] " fmt "\n", ##__VA_ARGS__)
@@ -71,12 +72,10 @@ static uint8_t prev_b7 = 0x08;
 static uint8_t prev_b8 = 0x00;
 static uint8_t prev_b9 = 0x00;
 
-#ifdef WAKE_VIA_USB_KBD
 static void enter_state(wake_state_t s) {
     state = s;
     state_entered_us = time_us_64();
 }
-#endif
 
 // Wake-on-LAN companion send (ENABLE_WIFI_WOL). Weak no-op default; the WiFi
 // transport provides the strong override (wifi_net.cpp). wake.cpp owns the
@@ -152,11 +151,12 @@ static void request_host_wake(const char *reason) {
         ok = true;
     }
 
-#ifdef WAKE_VIA_USB_KBD
-    // Keyboard build only: advance the FSM to drive the F15 keystroke that wakes
-    // the host from S3 over USB. The WiFi build has no keyboard (WOL is the sole
-    // S3/S4/S5 wake); it just needed the bus resume above.
-    if (ok) {
+    // Keyboard enumerated (runtime toggle): advance the FSM to drive the F15
+    // keystroke that wakes the host from S3 over USB. With the kbd off (pure
+    // DualSense face) WOL is the sole S3/S4/S5 wake and the bus resume above
+    // is all that's needed -- the FSM must NOT arm, or its hid_n_ready waits
+    // would poll an instance that is not in the enumerated descriptor.
+    if (ok && usb_wake_kbd_active()) {
         critical_section_enter_blocking(&wake_cs);
         state = WAKE_REQUESTED;
         state_entered_us = time_us_64();
@@ -164,7 +164,7 @@ static void request_host_wake(const char *reason) {
         WAKE_DBG("%s -> REQUESTED, tud_remote_wakeup()=1", reason);
     }
 #ifdef WAKE_DEBUG
-    else {
+    if (!ok) {
         static uint64_t last_log = 0;
         const uint64_t now = time_us_64();
         if (now - last_log > 5000000) {
@@ -173,9 +173,6 @@ static void request_host_wake(const char *reason) {
         }
     }
 #endif
-#else
-    (void)ok;
-#endif // WAKE_VIA_USB_KBD
 }
 
 // Resume the USB bus WITHOUT advancing the wake-FSM keystroke sequence.
@@ -385,10 +382,13 @@ void wake_task(void) {
                  (unsigned long long)(POWER_OFF_DEBOUNCE_US / 1000));
     }
 
-#ifdef WAKE_VIA_USB_KBD
     // The keyboard wake FSM (drive the F15 keystroke after a USB remote-wakeup).
-    // Absent in the WiFi-WOL build: WOL is the sole wake, fired directly in
-    // request_host_wake(), so there is no keystroke sequence to pump here.
+    // Runtime-gated: with the wake keyboard disabled (default, pure-DualSense
+    // face) WOL is the sole wake, fired directly in request_host_wake(), and
+    // there is no keystroke sequence to pump. The FSM can't be mid-flight when
+    // the toggle flips: every kbd change goes through the variant-swap bounce,
+    // which resets the FSM via wake_reset_for_variant_swap().
+    if (!usb_wake_kbd_active()) return;
     critical_section_enter_blocking(&wake_cs);
     const wake_state_t s = state;
     const uint64_t entered = state_entered_us;
@@ -492,7 +492,6 @@ void wake_task(void) {
             return;
         }
     }
-#endif // WAKE_VIA_USB_KBD
 }
 
 #endif // ENABLE_WAKE_HID

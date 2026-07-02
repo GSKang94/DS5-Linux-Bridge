@@ -97,6 +97,13 @@ struct __attribute__((packed)) Config_body {
     uint8_t wifi_provisioned;            // bool: 0 = onboard via AP, 1 = STA creds set
     char    wifi_ssid[CONFIG_WIFI_SSID_LEN];
     char    wifi_psk[CONFIG_WIFI_PSK_LEN];
+    // USB wake keyboard (runtime web-UI toggle, replaces the old
+    // WAKE_VIA_USB_KBD compile option). 1 = enumerate a boot keyboard alongside
+    // the gamepad/dummy HID so an F15 keystroke can wake the host from S3;
+    // 0 (default) = pure-DualSense USB face (anticheat-safe). Applied live via
+    // a descriptor-variant bounce (usb_request_wake_kbd). Only meaningful in
+    // ENABLE_WAKE_HID builds; stored in every build (append-only layout rule).
+    uint8_t wake_kbd_enabled;            // bool
 };
 
 struct __attribute__((packed)) Config {

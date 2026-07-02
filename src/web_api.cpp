@@ -22,6 +22,7 @@
 
 #include "bt.h"
 #include "config.h"
+#include "usb.h" // usb_request_wake_kbd(): live-apply the wake-kbd toggle
 #include "web_api.h"
 #include "web_page.h"
 #ifdef ENABLE_WIFI_WOL
@@ -152,6 +153,15 @@ static int json_config(char *out, size_t cap) {
                     // hostname is sanitized to [a-z0-9-] in config_valid(), so it
                     // never needs JSON string escaping here.
                     "\"hostname\":\"%s\","
+                    "\"wake_kbd_enabled\":%u,"
+                    // Whether this firmware can enumerate the wake keyboard at
+                    // all (needs the dynamic-descriptor machinery). The page
+                    // hides the Wake section when false.
+#ifdef ENABLE_WAKE_HID
+                    "\"wake_kbd_capable\":true,"
+#else
+                    "\"wake_kbd_capable\":false,"
+#endif
                     // The web UI only exists on the WiFi transport now, so a
                     // served page always has WOL + WiFi controls available.
                     "\"wol_capable\":true,"
@@ -164,7 +174,8 @@ static int json_config(char *out, size_t cap) {
                     c.audio_buffer_length,
                     c.controller_mode,
                     wol_hex,
-                    c.hostname);
+                    c.hostname,
+                    c.wake_kbd_enabled);
 }
 
 //--------------------------------------------------------------------+
@@ -465,6 +476,9 @@ static void apply_post(char *body) {
         watchdog_update();
         last_save_ok = config_factory_reset();
         printf("[WEB] factory reset via web UI: %s\n", last_save_ok ? "OK" : "FAILED");
+        // Defaults zero the wake-keyboard toggle; drop the kbd from the
+        // enumeration too (no-op if it was already off).
+        usb_request_wake_kbd(get_config().wake_kbd_enabled != 0);
         return;
     }
 
@@ -493,6 +507,8 @@ static void apply_post(char *body) {
             // all-zero MAC is the canonical "unset" and is allowed (clears it).
             uint8_t mac[6];
             if (hex_to_addr(eq, mac)) memcpy(c.wol_target_mac, mac, 6);
+        } else if (strcmp(tok, "wake_kbd_enabled") == 0) {
+            c.wake_kbd_enabled = val ? 1 : 0;
         } else if (strcmp(tok, "hostname") == 0) {
             // mDNS / netif hostname. url_decode then copy raw; set_config() ->
             // config_valid() -> sanitize_hostname() folds case and strips any
@@ -513,6 +529,12 @@ static void apply_post(char *body) {
     // tell the user instead of falsely reporting success.
     last_save_ok = config_save();
     printf("[WEB] config save via web UI: %s\n", last_save_ok ? "OK" : "FAILED");
+
+    // Live-apply the wake-keyboard toggle: request the descriptor bounce with
+    // the validated in-RAM value (mirrors how the other settings apply from
+    // RAM even if the flash save failed). A no-op when the enumerated state
+    // already matches -- i.e. for every POST that didn't change the toggle.
+    usb_request_wake_kbd(get_config().wake_kbd_enabled != 0);
 }
 
 static void apply_bonds_post(char *body) {

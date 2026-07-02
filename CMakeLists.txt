@@ -65,7 +65,8 @@ message(STATUS "DS5-Linux-Bridge build target -- WAVESHARE_RP2350B_PLUS_W_BUILD=
 # Config web UI + Wake-on-LAN over the onboard CYW43 radio in STA mode, joining
 # the home WLAN by DHCP (onboarded via a captive portal on first boot). This is
 # the ONLY config transport -- the old USB CDC-NCM web transport was removed so
-# the dongle's USB face can be a pure DualSense (see WAKE_VIA_USB_KBD below).
+# the dongle's USB face can be a pure DualSense (the optional USB wake keyboard
+# is a runtime web-UI toggle now, off by default -- see ENABLE_WAKE_HID below).
 # WOL wakes a PC in S4/S5 (when USB remote-wake is unsupported) by broadcasting
 # a magic packet to its NIC. Needs NO extra hardware -- the radio is the same
 # one BTstack already drives (the WiFi firmware blob is ALREADY in the flash
@@ -305,21 +306,18 @@ if(ENABLE_WAKE_HID)
     # the BT-event wake triggers, the DualSense power-off-on-suspend debounce).
     # The wake ACTIONS layer on top of it:
     #   - WOL over WiFi (ENABLE_WIFI_WOL above) -- covers S4/S5, no USB footprint.
-    #   - USB boot keyboard (WAKE_VIA_USB_KBD) -- an F15 keystroke + USB
-    #     remote-wakeup, covers S3 on boards without WOL. Adds a keyboard
-    #     interface to the DualSense's own VID/PID, which some anticheats treat
-    #     as suspicious -- hence OFF by default: the default USB face is a PURE
-    #     DualSense (audio + gamepad, nothing else).
+    #   - USB boot keyboard -- an F15 keystroke + USB remote-wakeup, covers S3
+    #     on boards without WOL. A RUNTIME web-UI toggle now (Wake section ->
+    #     Config_body.wake_kbd_enabled), not a compile option: default OFF, so
+    #     the default USB face is a PURE DualSense (audio + gamepad, nothing
+    #     else -- the extra keyboard interface on Sony's VID/PID is what some
+    #     anticheats treat as suspicious).
     #   - Companion-Pico link (ENABLE_WAKE_LINK) -- scaffolding for a second,
     #     separate Pico that enumerates as a plain boot keyboard on its own USB
     #     port/VID:PID and types the wake keystroke when this dongle signals it
     #     over a GPIO line. Keeps this dongle's enumeration pure while still
     #     having USB-HID wake. The companion firmware is future work; this side
     #     only emits the signal (see src/wake_link.h).
-    option(WAKE_VIA_USB_KBD "Enumerate a USB boot keyboard for host wake (breaks pure-DualSense enumeration)" OFF)
-    if(WAKE_VIA_USB_KBD)
-        target_compile_definitions(ds5-bridge PRIVATE WAKE_VIA_USB_KBD)
-    endif()
     option(ENABLE_WAKE_LINK "Signal a companion wake-keyboard Pico over GPIO on host-wake (scaffolding)" OFF)
     if(ENABLE_WAKE_LINK)
         target_compile_definitions(ds5-bridge PRIVATE ENABLE_WAKE_LINK)

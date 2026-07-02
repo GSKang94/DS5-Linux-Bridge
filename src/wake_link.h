@@ -9,8 +9,8 @@
 // host should wake (controller connected / PS button while the host is
 // suspended -- the same chokepoint that fires WOL), it signals the companion
 // over a GPIO line; the companion types the F15 wake keystroke + issues USB
-// remote-wakeup, exactly what the on-board keyboard (WAKE_VIA_USB_KBD) does
-// today.
+// remote-wakeup, exactly what the on-board keyboard (the web-UI "USB wake
+// keyboard" toggle) does today.
 //
 // WIRE PROTOCOL (v0): one line + common ground.
 //   - This dongle: WAKE_LINK_GPIO (default GP2), output, idle LOW.

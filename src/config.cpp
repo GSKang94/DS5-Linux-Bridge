@@ -83,6 +83,7 @@ static_assert(offsetof(Config_body, hostname) == 119);
 static_assert(offsetof(Config_body, wifi_provisioned) == 130);
 static_assert(offsetof(Config_body, wifi_ssid) == 131);
 static_assert(offsetof(Config_body, wifi_psk) == 164);
+static_assert(offsetof(Config_body, wake_kbd_enabled) == 228);
 
 // CRC over the first `len` bytes of the body. `len` is the stored size, so an
 // older/shorter blob still validates against the bytes it actually wrote.
@@ -182,6 +183,8 @@ void config_valid() {
   body->wifi_psk[CONFIG_WIFI_PSK_LEN - 1] = '\0';
   if (body->wifi_provisioned > 1) body->wifi_provisioned = 0;
   if (body->wifi_ssid[0] == '\0') body->wifi_provisioned = 0;
+  // USB wake keyboard toggle: boolean; default 0 (pure-DualSense USB face).
+  if (body->wake_kbd_enabled > 1) body->wake_kbd_enabled = 0;
   // wol_use_static_ip / wol_static_ip / wol_static_netmask are reserved
   // (W5500-era, unread by any current transport -- see config.h). Just keep the
   // flag boolean-sane in case a blob written by that firmware carried junk.

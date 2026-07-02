@@ -9,32 +9,40 @@ extern uint8_t mute[2]; // 0: SPEAKER(0x02) 1: MIC(0x05)
 extern float volume[2]; // 0: SPEAKER(0x02) 1: MIC(0x05)
 
 #ifdef ENABLE_WAKE_HID
-// Dynamic config-descriptor variant. Switched when the DualSense connects
-// or disconnects: minimal (kbd only — wake-from-S3 still works, no audio
-// or gamepad ghost in OS) vs full (audio + gamepad + kbd, current
-// behavior). Variant swap is a tud_disconnect()/tud_connect() bounce
-// orchestrated by usb_apply_variant_swap().
-void usb_set_descriptor_variant_full(void);
-void usb_set_descriptor_variant_minimal(void);
+// Dynamic config-descriptor selection. The presented descriptor is one atomic
+// target: {variant, kbd}. The variant flips when the DualSense connects or
+// disconnects: minimal (inert dummy HID — wake still works, no audio or
+// gamepad ghost in OS) vs full (audio + gamepad). The kbd flag — the runtime
+// web-UI wake-keyboard toggle (Config_body.wake_kbd_enabled) — appends a boot
+// keyboard to WHICHEVER variant is up (both or neither, never just one).
 bool usb_descriptor_variant_is_full(void);
 
-#ifdef WAKE_VIA_USB_KBD
 // TinyUSB HID instance index of the boot keyboard. STABLE at 1 in both
 // variants: in full the gamepad is instance 0 (parsed first); in minimal a
 // dummy placeholder HID holds instance 0 so the kbd stays instance 1. Kept as a
-// function so callers stay decoupled from the constant. Absent in the WiFi-WOL
-// build (no keyboard).
+// function so callers stay decoupled from the constant.
 uint8_t usb_kbd_hid_instance(void);
-#endif
 
-// Request a variant swap: orchestrator notes the desired variant, then
+// True while the ENUMERATED configuration carries the boot keyboard (latched
+// at swap time). Gate for all kbd runtime behavior — the F15 wake FSM and the
+// HID callback routing for instance 1 — NOT the live config value, which can
+// differ while a swap is pending.
+bool usb_wake_kbd_active(void);
+
+// Request a descriptor change: orchestrator notes the desired target, then
 // usb_variant_task() drives a tud_disconnect()/settle/swap/tud_connect()
 // bounce on the main loop. Safe to call from any context. No-op if the
-// desired variant is already active. The task internally refuses to act
+// desired target is already active. The task internally refuses to act
 // while the host is suspended — preserves wake-from-S3/S5 by avoiding
-// USB re-enumeration mid-suspend.
+// USB re-enumeration mid-suspend (a pending change applies after resume).
 void usb_request_variant_full(void);
 void usb_request_variant_minimal(void);
+void usb_request_wake_kbd(bool enabled);
+
+// Seed desired AND active kbd state from the persisted config. Call once at
+// boot, after config_load() and before the first tud_connect(), so the first
+// enumeration already matches the saved toggle (no boot-time bounce).
+void usb_descriptor_init_from_config(void);
 
 // Drive variant-swap state machine. Call from main loop alongside
 // wake_task() / btstack hci_run().
@@ -61,8 +69,13 @@ bool usb_host_suspended(void);
 // Without the wake subsystem there is no authoritative suspend tracking, so
 // report "not suspended" -- the WiFi PS-button WOL trigger then stays inert
 // (web-button WOL is unaffected). Keeps the WiFi build linkable with
-// -DENABLE_WAKE_HID=OFF.
+// -DENABLE_WAKE_HID=OFF. Same for the wake-keyboard toggle: no dynamic
+// descriptors means no keyboard, so the request is a no-op and "active" is
+// always false (the web UI hides the toggle via wake_kbd_capable=false).
 static inline bool usb_host_suspended(void) { return false; }
+static inline bool usb_wake_kbd_active(void) { return false; }
+static inline void usb_request_wake_kbd(bool) {}
+static inline void usb_descriptor_init_from_config(void) {}
 #endif
 
 #endif //DS5_BRIDGE_USB_H

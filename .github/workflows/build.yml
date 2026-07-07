@@ -106,6 +106,19 @@ jobs:
           cmake --build build/debug --target ds5-bridge
           cp build/debug/ds5-bridge.uf2 artifacts/ds5-bridge-debug.uf2
 
+      - name: Build Waveshare RP2350B-Plus-W firmware
+        # USB-C / 16MB-flash Pico 2 W alternative. Different RM2 GPIO wiring +
+        # forced boot2 XIP setup for its Puya flash (see CMakeLists.txt). This is
+        # a shipped release artifact (see release.yml), so guard it on every push.
+        run: |
+          cmake -S . -B build/waveshare -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPICO_SDK_PATH="$PICO_SDK_PATH" \
+            -DWAVESHARE_RP2350B_PLUS_W_BUILD=ON \
+            -DVERSION="$FIRMWARE_VERSION"
+          cmake --build build/waveshare --target ds5-bridge
+          cp build/waveshare/ds5-bridge.uf2 artifacts/ds5-bridge-waveshare.uf2
+
       - name: Build no-batt-led firmware (compile check only)
         run: |
           cmake -S . -B build/no-batt-led -G Ninja \
@@ -114,6 +127,31 @@ jobs:
             -DENABLE_BATT_LED=OFF \
             -DVERSION="$FIRMWARE_VERSION"
           cmake --build build/no-batt-led --target ds5-bridge
+
+      - name: Build no-wake firmware (compile check only)
+        # ENABLE_WAKE_HID=ON is the default, so building it OFF is the useful
+        # guard: it excludes wake.cpp + the dynamic MINIMAL/FULL descriptor and
+        # host-suspend machinery, so a cleanup can silently break that path
+        # unless something compiles it.
+        run: |
+          cmake -S . -B build/no-wake -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPICO_SDK_PATH="$PICO_SDK_PATH" \
+            -DENABLE_WAKE_HID=OFF \
+            -DVERSION="$FIRMWARE_VERSION"
+          cmake --build build/no-wake --target ds5-bridge
+
+      - name: Build no-wifi firmware (compile check only)
+        # ENABLE_WIFI_WOL=OFF excludes the largest #ifdef region: wifi_net.cpp,
+        # web_api.cpp, lwIP, the portal and mDNS. Nothing ships this, but it must
+        # compile so cleanups to the WiFi path can't rot the excluded branch.
+        run: |
+          cmake -S . -B build/no-wifi -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPICO_SDK_PATH="$PICO_SDK_PATH" \
+            -DENABLE_WIFI_WOL=OFF \
+            -DVERSION="$FIRMWARE_VERSION"
+          cmake --build build/no-wifi --target ds5-bridge
 
       - name: Build Pico W firmware
         run: |
@@ -124,16 +162,6 @@ jobs:
             -DVERSION="$FIRMWARE_VERSION"
           cmake --build build/picow --target ds5-bridge
           cp build/picow/ds5-bridge.uf2 artifacts/ds5-bridge-picow.uf2
-
-      - name: Build wake firmware
-        run: |
-          cmake -S . -B build/wake -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DPICO_SDK_PATH="$PICO_SDK_PATH" \
-            -DENABLE_WAKE_HID=ON \
-            -DVERSION="$FIRMWARE_VERSION"
-          cmake --build build/wake --target ds5-bridge
-          cp build/wake/ds5-bridge.uf2 artifacts/ds5-bridge-wake.uf2
 
       - name: Upload standard UF2 artifact
         uses: actions/upload-artifact@v7
@@ -149,10 +177,10 @@ jobs:
           archive: false
           if-no-files-found: error
 
-      - name: Upload wake UF2 artifact
+      - name: Upload Waveshare UF2 artifact
         uses: actions/upload-artifact@v7
         with:
-          path: artifacts/ds5-bridge-wake.uf2
+          path: artifacts/ds5-bridge-waveshare.uf2
           archive: false
           if-no-files-found: error
 

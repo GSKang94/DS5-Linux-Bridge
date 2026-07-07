@@ -11,6 +11,7 @@
 #include <vector>
 #include "btstack_event.h"
 #include "btstack_tlv.h" // persistent blacklist storage (forget-bond enforcement)
+#include "btstack_util.h" // btstack_is_null(): NULL-link-key guard (CVE-2020-26555)
 #include "gap.h"
 #include "hci_cmd.h"
 #include "l2cap.h"
@@ -435,10 +436,12 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
                 // connectable but don't inquire (avoids grabbing any nearby
                 // DualSense in pairing mode). Use POST /api/bonds action=pair to
                 // deliberately add another controller.
-                if (bt_has_stored_link_key()) {
-                    printf("[BT] Stack ready, stored controller -> page scan, no inquiry\n");
+                uint8_t bonds[NVM_NUM_LINK_KEYS][BT_ADDR_LEN];
+                const int n_bonds = bt_bond_list(bonds, NVM_NUM_LINK_KEYS);
+                if (n_bonds > 0) {
+                    printf("[BT] Stack ready, %d bond(s) in TLV -> page scan, no inquiry\n", n_bonds);
                 } else {
-                    printf("[BT] Stack ready, no stored controller -> start inquiry\n");
+                    printf("[BT] Stack ready, 0 bonds in TLV -> start inquiry\n");
                     gap_inquiry_start(30);
                 }
             }
@@ -556,6 +559,38 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
                 printf("[HCI] Link key request from %s, no key, force re-pair\n", bd_addr_to_str(addr));
                 hci_send_cmd(&hci_link_key_request_negative_reply, addr);
             }
+            break;
+        }
+
+        case HCI_EVENT_LINK_KEY_NOTIFICATION: {
+            // Persist the freshly-created SSP link key OURSELVES. On a genuine
+            // fresh pair BTstack's internal handler (hci.c) does not persist it
+            // (HW-confirmed: AUTH ok with 0 bonds right after SSP; gates pass on
+            // paper -- authreq=0x04 General bonding -- so the internal reason
+            // stays unpinned), leaving the paired list empty and re-pairing
+            // never sticking (issue #2). BTstack forwards every HCI event to
+            // registered handlers after its own processing, so storing here
+            // simply bypasses that gate. No flash_safe_execute() wrapper: the
+            // TLV bank write is already parked via get_flash_safety_helper()
+            // (flash_safety.cpp); wrapping would nest the lockout and deadlock.
+            // Packet layout: [2..7]=addr, [8..23]=16-byte key, [24]=type.
+            if (size < 25) break; // runt frame, don't read past the buffer
+            bd_addr_t addr;
+            hci_event_link_key_request_get_bd_addr(packet, addr); // addr at same offset
+            if (btstack_is_null(&packet[8], 16)) { // CVE-2020-26555: ignore NULL key
+                printf("[HCI] Link key notification: NULL key, ignored\n");
+                break;
+            }
+            const link_key_type_t type = (link_key_type_t) packet[24];
+            gap_store_link_key_for_bd_addr(addr, &packet[8], type);
+            // Read back through the TLV iterator so UART shows whether the
+            // store actually landed in flash -- issue #2's failure mode was
+            // this exact readback returning 0 right after the store.
+            uint8_t bonds[NVM_NUM_LINK_KEYS][BT_ADDR_LEN];
+            const int n_bonds = bt_bond_list(bonds, NVM_NUM_LINK_KEYS);
+            printf("[HCI] Link key notification from %s type=%u -> stored, TLV bond count now %d%s\n",
+                   bd_addr_to_str(addr), (unsigned int) type, n_bonds,
+                   n_bonds > 0 ? "" : " (STORE DID NOT PERSIST!)");
             break;
         }
 

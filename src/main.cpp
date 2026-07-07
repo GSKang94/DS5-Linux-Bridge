@@ -330,6 +330,12 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id,
   (void)buffer;
   (void)bufsize;
 
+  // A zero-length interrupt-OUT transfer (host quirk / fuzzing) would read
+  // buffer[0] OOB below, and state_update(buffer + 1, bufsize - 1) would
+  // underflow bufsize to 65535 (which is > 47, so state_update's own length
+  // check would NOT reject it). Guard both here.
+  if (bufsize == 0) return;
+
   // INTERRUPT OUT
   if (report_id == 0) {
     switch (buffer[0]) {

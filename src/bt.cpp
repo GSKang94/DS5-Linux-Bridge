@@ -548,11 +548,6 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             link_key_t link_key;
             link_key_type_t link_key_type;
             bool link = gap_get_link_key_for_bd_addr(addr, link_key, &link_key_type);
-            printf("[HCI] Link key: ");
-            for (int i = 0; i < sizeof(link_key_t); i++) {
-                printf("%02X", link_key[i]);
-            }
-            printf("\n");
             if (link) {
                 printf("[HCI] Link key request from %s, reply stored key type=%u\n", bd_addr_to_str(addr),
                        (unsigned int) link_key_type);
@@ -715,6 +710,11 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
             // printf("[L2CAP] HID Interrupt data len=%u\n", size);
             // printf_hexdump(packet, size);
             if (bt_data_callback) bt_data_callback(INTERRUPT, packet, size);
+
+            // The inactivity watchdog below reads packet[2..12]; a runt frame
+            // from a misbehaving peer would read out of bounds. The callback
+            // above already handled short frames, so just bail here.
+            if (size < 13) return;
 
             // 静默检测
             // Skip the inactivity watchdog while the controller mic is streaming

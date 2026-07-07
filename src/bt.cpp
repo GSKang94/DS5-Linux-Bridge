@@ -103,13 +103,14 @@ void bt_register_data_callback(bt_data_callback_t callback) {
     bt_data_callback = callback;
 }
 
-static void bt_apply_low_latency_link_policy(hci_con_handle_t handle) {
-    if (handle == HCI_CON_HANDLE_INVALID) {
-        return;
-    }
-    hci_send_cmd(&hci_write_link_policy_settings, handle,
-                 LM_LINK_POLICY_DISABLE_ALL_LM_MODES);
-}
+// NOTE: no per-connection hci_write_link_policy_settings here. The boot-time
+// gap_set_default_link_policy_settings(DISABLE_ALL) already applies to every
+// new ACL link, and a raw hci_send_cmd() occupies BTstack's single outstanding
+// command slot -- the previous per-connection send at CONNECTION_COMPLETE
+// silently swallowed the hci_authentication_requested that followed it, which
+// broke every from-scratch pairing (auth never ran; the connect watchdog then
+// tore the link down in a loop). Reconnects masked it: a bonded pad initiates
+// auth itself.
 
 bool bt_disconnect() {
     if (acl_handle == HCI_CON_HANDLE_INVALID) {
@@ -535,7 +536,9 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
                 acl_handle = handle;
                 bd_addr_copy(current_device_addr, conn_addr);
                 printf("[HCI] ACL connected handle=0x%04X\n", handle);
-                bt_apply_low_latency_link_policy(handle);
+                // Must be the ONLY command sent from this event: BTstack holds
+                // one outstanding HCI command, and a fresh pair stalls forever
+                // if this gets dropped (the pad waits for us to authenticate).
                 printf("[HCI] Request authentication on handle=0x%04X\n", handle);
                 hci_send_cmd(&hci_authentication_requested, handle);
             } else {
@@ -652,7 +655,9 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             const uint8_t mode = hci_event_mode_change_get_mode(packet);
             if (handle == acl_handle) {
                 if (status == ERROR_CODE_SUCCESS && mode != 0) {
-                    bt_apply_low_latency_link_policy(handle);
+                    // gap_sniff_mode_exit() goes through BTstack's queued GAP
+                    // state machine (safe vs. the single command slot); the
+                    // default DISABLE_ALL link policy already forbids re-entry.
                     gap_sniff_mode_exit(handle);
                 }
             }

@@ -10,6 +10,8 @@
 #include "pico/cyw43_arch.h"
 #include "pico/time.h"
 
+// Latest gamepad input report, defined in main.cpp; length must match
+// main.cpp's HID_INPUT_REPORT_LEN (63).
 extern uint8_t interrupt_in_data[63];
 
 namespace {

@@ -56,7 +56,7 @@ struct __attribute__((packed)) BondName {
 
 struct __attribute__((packed)) Config_body {
     uint8_t config_version; // Config Version
-    float speaker_volume; // [-100,0]
+    float speaker_volume; // reserved (WebHID-era speaker volume; unread -- UAC volume is authoritative). [-100,0] clamp kept to sanitize old blobs.
     uint8_t inactive_time; // [5,60] min
     uint8_t disable_inactive_disconnect; // bool: 0 disable,1 enable
     uint8_t disable_pico_led; // bool

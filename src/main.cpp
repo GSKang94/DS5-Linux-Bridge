@@ -166,9 +166,7 @@ void __not_in_flash_func(state_push_to_bt)() {
   uint8_t outputData[78]{};
   outputData[0] = 0x31;
   outputData[1] = reportSeqCounter << 4;
-  if (++reportSeqCounter == 256) {
-    reportSeqCounter = 0;
-  }
+  reportSeqCounter = (reportSeqCounter + 1) & 0x0F;
   outputData[2] = 0x10;
   state_get(outputData + 3, sizeof(SetStateData));
   bt_write(outputData, sizeof(outputData));
@@ -350,11 +348,8 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id,
       uint8_t outputData[78]{};
       outputData[0] = 0x31;
       outputData[1] = reportSeqCounter << 4;
-      if (++reportSeqCounter == 256) {
-        reportSeqCounter = 0;
-      }
+      reportSeqCounter = (reportSeqCounter + 1) & 0x0F;
       outputData[2] = 0x10;
-      // memcpy(outputData + 3, buffer + 1, bufsize - 1);
       state_get(outputData + 3, sizeof(SetStateData));
       bt_write(outputData, sizeof(outputData));
       break;

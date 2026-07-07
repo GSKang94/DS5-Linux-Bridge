@@ -9,11 +9,7 @@
 #include "utils.h"
 
 namespace {
-    constexpr size_t kAudioControlOffset = offsetof(SetStateData, MuteLightMode) - sizeof(uint8_t);
     constexpr size_t kMuteControlOffset = offsetof(SetStateData, RightTriggerFFB) - sizeof(uint8_t);
-    constexpr size_t kMotorPowerLevelOffset = offsetof(SetStateData, HostTimestamp) + sizeof(uint32_t);
-    constexpr size_t kAudioControl2Offset = kMotorPowerLevelOffset + sizeof(uint8_t);
-    constexpr size_t kHapticLowPassFilterOffset = offsetof(SetStateData, LightFadeAnimation) - 2 * sizeof(uint8_t);
     constexpr size_t kPlayerIndicatorsOffset = offsetof(SetStateData, LedRed) - sizeof(uint8_t);
 }
 
@@ -113,26 +109,9 @@ void state_update(const uint8_t *data, const uint8_t size) {
         2
     );
 
-    /*copy_if_allowed(
-        update.AllowHeadphoneVolume,
-        offsetof(SetStateData, VolumeHeadphones),
-        sizeof(update.VolumeHeadphones)
-    );*/
-    /*copy_if_allowed(
-        update.AllowSpeakerVolume,
-        offsetof(SetStateData, VolumeSpeaker),
-        sizeof(update.VolumeSpeaker)
-    );*/
-    /*copy_if_allowed(
-        update.AllowMicVolume,
-        offsetof(SetStateData, VolumeMic),
-        sizeof(update.VolumeMic)
-    );*/
-    /*copy_if_allowed(
-        update.AllowAudioControl,
-        kAudioControlOffset,
-        sizeof(uint8_t)
-    );*/
+    // Deliberately NOT forwarded from host: VolumeHeadphones/VolumeSpeaker/VolumeMic,
+    // AudioControl, MotorPowerLevel, AudioControl2, HapticLowPassFilter -- the
+    // firmware owns audio routing; forwarding these caused regressions.
 
     if ((update.AllowMuteLight && update.MuteLightMode == MuteLight::On) ||
         (update.AllowAudioMute && update.MicMute)) {
@@ -170,21 +149,8 @@ void state_update(const uint8_t *data, const uint8_t size) {
         sizeof(update.LeftTriggerFFB)
     );
 
-    /*copy_if_allowed(
-        update.AllowMotorPowerLevel,
-        kMotorPowerLevelOffset,
-        sizeof(uint8_t)
-    );*/
-    /*copy_if_allowed(
-        update.AllowAudioControl2,
-        kAudioControl2Offset,
-        sizeof(uint8_t)
-    );*/
-    /*copy_if_allowed(
-        update.AllowHapticLowPassFilter,
-        kHapticLowPassFilterOffset,
-        sizeof(uint8_t)
-    );*/
+    // MotorPowerLevel / AudioControl2 / HapticLowPassFilter also deliberately
+    // NOT forwarded (see note above).
 
     copy_if_allowed(
         update.AllowColorLightFadeAnimation,

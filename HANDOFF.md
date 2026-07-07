@@ -17,6 +17,10 @@ Commits on top of `ds5-linux-bridge`:
 | `a62a5d2` | Overclock RP2350 to 200 MHz (no vreg bump) + guard double interrupt_loop |
 | `a4251ae` | Emit HID report before audio_loop in main loop |
 | `e989b56` | Relocate app BT hot-path glue to RAM (`__not_in_flash_func`) |
+| `ba97cd8` | Make USB wake keyboard a runtime web-UI toggle (`WAKE_VIA_USB_KBD` CMake option retired → `Config_body.wake_kbd_enabled`) |
+
+> For the authoritative per-commit history from here on, see `git log` /
+> `CODE_REVIEW.md` — this table is not kept exhaustively up to date.
 
 ### HW-VERIFIED on real hardware (user, 2026-07-03)
 

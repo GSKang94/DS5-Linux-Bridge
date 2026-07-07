@@ -10,10 +10,8 @@
 #include <unordered_map>
 #include "pico/time.h"
 
-// Provided by bt.cpp
+// Provided by bt.cpp (bt_control_cid / bt_control_send are declared in bt.h).
 extern std::unordered_map<uint8_t, std::vector<uint8_t> > feature_data;
-uint16_t bt_control_cid();          // current HID control channel id (0 if none)
-void bt_control_send(const uint8_t *data, uint16_t len);
 
 // Unlock state: 0 = idle, 1 = waiting for the controller to process SET 0x80.
 static int unlock_phase = 0;

@@ -7,8 +7,8 @@
 #define LWIP_SOCKET                 0
 #define LWIP_NETCONN                0
 
-// Footprint is kept DELIBERATELY SMALL. This stack serves one ~5 KB config page
-// over a single short-lived HTTP connection at USB speed; it is NEVER a
+// Footprint is kept DELIBERATELY SMALL. This stack serves one ~18.5 KB config
+// page over a single short-lived HTTP connection at USB speed; it is NEVER a
 // throughput path. lwIP is always up here (no time-share), so every byte of its
 // static footprint permanently shrinks the heap shared with BTstack (~40 KB at
 // boot) and the Opus codec runtime (~76 KB on controller-connect). The earlier

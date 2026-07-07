@@ -41,6 +41,10 @@ std::vector<uint8_t> get_feature_data(uint8_t reportId,uint16_t len);
 void init_feature();
 void set_feature_data(uint8_t reportId, uint8_t* data,uint16_t len);
 
+// Accessors used by the DSE profile module (dse.cpp). Defined in bt.cpp.
+uint16_t bt_control_cid();          // current HID control channel id (0 if none)
+void bt_control_send(const uint8_t *data, uint16_t len);
+
 // Tells the connected DualSense to power off (same as a long-press of the
 // PS button). No-op if no controller is connected. Used on host-suspend so
 // the controller doesn't sit awake until its idle timer fires.

@@ -835,7 +835,7 @@ uint8_t const desc_hid_report_ds[] = {
     // Report IDs 0xF6-0xF9 (vendor usages 0x37-0x3A) were the old WebHID config
     // command channel; removed (config is served over the WiFi web page now).
     0xC0, // End Collection
-    // 289 bytes
+    // 273 bytes
 };
 static_assert(sizeof(desc_hid_report_ds) == 0x0111);
 
@@ -1039,7 +1039,7 @@ uint8_t const desc_hid_report_dse[] = {
     // Report IDs 0xF6-0xF9 (vendor usages 0x37-0x3A) were the old WebHID config
     // command channel; removed (config is served over the WiFi web page now).
     0xC0, // End Collection
-    // 405 bytes
+    // 389 bytes
 };
 static_assert(sizeof(desc_hid_report_dse) == 0x0185);
 

@@ -354,7 +354,8 @@ bool bt_connected_addr(uint8_t *addr_out) {
 }
 
 // The latest gamepad input report; byte 52 carries the DualSense battery state
-// (same byte battery_led.cpp watches). Defined in main.cpp.
+// (same byte battery_led.cpp watches). Defined in main.cpp; length must match
+// main.cpp's HID_INPUT_REPORT_LEN (63).
 extern uint8_t interrupt_in_data[63];
 
 void bt_get_status(BtStatus *out) {

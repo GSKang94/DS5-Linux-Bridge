@@ -131,6 +131,7 @@ add_executable(ds5-bridge
         src/bt.cpp
         src/dse.cpp
         src/config.cpp
+        src/flash_safety.cpp
         src/state_mgr.cpp
         src/ram_mem.c
 )

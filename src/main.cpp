@@ -5,6 +5,7 @@
 #include "audio.h"
 #include "bsp/board_api.h"
 #include "bt.h"
+#include "flash_safety.h"
 #include "hardware/clocks.h"
 #include "hardware/vreg.h"
 #include "hardware/watchdog.h"
@@ -415,10 +416,16 @@ int main() {
   }
 #endif
 
+  // Bracket cyw43_arch_init() with TLV bank-header dumps: it runs BTstack's
+  // setup_tlv(), which formats the link-key bank on a unit that never had one
+  // (issue #2). "pre-init INVALID -> post-init valid" on UART proves the
+  // format landed; "INVALID" on both is the pre-fix failure signature.
+  flash_safety_log_btstack_bank("pre-init");
   if (cyw43_arch_init()) {
     printf("Failed to initialize CYW43\n");
     return 1;
   }
+  flash_safety_log_btstack_bank("post-init");
 
   // Load persisted config from flash BEFORE wifi_net_init(): it reads the
   // stored WiFi credentials (STA vs AP onboarding) and the mDNS hostname, so

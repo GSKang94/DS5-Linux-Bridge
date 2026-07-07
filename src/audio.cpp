@@ -14,6 +14,7 @@
 #include "pico/multicore.h"
 #include "pico/flash.h" // flash_safe_execute_core_init(): park core1 during config_save
 #include "pico/util/queue.h"
+#include "flash_safety.h"
 #include "config.h"
 #include "state_mgr.h"
 #include "usb.h"
@@ -218,7 +219,15 @@ void audio_init() {
     critical_section_init(&opus_cs);
     queue_init(&mic_fifo, sizeof(mic_element), 2);
     queue_init(&mic_decode_fifo, sizeof(mic_decode_element), 2);
+    // Tell the flash-safety helper core1 is about to exist, so a flash op can
+    // no longer assume single-core; then wait for core1's victim registration
+    // (first statement of core1_entry) so any flash op after audio_init() can
+    // always park it. Closes the launch->registration race window.
+    flash_safety_note_core1_launch();
     multicore_launch_core1_with_stack(core1_entry, audio_core1_stack, sizeof(audio_core1_stack));
+    while (!multicore_lockout_victim_is_initialized(1)) {
+        tight_loop_contents();
+    }
 #endif
 }
 

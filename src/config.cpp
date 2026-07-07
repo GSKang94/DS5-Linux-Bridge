@@ -295,11 +295,15 @@ bool config_save() {
   // core) is parked while the sector is erased/programmed. That REQUIRES core1
   // to have registered as a lockout victim (flash_safe_execute_core_init(),
   // called from core1_entry). In WiFi AP onboarding mode core1 is never
-  // launched (BT/audio are skipped), so flash_safe_execute() finds no victim
-  // and fails with PICO_ERROR_TIMEOUT (-4) -> credentials never persist and
-  // the device loops back to AP. When core1 isn't a registered victim there is
-  // no second core touching XIP, so the erase/program is safe to run DIRECTLY
-  // (interrupts off, as the flash op already does).
+  // launched (BT/audio are skipped); the SDK's default helper then found no
+  // victim and failed with PICO_ERROR_NOT_PERMITTED (-4) -> credentials never
+  // persisted and the device looped back to AP. When core1 isn't a registered
+  // victim there is no second core touching XIP, so the erase/program is safe
+  // to run DIRECTLY (interrupts off, as the flash op already does). NOTE: the
+  // app-wide helper override (flash_safety.cpp) now implements this same
+  // fallback inside flash_safe_execute() itself -- fixing BTstack's TLV bank
+  // format, issue #2 -- so this explicit branch is a redundant-but-harmless
+  // local shortcut kept for clarity.
   //
   // With core1 up, a parked-but-sleeping core1 (__wfe() in the idle audio loop)
   // can miss the lockout request and time out -- the erase/program never

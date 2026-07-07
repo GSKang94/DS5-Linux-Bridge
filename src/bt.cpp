@@ -63,11 +63,12 @@ static bool pairing_window = false;
 
 // Persistent blacklist of controllers the user forgot via the web UI. Survives
 // power-cycles via BTstack TLV flash. Without it, forgetting a controller that
-// is connected (or actively paging us to auto-reconnect) is futile: BTstack
-// re-accepts and re-bonds it instantly. We block it at CONNECTION_REQUEST /
-// CONNECTION_COMPLETE so PS-only auto-reconnect fails; the INQUIRY path (an
-// explicit PS+Share re-pair) is still allowed and removes the MAC from the
-// blacklist on successful pair.
+// is connected (or actively paging us to auto-reconnect) is futile: the
+// controller's side of the bond survives our key deletion, so it pages back in
+// and BTstack re-accepts + re-bonds it instantly. Enforcement is race-free via
+// bt_classic_connection_filter() (declines the incoming page before BTstack
+// auto-accepts); the INQUIRY path (an explicit PS+Share re-pair) is still
+// allowed and removes the MAC from the blacklist on successful pair.
 #define BT_BLACKLIST_TLV_TAG  ((uint32_t) 0x424C434B) // ASCII 'BLCK'
 static bd_addr_t bt_cleared_addrs[NVM_NUM_LINK_KEYS];
 static int bt_cleared_addrs_count = 0;
@@ -137,6 +138,43 @@ static bool bt_has_stored_link_key() {
     return has_key;
 }
 
+// Intent flag: "the dongle wants to be running inquiry (open to pair a new
+// controller)". Decouples our desire to inquire from BTstack's inquiry state
+// machine. CRITICAL: gap_inquiry_start() returns COMMAND_DISALLOWED unless
+// BTstack's inquiry_state is exactly IDLE (hci.c:9390), and gap_inquiry_stop()
+// does NOT reach IDLE synchronously -- it schedules an INQUIRY_CANCEL and only
+// lands IDLE when that completes. So the old "gap_inquiry_stop(); then
+// gap_inquiry_start();" pattern silently dropped the start whenever an inquiry
+// was already in flight (two restart triggers racing -- e.g. a filter-declined
+// connect plus the natural INQUIRY_COMPLETE -- left the dongle dormant after
+// forget-all; HW-observed). Instead we set intent, try to start from IDLE, and
+// re-arm from the INQUIRY_COMPLETE handler if the start couldn't land yet.
+static bool bt_inquiry_wanted = false;
+
+// Try to start inquiry now if BTstack will accept it; harmless no-op if it
+// won't (intent stays set and INQUIRY_COMPLETE re-arms). Never calls
+// gap_inquiry_stop() -- that's what created the race.
+static void bt_inquiry_try_start() {
+    if (!bt_inquiry_wanted) return;
+    const uint8_t rc = gap_inquiry_start(30);
+    if (rc != ERROR_CODE_SUCCESS) {
+        // COMMAND_DISALLOWED (0x0C): an inquiry/cancel is still in flight. The
+        // INQUIRY_COMPLETE that follows will re-arm us. Don't stop-then-start.
+        printf("[BT] Inquiry start deferred (rc=0x%02X, re-arm on complete)\n", rc);
+    }
+}
+
+// Begin wanting inquiry (open to pair). Idempotent.
+static void bt_inquiry_open() {
+    bt_inquiry_wanted = true;
+    bt_inquiry_try_start();
+}
+
+// Stop wanting inquiry (a controller bonded, or a targeted flow took over).
+static void bt_inquiry_close() {
+    bt_inquiry_wanted = false;
+}
+
 // Recovery/looping restart of inquiry. Gated on bond presence: with a controller
 // bonded we keep the radio connectable for page-scan reconnect but do NOT
 // re-open inquiry, so a transient failure can't silently reopen pairing.
@@ -148,10 +186,10 @@ static void bt_restart_inquiry() {
     gap_discoverable_control(1);
     if (bt_has_stored_link_key()) {
         printf("[BT] Stored controller -> page scan, skip inquiry restart\n");
+        bt_inquiry_close();
         return;
     }
-    gap_inquiry_stop();
-    gap_inquiry_start(30);
+    bt_inquiry_open();
 }
 
 // Open a fresh 30s inquiry to pair an additional controller, even when one is
@@ -177,8 +215,7 @@ void bt_start_pairing() {
     connect_attempt_started = 0;
     gap_connectable_control(1);
     gap_discoverable_control(1);
-    gap_inquiry_stop();
-    gap_inquiry_start(30);
+    bt_inquiry_open();
 }
 
 void bt_connection_watchdog_tick() {
@@ -250,6 +287,40 @@ static bool bt_blacklist_contains(bd_addr_t addr) {
         if (bd_addr_cmp(addr, bt_cleared_addrs[i]) == 0) return true;
     }
     return false;
+}
+
+// Race-free gate for incoming classic connections. Registered via
+// gap_register_classic_connection_filter() so BTstack evaluates it BEFORE it
+// auto-accepts the CONNECTION_REQUEST (hci.c: gap_classic_accept_callback runs
+// inside the stack's HCI processing, ahead of hci_run() sending
+// hci_accept_connection_request). Returning 0 makes BTstack itself decline the
+// request through its own state machine -- no raw hci_reject_connection_request
+// racing an accept the stack already queued, and no need to let the link come
+// up and disconnect it after the fact.
+//
+// Runs in the BTstack run-loop context: read-only, no flash, no blocking.
+// Address-only by design (BTstack does not pass Class of Device here); the COD
+// "is it a gamepad" check stays in the CONNECTION_REQUEST handler, which decides
+// accept-vs-ignore for addresses this filter has already allowed.
+static int bt_classic_connection_filter(bd_addr_t addr, hci_link_type_t link_type) {
+    (void) link_type;
+    // Forgotten controller trying to auto-reconnect (PS-only page). Its side of
+    // the bond survives our gap_delete_all_link_keys(), so without this it walks
+    // straight back in. An explicit PS+Share re-pair goes through the inquiry
+    // path (not this incoming path) and clears the blacklist entry on success.
+    if (bt_blacklist_contains(addr)) {
+        printf("[HCI] Filter: decline %s (forgotten; re-pair via PS+Share)\n", bd_addr_to_str(addr));
+        return 0;
+    }
+    // While the user is pairing a new controller, decline every incoming
+    // reconnect so the just-dropped controller can't page back in and reclaim
+    // the slot before the new one pairs. Its bond is intact; it reconnects once
+    // the window closes.
+    if (pairing_window) {
+        printf("[HCI] Filter: decline %s (pairing window open)\n", bd_addr_to_str(addr));
+        return 0;
+    }
+    return 1;
 }
 
 // Add an address to the blacklist (idempotent). Persists immediately -- called
@@ -344,9 +415,25 @@ void bt_bond_forget_all() {
 
     gap_delete_all_link_keys();
     if (acl_handle != HCI_CON_HANDLE_INVALID) {
+        // A controller is live: disconnect it. The disconnection-complete handler
+        // then sees 0 stored keys (no pairing_window) and opens inquiry itself, so
+        // we converge to the open-to-pair state there.
         printf("[BT] Disconnecting the connected controller (forget all)\n");
         hci_send_cmd(&hci_disconnect, acl_handle, 0x13);
+        return;
     }
+    // No live controller: nothing will trigger the disconnect handler, so open
+    // inquiry here to reach the SAME open-to-pair state a cold boot with 0 bonds
+    // reaches. Without this, forget-all left the dongle in page-scan-only and a
+    // fresh pad could only come back via a stray residual inquiry (the deferred
+    // forget-all inconsistency) or an explicit "pair new controller" press.
+    printf("[BT] Forget all with no active link -> open inquiry (open to pair)\n");
+    device_found = false;
+    new_pair = false;
+    connect_attempt_started = 0;
+    gap_connectable_control(1);
+    gap_discoverable_control(1);
+    bt_inquiry_open();
 }
 
 bool bt_connected_addr(uint8_t *addr_out) {
@@ -417,6 +504,13 @@ int bt_init() {
     hci_event_callback_registration.callback = &hci_packet_handler;
     hci_add_event_handler(&hci_event_callback_registration);
 
+    // Race-free incoming-connection gate (blacklist + pairing window). Evaluated
+    // inside BTstack before it auto-accepts a CONNECTION_REQUEST, replacing the
+    // old raw hci_reject_connection_request in the event handler (which lost the
+    // race against the stack's already-queued accept). See
+    // bt_classic_connection_filter().
+    gap_register_classic_connection_filter(&bt_classic_connection_filter);
+
     hci_power_control(HCI_POWER_ON);
     return 0;
 }
@@ -443,7 +537,7 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
                     printf("[BT] Stack ready, %d bond(s) in TLV -> page scan, no inquiry\n", n_bonds);
                 } else {
                     printf("[BT] Stack ready, 0 bonds in TLV -> start inquiry\n");
-                    gap_inquiry_start(30);
+                    bt_inquiry_open();
                 }
             }
             break;
@@ -477,6 +571,14 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
 
         case GAP_EVENT_INQUIRY_COMPLETE:
         case HCI_EVENT_INQUIRY_COMPLETE: {
+            // BTstack has set inquiry_state back to IDLE before delivering this
+            // (hci.c: both the natural-complete and cancel-complete paths do so),
+            // so a gap_inquiry_start() here WILL be accepted -- this is the only
+            // safe place to re-arm a looping inquiry. NOTE: the cancel path emits
+            // GAP_EVENT_INQUIRY_COMPLETE (not the raw HCI_EVENT_INQUIRY_COMPLETE),
+            // so we must handle BOTH labels for re-arm; gating re-arm on the raw
+            // event alone was why inquiry went dormant after forget-all when a
+            // stop/cancel was in flight (HW-observed).
             printf("[HCI] Inquiry complete.\n");
             if (device_found) {
                 printf("[HCI] Connecting to %s...\n", bd_addr_to_str(current_device_addr));
@@ -486,15 +588,17 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
                              hci_usable_acl_packet_types(), 0, 0, 0, 1);
                 break;
             }
-            if (event_type == HCI_EVENT_INQUIRY_COMPLETE) {
-                if (pairing_window) {
-                    // Pairing window expired with no new controller found; close
-                    // it so bonded controllers can auto-reconnect again.
-                    pairing_window = false;
-                    printf("[HCI] Pairing window closed (inquiry found nothing)\n");
-                }
-                printf("[HCI] Restart inquiry\n");
-                bt_restart_inquiry();
+            if (pairing_window) {
+                // Pairing window expired with no new controller found; close it so
+                // bonded controllers can auto-reconnect again.
+                pairing_window = false;
+                printf("[HCI] Pairing window closed (inquiry found nothing)\n");
+            }
+            // Re-arm if we still want to be open to pairing. State is IDLE now, so
+            // this start lands cleanly (no stop-then-start race).
+            if (bt_inquiry_wanted) {
+                printf("[HCI] Re-arm inquiry\n");
+                bt_inquiry_try_start();
             }
             break;
         }
@@ -522,17 +626,11 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
                 const hci_con_handle_t handle = hci_event_connection_complete_get_connection_handle(packet);
                 bd_addr_t conn_addr;
                 hci_event_connection_complete_get_bd_addr(packet, conn_addr);
-                // Blacklist enforcement: an INCOMING (PS-only auto-reconnect)
-                // connection from a forgotten MAC is disconnected here, before we
-                // set up state or request auth. Outgoing connections we initiated
-                // via inquiry (PS+Share re-pair) have new_pair == true and are
-                // allowed through so the blacklist entry clears at HID open.
-                if (!new_pair && bt_blacklist_contains(conn_addr)) {
-                    printf("[HCI] Incoming connection from blacklisted %s - disconnecting\n",
-                           bd_addr_to_str(conn_addr));
-                    hci_send_cmd(&hci_disconnect, handle, 0x05);
-                    break;
-                }
+                // No blacklist check here: bt_classic_connection_filter() already
+                // declined forgotten MACs at CONNECTION_REQUEST, so a blacklisted
+                // controller never reaches CONNECTION_COMPLETE. (The old
+                // after-the-fact disconnect was the workaround for the raw-reject
+                // race and is no longer needed.)
                 acl_handle = handle;
                 bd_addr_copy(current_device_addr, conn_addr);
                 printf("[HCI] ACL connected handle=0x%04X\n", handle);
@@ -665,30 +763,29 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
         }
 
         case HCI_EVENT_CONNECTION_REQUEST: {
+            // Acceptance is decided by bt_classic_connection_filter() (blacklist +
+            // pairing-window gates), evaluated inside BTstack BEFORE this event is
+            // delivered. If it allowed the addr, BTstack has ALREADY auto-accepted
+            // -- we must NOT send hci_accept_connection_request here (double-accept).
+            // BTstack still forwards this event to us even when the filter DECLINED,
+            // so re-check the same gates and skip our bookkeeping for a declined
+            // addr (otherwise we'd stomp current_device_addr / stop inquiry for a
+            // connection that's being rejected). For an allowed addr the link comes
+            // up in HCI_EVENT_CONNECTION_COMPLETE.
             bd_addr_t addr;
             hci_event_connection_request_get_bd_addr(packet, addr);
             const uint32_t cod = hci_event_connection_request_get_class_of_device(packet);
-            printf("[HCI] Incoming ACL request from %s cod=0x%06x\n", bd_addr_to_str(addr), (unsigned int) cod);
-            if (bt_blacklist_contains(addr)) {
-                printf("[HCI] Rejecting connection from %s (forgotten; re-pair via PS+Share)\n", bd_addr_to_str(addr));
-                hci_send_cmd(&hci_reject_connection_request, addr, 0x0F);
+            if (bt_blacklist_contains(addr) || pairing_window) {
+                // Filter already declined this; BTstack is sending the reject.
+                printf("[HCI] Incoming ACL request from %s cod=0x%06x (declined by filter)\n",
+                       bd_addr_to_str(addr), (unsigned int) cod);
                 break;
             }
-            if (pairing_window) {
-                // While the user is pairing a new controller, reject incoming
-                // auto-reconnects so the just-disconnected controller can't page
-                // back in and grab the slot first. Its bond is intact; it
-                // reconnects once the pairing window closes.
-                printf("[HCI] Rejecting connection from %s (pairing window open)\n", bd_addr_to_str(addr));
-                hci_send_cmd(&hci_reject_connection_request, addr, 0x0F);
-                break;
-            }
-            if ((cod & 0x000F00) == 0x000500) {
-                bd_addr_copy(current_device_addr, addr);
-                gap_inquiry_stop();
-                hci_send_cmd(&hci_accept_connection_request, addr, 0x01);
-                connect_attempt_started = get_absolute_time(); // arm connection watchdog (incoming path)
-            }
+            printf("[HCI] Incoming ACL request from %s cod=0x%06x (allowed by filter)\n",
+                   bd_addr_to_str(addr), (unsigned int) cod);
+            bd_addr_copy(current_device_addr, addr);
+            gap_inquiry_stop();
+            connect_attempt_started = get_absolute_time(); // arm connection watchdog (incoming path)
             break;
         }
 
@@ -730,12 +827,13 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
                 // Keep the window open across the disconnect; it closes when the
                 // new controller opens HID or the inquiry finds nothing.
                 printf("[HCI] Disconnected reason=0x%02X, pair request -> start inquiry\n", reason);
-                gap_inquiry_start(30);
+                bt_inquiry_open();
             } else if (bt_has_stored_link_key()) {
                 printf("[HCI] Disconnected reason=0x%02X, stored controller -> page scan, no inquiry\n", reason);
+                bt_inquiry_close();
             } else {
                 printf("[HCI] Disconnected reason=0x%02X, no stored controller -> start inquiry\n", reason);
-                gap_inquiry_start(30);
+                bt_inquiry_open();
             }
             break;
         }
@@ -851,8 +949,10 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
                     printf("[L2CAP] HID Interrupt opened cid=0x%04X\n", local_cid);
                     hid_interrupt_cid = local_cid;
                     // A controller is fully connected -- close any open pairing
-                    // window so bonded controllers can auto-reconnect again.
+                    // window so bonded controllers can auto-reconnect again, and
+                    // stop wanting inquiry so it doesn't re-arm under us.
                     pairing_window = false;
+                    bt_inquiry_close();
                     // Successful pair removes this MAC from the blacklist -- an
                     // explicit PS+Share re-pair is the user un-forgetting it.
                     bt_blacklist_remove(current_device_addr);

@@ -146,15 +146,6 @@
 #define CFG_TUD_AUDIO_ENABLE_EP_OUT                 1
 #define CFG_TUD_AUDIO_ENABLE_EP_IN                  1
 
-// CDC FIFO size of TX and RX
-#define CFG_TUD_CDC_RX_BUFSIZE   64
-#define CFG_TUD_CDC_TX_BUFSIZE   64
-
-// CDC Endpoint transfer buffer size, more is faster
-// Leave it as default size (512 for HS, 64 for FS) unless your host application
-// is able to send ZLP (Zero Length Packet) to terminate transfer !
-#define CFG_TUD_CDC_EP_BUFSIZE   64
-
 #ifdef __cplusplus
 }
 #endif

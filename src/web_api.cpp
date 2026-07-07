@@ -182,15 +182,6 @@ static int json_config(char *out, size_t cap) {
 // Paired-controller (bond) management helpers
 //--------------------------------------------------------------------+
 
-static void addr_to_hex(const uint8_t *a, char out[13]) {
-    static const char h[] = "0123456789ABCDEF";
-    for (int i = 0; i < 6; i++) {
-        out[i * 2]     = h[(a[i] >> 4) & 0xf];
-        out[i * 2 + 1] = h[a[i] & 0xf];
-    }
-    out[12] = '\0';
-}
-
 // Parse exactly 12 hex chars into a[6]. Returns true on success.
 static bool hex_to_addr(const char *s, uint8_t a[6]) {
     if (!s) return false;
@@ -243,13 +234,13 @@ static int json_bonds(char *out, size_t cap) {
     uint8_t conn[BT_ADDR_LEN];
     const bool have_conn = bt_connected_addr(conn);
     char conn_hex[13] = "";
-    if (have_conn) addr_to_hex(conn, conn_hex);
+    if (have_conn) mac_to_hex(conn, conn_hex);
 
     int w = snprintf(out, cap, "{\"connected\":\"%s\",\"max\":%d,\"bonds\":[",
                      conn_hex, CONFIG_MAX_BOND_NAMES);
     for (int i = 0; i < n && w < (int) cap; i++) {
         char hex[13];
-        addr_to_hex(list[i], hex);
+        mac_to_hex(list[i], hex);
         const char *nm = config_bond_name(list[i]);
         if (!nm) nm = "";
         w += snprintf(out + w, cap - w, "%s{\"addr\":\"%s\",\"name\":",

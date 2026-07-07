@@ -3,6 +3,7 @@
 //
 
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 
 #include "utils.h"

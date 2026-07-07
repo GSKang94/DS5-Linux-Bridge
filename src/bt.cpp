@@ -86,7 +86,6 @@ static bt_data_callback_t bt_data_callback = nullptr;
 // identified (USB connects) or on any teardown.
 static absolute_time_t connect_attempt_started = 0;
 static bool check_dse = false;
-static int8_t bt_rssi = 0;
 unordered_map<uint8_t, vector<uint8_t> > feature_data;
 queue_t send_fifo;
 
@@ -101,18 +100,6 @@ absolute_time_t inactive_time = 0; // 手柄长时间静默
 
 void bt_register_data_callback(bt_data_callback_t callback) {
     bt_data_callback = callback;
-}
-
-void bt_send_packet(uint8_t *data, uint16_t len) {
-    if (hid_interrupt_cid != 0) {
-        l2cap_send(hid_interrupt_cid, data, len);
-    }
-}
-
-void bt_send_control(uint8_t *data, uint16_t len) {
-    if (hid_control_cid != 0) {
-        l2cap_send(hid_control_cid, data, len);
-    }
 }
 
 static void bt_apply_low_latency_link_policy(hci_con_handle_t handle) {
@@ -207,18 +194,6 @@ void bt_connection_watchdog_tick() {
     } else {
         // No ACL yet — reset states and restart inquiry immediately.
         bt_restart_inquiry();
-    }
-}
-
-void bt_get_signal_strength(int8_t *rssi) {
-    // gap_read_rssi() completes asynchronously, so this function can only
-    // return the last cached RSSI value. Trigger a refresh afterwards so a
-    // subsequent call can observe the updated value once the RSSI event arrives.
-    if (rssi != nullptr) {
-        *rssi = bt_rssi;
-    }
-    if (acl_handle != HCI_CON_HANDLE_INVALID) {
-        gap_read_rssi(acl_handle);
     }
 }
 
@@ -532,14 +507,7 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
         case HCI_EVENT_COMMAND_COMPLETE: {
             const uint8_t status = hci_event_command_complete_get_return_parameters(packet)[0];
             const uint16_t opcode = hci_event_command_complete_get_command_opcode(packet);
-            if (opcode != HCI_OPCODE_HCI_READ_RSSI) {
-                printf("[HCI] CmdComplete %s(0x%04X) status=0x%02X\n", opcode_to_str(opcode), opcode, status);
-            }
-            if (opcode == HCI_OPCODE_HCI_READ_RSSI) {
-                if (status != ERROR_CODE_SUCCESS || packet[1] < 7) {
-                    printf("[HCI] RSSI complete failed status=0x%02X param_len=%u\n", status, packet[1]);
-                }
-            }
+            printf("[HCI] CmdComplete %s(0x%04X) status=0x%02X\n", opcode_to_str(opcode), opcode, status);
             break;
         }
 
@@ -561,7 +529,6 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
                     break;
                 }
                 acl_handle = handle;
-                bt_rssi = 0;
                 bd_addr_copy(current_device_addr, conn_addr);
                 printf("[HCI] ACL connected handle=0x%04X\n", handle);
                 bt_apply_low_latency_link_policy(handle);
@@ -711,7 +678,6 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             connect_attempt_started = 0; // disarm
             state_reset_mute();
             acl_handle = HCI_CON_HANDLE_INVALID;
-            bt_rssi = 0;
             hid_control_cid = 0;
             hid_interrupt_cid = 0;
             feature_data.clear();
@@ -734,14 +700,6 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             } else {
                 printf("[HCI] Disconnected reason=0x%02X, no stored controller -> start inquiry\n", reason);
                 gap_inquiry_start(30);
-            }
-            break;
-        }
-
-        case GAP_EVENT_RSSI_MEASUREMENT: {
-            const hci_con_handle_t handle = gap_event_rssi_measurement_get_con_handle(packet);
-            if (handle == acl_handle) {
-                bt_rssi = static_cast<int8_t>(gap_event_rssi_measurement_get_rssi(packet));
             }
             break;
         }
@@ -880,15 +838,9 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
 
                     gap_connectable_control(false);
                     gap_discoverable_control(false);
-                    // tud_connect();
                 } else {
                     printf("[L2CAP] Unknown Channel psm: 0x%02X", psm);
                 }
-
-                /*if (hid_control_cid != 0 && hid_interrupt_cid != 0) {
-                    printf("[L2CAP] HID channels ready, request CAN_SEND_NOW for SET_PROTOCOL\n");
-                    l2cap_request_can_send_now_event(hid_control_cid);
-                }*/
             } else {
                 const uint16_t psm = l2cap_event_channel_opened_get_psm(packet);
                 hid_control_cid = 0;

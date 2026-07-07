@@ -34,7 +34,6 @@
 #include <cstring>
 
 int reportSeqCounter = 0;
-uint8_t packetCounter = 0;
 bool spk_active = false;
 bool mic_active = false;
 

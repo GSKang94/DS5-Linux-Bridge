@@ -2,10 +2,11 @@
 // Created by awalol on 2026/3/4.
 //
 
+#ifndef DS5_BRIDGE_UTILS_H
+#define DS5_BRIDGE_UTILS_H
+
 #include <array>
 #include <cstdint>
-#include <iomanip>
-#include <iostream>
 
 #include "hci_cmd.h"
 
@@ -85,8 +86,6 @@ inline const char *opcode_to_str(const uint16_t opcode) {
             return "HCI_READ_BD_ADDR";
         case HCI_OPCODE_HCI_READ_ENCRYPTION_KEY_SIZE:
             return "HCI_READ_ENCRYPTION_KEY_SIZE";
-        case HCI_OPCODE_HCI_READ_RSSI:
-            return "HCI_READ_RSSI";
         case 0xFC01:
             return "HCI_VENDOR_0xFC01";
         default:
@@ -146,112 +145,6 @@ inline void fill_feature_report_checksum(uint8_t *data, const size_t len) {
     data[len - 2] = (crc >> 16) & 0xFF;
     data[len - 1] = (crc >> 24) & 0xFF;
 }
-
-/*enum PowerState : uint8_t {
-    Discharging         = 0x00, // Use PowerPercent
-    Charging            = 0x01, // Use PowerPercent
-    Complete            = 0x02, // PowerPercent not valid? assume 100%?
-    AbnormalVoltage     = 0x0A, // PowerPercent not valid?
-    AbnormalTemperature = 0x0B, // PowerPercent not valid?
-    ChargingError       = 0x0F  // PowerPercent not valid?
-};
-
-enum Direction : uint8_t {
-    North = 0,
-    NorthEast,
-    East,
-    SouthEast,
-    South,
-    SouthWest,
-    West,
-    NorthWest,
-    None = 8
-};
-
-struct __attribute__((packed)) TouchFingerData { // 4
-    /*0.0#1# uint32_t Index : 7;
-    /*0.7#1# uint32_t NotTouching : 1;
-    /*1.0#1# uint32_t FingerX : 12;
-    /*2.4#1# uint32_t FingerY : 12;
-};
-
-struct __attribute__((packed)) TouchData { // 9
-    /*0#1# TouchFingerData Finger[2];
-    /*8#1# uint8_t Timestamp;
-};
-
-struct __attribute__((packed)) USBGetStateData { // 63
-/* 0  #1# uint8_t LeftStickX;
-/* 1  #1# uint8_t LeftStickY;
-/* 2  #1# uint8_t RightStickX;
-/* 3  #1# uint8_t RightStickY;
-/* 4  #1# uint8_t TriggerLeft;
-/* 5  #1# uint8_t TriggerRight;
-/* 6  #1# uint8_t SeqNo; // always 0x01 on BT
-/* 7.0#1# Direction DPad : 4;
-/* 7.4#1# uint8_t ButtonSquare : 1;
-/* 7.5#1# uint8_t ButtonCross : 1;
-/* 7.6#1# uint8_t ButtonCircle : 1;
-/* 7.7#1# uint8_t ButtonTriangle : 1;
-/* 8.0#1# uint8_t ButtonL1 : 1;
-/* 8.1#1# uint8_t ButtonR1 : 1;
-/* 8.2#1# uint8_t ButtonL2 : 1;
-/* 8.3#1# uint8_t ButtonR2 : 1;
-/* 8.4#1# uint8_t ButtonCreate : 1;
-/* 8.5#1# uint8_t ButtonOptions : 1;
-/* 8.6#1# uint8_t ButtonL3 : 1;
-/* 8.7#1# uint8_t ButtonR3 : 1;
-/* 9.0#1# uint8_t ButtonHome : 1;
-/* 9.1#1# uint8_t ButtonPad : 1;
-/* 9.2#1# uint8_t ButtonMute : 1;
-/* 9.3#1# uint8_t UNK1 : 1; // appears unused
-/* 9.4#1# uint8_t ButtonLeftFunction : 1; // DualSense Edge
-/* 9.5#1# uint8_t ButtonRightFunction : 1; // DualSense Edge
-/* 9.6#1# uint8_t ButtonLeftPaddle : 1; // DualSense Edge
-/* 9.7#1# uint8_t ButtonRightPaddle : 1; // DualSense Edge
-/*10  #1# uint8_t UNK2; // appears unused
-/*11  #1# uint32_t UNK_COUNTER; // Linux driver calls this reserved, tools leak calls the 2 high bytes "random"
-/*15  #1# int16_t AngularVelocityX;
-/*17  #1# int16_t AngularVelocityZ;
-/*19  #1# int16_t AngularVelocityY;
-/*21  #1# int16_t AccelerometerX;
-/*23  #1# int16_t AccelerometerY;
-/*25  #1# int16_t AccelerometerZ;
-/*27  #1# uint32_t SensorTimestamp;
-/*31  #1# int8_t Temperature; // reserved2 in Linux driver
-/*32  #1# TouchData Touch;
-/*41.0#1# uint8_t TriggerRightStopLocation: 4; // trigger stop can be a range from 0 to 9 (F/9.0 for Apple interface)
-/*41.4#1# uint8_t TriggerRightStatus: 4;
-/*42.0#1# uint8_t TriggerLeftStopLocation: 4;
-/*42.4#1# uint8_t TriggerLeftStatus: 4; // 0 feedbackNoLoad
-                                       // 1 feedbackLoadApplied
-                                       // 0 weaponReady
-                                       // 1 weaponFiring
-                                       // 2 weaponFired
-                                       // 0 vibrationNotVibrating
-                                       // 1 vibrationIsVibrating
-/*43  #1# uint32_t HostTimestamp; // mirrors data from report write
-/*47.0#1# uint8_t TriggerRightEffect: 4; // Active trigger effect, previously we thought this was status max
-/*47.4#1# uint8_t TriggerLeftEffect: 4;  // 0 for reset and all other effects
-                                        // 1 for feedback effect
-                                        // 2 for weapon effect
-                                        // 3 for vibration
-/*48  #1# uint32_t DeviceTimeStamp;
-/*52.0#1# uint8_t PowerPercent : 4; // 0x00-0x0A
-/*52.4#1# PowerState Power : 4;
-/*53.0#1# uint8_t PluggedHeadphones : 1;
-/*53.1#1# uint8_t PluggedMic : 1;
-/*53.2#1# uint8_t MicMuted: 1; // Mic muted by powersave/mute command
-/*53.3#1# uint8_t PluggedUsbData : 1;
-/*53.4#1# uint8_t PluggedUsbPower : 1; // appears that this cannot be 1 if PluggedUsbData is 1
-/*53.5#1# uint8_t UsbPowerOnBT : 1; // appears this is only 1 if BT connected and USB powered
-/*53.5#1# uint8_t DockDetect : 1;
-/*53.5#1# uint8_t PluggedUnk : 1;
-/*54.0#1# uint8_t PluggedExternalMic : 1; // Is external mic active (automatic in mic auto mode)
-/*54.1#1# uint8_t HapticLowPassFilter : 1; // Is the Haptic Low-Pass-Filter active?
-/*54.2#1# uint8_t PluggedUnk3 : 6;
-/*55  #1# uint8_t AesCmac[8];
-};*/
 
 namespace MuteLight{
     enum MuteLight : uint8_t {
@@ -411,9 +304,4 @@ struct __attribute__((packed)) SetStateData { // 47
 // Structure ends here though on BT there is padding and a CRC, see ReportOut31
 };
 
-inline void print_hex(const uint8_t* data,size_t size) {
-    for (int i = 0; i < size; i++) {
-        std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(data[i]) << " ";
-    }
-    std::cout << std::endl;
-}
+#endif //DS5_BRIDGE_UTILS_H

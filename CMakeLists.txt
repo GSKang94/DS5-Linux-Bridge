@@ -55,8 +55,6 @@ endif ()
 message(STATUS "DS5-Linux-Bridge build target -- PICO_BOARD=${PICO_BOARD}")
 message(STATUS "DS5-Linux-Bridge build target -- PICO_W_BUILD=${PICO_W_BUILD}")
 message(STATUS "DS5-Linux-Bridge build target -- WAVESHARE_RP2350B_PLUS_W_BUILD=${WAVESHARE_RP2350B_PLUS_W_BUILD}")
-#set(PICO_CYW43_SUPPORTED 1)
-#set(PICO_CYW43_ARCH_THREADSAFE_BACKGROUND 1)
 
 # Diagnostics go over UART0 (GP0 TX, 115200 8N1), always available -- there is
 # no USB-CDC serial. USB serial was removed because it perturbed the very USB
@@ -343,10 +341,6 @@ pico_enable_stdio_uart(ds5-bridge 1)
 pico_enable_stdio_usb(ds5-bridge 0)
 
 # Add the standard include files to the build
-#target_include_directories(ds5-bridge PRIVATE
-#        ${CMAKE_CURRENT_LIST_DIR}
-#)
-
 target_include_directories(${PROJECT_NAME} PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
@@ -359,7 +353,6 @@ target_link_libraries(ds5-bridge
         hardware_timer
         hardware_flash
         pico_btstack_classic
-#        pico_cyw43_arch_threadsafe_background
         pico_cyw43_arch_poll
         pico_btstack_cyw43
         tinyusb_device

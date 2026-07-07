@@ -12,22 +12,6 @@ float volume[2] = {-100.0f,0.0f}; // 0: SPEAKER(0x02) 1: MIC(0x05)
 #define UAC1_ENTITY_SPK_FEATURE_UNIT    0x02
 #define UAC1_ENTITY_MIC_FEATURE_UNIT    0x05
 
-/*int main() {
-    board_init();
-
-    tusb_rhport_init_t dev_init = {
-        .role = TUSB_ROLE_DEVICE,
-        .speed = TUSB_SPEED_AUTO
-    };
-    tusb_init(BOARD_TUD_RHPORT, &dev_init);
-
-    board_init_after_tusb();
-
-    while (1) {
-        tud_task();
-    }
-}*/
-
 //--------------------------------------------------------------------+
 // Audio Callback Functions
 //--------------------------------------------------------------------+

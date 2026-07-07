@@ -22,8 +22,6 @@
 #define SAMPLE_SIZE       64
 #define REPORT_SIZE       398
 #define REPORT_ID         0x36
-// #define VOLUME_GAIN       2
-// #define BUFFER_LENGTH     48 — replaced by config().audio_buffer_length
 #define MIC_CHANNELS      2
 #define MIC_FRAMES        480
 #define MIC_OPUS_SIZE     71
@@ -99,7 +97,6 @@ void audio_loop() {
     static audio_raw_element staging{};
     static uint audio_buf_pos = 0;
 
-    extern float volume[2];
     static float cached_audio_gain = 0.0f;
     static float cached_speaker_volume = 1.0f; // impossible value -> force first compute
     static bool cached_mute = true;

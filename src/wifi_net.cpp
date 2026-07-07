@@ -173,7 +173,6 @@ extern "C" bool wake_emit_wol(void) {
 //   AP : unprovisioned (or BOOTSEL-forced), SoftAP + captive portal (onboarding).
 static bool in_ap_mode = false;
 static bool force_ap = false;          // set by wifi_net_request_ap_onboarding()
-static bool wifi_associated = false;   // STA: link up + IP acquired
 static bool wifi_mdns_added = false;   // STA: mDNS netif registered once
 
 // AP-mode IP plan: dongle at 192.168.4.1/24, DHCP hands clients .16+ (see
@@ -527,7 +526,6 @@ void wifi_net_task() {
     static bool reported_ip = false;
     if (link == CYW43_LINK_UP && netif_default &&
         !ip4_addr_isany_val(*netif_ip4_addr(netif_default))) {
-        wifi_associated = true;
         ever_connected = true;
 #if LWIP_MDNS_RESPONDER
         // Advertise "<hostname>.local" now that we have a link + IP. Done once.
@@ -545,7 +543,6 @@ void wifi_net_task() {
         }
     } else if (link == CYW43_LINK_DOWN || link == CYW43_LINK_FAIL ||
                link == CYW43_LINK_NONET || link == CYW43_LINK_BADAUTH) {
-        wifi_associated = false;
         reported_ip = false;
 
         // Give up -> re-onboard ONLY if we've never connected this boot AND

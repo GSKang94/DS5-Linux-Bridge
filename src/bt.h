@@ -17,14 +17,11 @@ typedef void (*bt_data_callback_t)(CHANNEL_TYPE channel, uint8_t *data, uint16_t
 
 int bt_init();
 void bt_register_data_callback(bt_data_callback_t callback);
-void bt_send_packet(uint8_t *data, uint16_t len);
-void bt_send_control(uint8_t *data, uint16_t len);
 void bt_write(const uint8_t *data, uint16_t len, bool kick = true);
 // Kick the BT send chain if pending. Called from main loop after
 // cyw43_arch_poll() so the kick cost is paid outside audio_loop.
 void bt_pump();
 bool bt_send_pending();
-void bt_get_signal_strength(int8_t *rssi);
 
 // Live controller status for the web UI / Decky plugin (GET /api/status).
 // All fields are cheap reads of data the firmware already tracks. battery_pct

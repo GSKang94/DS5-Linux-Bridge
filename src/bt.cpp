@@ -850,6 +850,11 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             new_pair = false;
             connect_attempt_started = 0; // disarm
             state_reset_mute();
+            // D1: reset the wake FSM + stale button-diff bytes now the
+            // controller is gone, so a reconnect can't fire one spurious wake
+            // attempt off last session's button state. No-op in non-wake builds
+            // (header stub). Complements wake_on_bt_connect() on the connect path.
+            wake_on_bt_disconnect();
             acl_handle = HCI_CON_HANDLE_INVALID;
             hid_control_cid = 0;
             hid_interrupt_cid = 0;

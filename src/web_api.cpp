@@ -290,9 +290,22 @@ extern "C" int fs_open_custom(struct fs_file *file, const char *name) {
 #ifdef ENABLE_WIFI_WOL
     // Onboarding mode: serve the captive portal for essentially every GET.
     if (wifi_net_in_ap_mode()) {
-        // The portal's own API routes must reach the shared JSON handlers below.
+        // W3: in AP mode the network is OPEN and BT is never initialized, so
+        // only the onboarding routes may reach the shared handlers. Everything
+        // else under /api/ (config, bonds -- forgetall really erases the TLV,
+        // status, resolve_mac, pairing) is 404'd so a nearby actor who joins
+        // DS5-Setup-XXXX can't rewrite config or wipe bonds. The portal page
+        // itself only ever calls wifi_scan + wifi_provision(_result).
         const bool is_portal_api =
-            (strncmp(name, "/api/", 5) == 0);
+            (strcmp(name, "/api/wifi_scan") == 0) ||
+            (strcmp(name, "/api/wifi_provision") == 0) ||
+            (strcmp(name, "/api/wifi_provision_result") == 0);
+        const bool other_api = (strncmp(name, "/api/", 5) == 0);
+        if (other_api && !is_portal_api) {
+            // A non-onboarding API GET in AP mode: reject.
+            static const char nf[] = "not found";
+            return make_file(file, "404 Not Found", "text/plain", nf, sizeof(nf) - 1);
+        }
         if (!is_portal_api) {
             // Serve the portal page itself (200) for the root, the OS captive-probe
             // URLs (Windows /connecttest.txt + /index.shtml; Apple
@@ -708,6 +721,15 @@ extern "C" err_t httpd_post_begin(void *connection, const char *uri, const char 
     else if (strcmp(uri, "/api/wifi_reset") == 0) t = POST_WIFI_RESET;
 #endif
     else return ERR_VAL;
+#ifdef ENABLE_WIFI_WOL
+    // W3: in AP onboarding mode reject every POST except the provision flow.
+    // The open AP + uninitialized BT means POST /api/bonds action=forgetall
+    // (gap_delete_all_link_keys erases the TLV even with BT down) or
+    // POST /api/config (rewrites+persists settings) must not be reachable.
+    if (wifi_net_in_ap_mode() && t != POST_WIFI_PROVISION && t != POST_WIFI_RESET) {
+        return ERR_VAL;
+    }
+#endif
     if (content_len >= POST_BUFSIZE) return ERR_VAL;
     if (post_conn) return ERR_USE; // one POST at a time
     post_conn = connection;

@@ -98,6 +98,18 @@ struct send_element {
     uint16_t len;
 };
 
+// L2CAP TX retry state (N5). Hoisted from function-statics in the
+// L2CAP_EVENT_CAN_SEND_NOW handler to file scope so DISCONNECTION_COMPLETE can
+// reset them alongside the send_fifo drain -- otherwise a retry queued just
+// before a disconnect would replay a stale frame (old seq/state, valid CRC) as
+// the first packet of the NEXT session, and a can-send-now request in flight
+// when the channel dies would leave send_chain_active stuck true (wedging
+// bt_pump until the next kick=true bt_write). All three reset together on
+// disconnect. (send_chain_active's usage/rationale is documented at bt_pump.)
+static send_element retry_packet;
+static bool retry_pending = false;
+volatile bool send_chain_active = false;
+
 absolute_time_t inactive_time = 0; // 手柄长时间静默
 
 void bt_register_data_callback(bt_data_callback_t callback) {
@@ -593,10 +605,30 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
                 // bonded controllers can auto-reconnect again.
                 pairing_window = false;
                 printf("[HCI] Pairing window closed (inquiry found nothing)\n");
+                // N2: bt_start_pairing() left bt_inquiry_wanted set. If a bond is
+                // already stored, the re-arm below (and every subsequent
+                // INQUIRY_COMPLETE) would otherwise loop inquiry forever after the
+                // user opens "pair new controller" and walks away -- grabbing any
+                // nearby DualSense in pairing mode and degrading the bonded pad's
+                // page-scan reconnect. Mirror bt_restart_inquiry()'s bond gate:
+                // only the 0-bond open-to-pair loop keeps inquiring.
+                if (bt_has_stored_link_key()) {
+                    printf("[HCI] Bond stored -> stop inquiry, page scan only\n");
+                    bt_inquiry_close();
+                }
             }
+            // N1: don't re-arm inquiry while a connection setup is in flight. The
+            // incoming-connection path calls gap_inquiry_stop() (whose completion
+            // arrives here as GAP_EVENT_INQUIRY_COMPLETE with device_found==false)
+            // and arms connect_attempt_started; restarting inquiry now would
+            // contend with page response / auth / encryption on the shared radio --
+            // exactly the fresh-pair instability class this branch fought. The
+            // failure paths (CONNECTION_COMPLETE failure / watchdog) reopen inquiry,
+            // and the success path closes it at HID-open, so no state is stranded.
+            //
             // Re-arm if we still want to be open to pairing. State is IDLE now, so
             // this start lands cleanly (no stop-then-start race).
-            if (bt_inquiry_wanted) {
+            if (bt_inquiry_wanted && connect_attempt_started == 0) {
                 printf("[HCI] Re-arm inquiry\n");
                 bt_inquiry_try_start();
             }
@@ -815,6 +847,11 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             hid_interrupt_cid = 0;
             feature_data.clear();
             while (queue_try_remove(&send_fifo, NULL)) {}
+            // N5: reset the L2CAP TX send-chain state so nothing leaks into the
+            // next session -- a queued retry would otherwise replay a stale
+            // frame, and a stuck send_chain_active would wedge bt_pump.
+            retry_pending = false;
+            send_chain_active = false;
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
 #if ENABLE_BATT_LED
             battery_led_on_disconnect();
@@ -1033,8 +1070,6 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
                 break;
             }
 
-            static send_element retry_packet;
-            static bool retry_pending = false;
             send_element send_packet;
             if (retry_pending || queue_try_remove(&send_fifo, &send_packet)) {
                 if (retry_pending) {
@@ -1044,7 +1079,6 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
                 if (status != 0) {
                     retry_packet = send_packet;
                     retry_pending = true;
-                    extern volatile bool send_chain_active;
                     send_chain_active = false;
                     break;
                 }
@@ -1056,7 +1090,6 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
             } else {
                 // Chain idle. bt_pump from main loop will kick it again
                 // when new data arrives.
-                extern volatile bool send_chain_active;
                 send_chain_active = false;
             }
             break;
@@ -1116,7 +1149,7 @@ void bt_write(const uint8_t *data, const uint16_t len, bool kick) {
 // Tracks a "kick pending" flag so we don't request a second event while
 // one is already in flight (would be wasted work). Cleared by the
 // L2CAP_EVENT_CAN_SEND_NOW handler. Set here when we issue a request.
-volatile bool send_chain_active = false;
+// (send_chain_active is defined at file scope near send_element for N5.)
 
 // RAM-resident: runs every main-loop iteration to kick the L2CAP TX chain. Tiny
 // but called constantly, so a flash-refetch stall here directly perturbs the

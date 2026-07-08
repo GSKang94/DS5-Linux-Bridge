@@ -123,6 +123,32 @@ void realtime_hid_queue_requeue_front(const uint8_t *report) {
 // re-sends the same interrupt_in_data unconditionally, so running it on both
 // calls would emit the report up to twice per iteration; restrict it to the
 // single bottom call to preserve the original modes-0/1 cadence.
+// Throttled logger for the tud_hid_report failure path. interrupt_loop runs
+// every main-loop iteration, so an unconditional printf here floods UART (and
+// perturbs loop timing) whenever the HID IN endpoint stays un-drainable -- which
+// happens for a sustained stretch after a suspend/resume/re-enumeration bounce
+// (the host stops polling the endpoint while the bus state settles, so
+// usbd_edpt_xfer/claim keeps failing). Log at most once per second and fold in
+// the suppressed count so a persistent failure is still visible without the
+// flood. (HW-observed: 6000+ identical lines after a 2nd remote-wake re-mount.)
+static void log_hid_report_error() {
+  static uint64_t last_log_us = 0;
+  static uint32_t suppressed = 0;
+  const uint64_t now = time_us_64();
+  if (now - last_log_us > 1000000) {
+    if (suppressed) {
+      printf("[USBHID] tud_hid_report error (+%lu suppressed in last window)\n",
+             (unsigned long)suppressed);
+    } else {
+      printf("[USBHID] tud_hid_report error\n");
+    }
+    last_log_us = now;
+    suppressed = 0;
+  } else {
+    suppressed++;
+  }
+}
+
 void interrupt_loop(bool drain_only = false) {
 #ifdef ENABLE_WAKE_HID
   // Only the FULL variant exposes the real gamepad (HID instance 0). In MINIMAL
@@ -141,7 +167,7 @@ void interrupt_loop(bool drain_only = false) {
     if (drain_only)
       return; // non-realtime: only emit from the bottom-of-loop call
     if (!tud_hid_report(0x01, interrupt_in_data, HID_INPUT_REPORT_LEN)) {
-      printf("[USBHID] tud_hid_report error\n");
+      log_hid_report_error();
     }
     return;
   }
@@ -152,7 +178,7 @@ void interrupt_loop(bool drain_only = false) {
   // Only send to TinyUSB if we actually grabbed fresh data
   if (should_send) {
     if (!tud_hid_report(0x01, safe_report, HID_INPUT_REPORT_LEN)) {
-      printf("[USBHID] tud_hid_report error\n");
+      log_hid_report_error();
       realtime_hid_queue_requeue_front(safe_report);
     }
   }

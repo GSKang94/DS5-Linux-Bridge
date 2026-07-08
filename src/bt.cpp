@@ -130,8 +130,16 @@ bool bt_disconnect() {
         return false;
     }
 
-    // 0x13 = remote user terminated connection
-    hci_send_cmd(&hci_disconnect, acl_handle, 0x13);
+    // N3: route through the GAP state machine (reason fixed at 0x13 = remote
+    // user terminated) rather than a raw hci_send_cmd(&hci_disconnect). This is
+    // called from non-event contexts -- the connect/inactivity watchdog ticks
+    // and the auth-failure path -- where BTstack may hold a command in its
+    // single outstanding slot; a raw send could be swallowed there (the ba4fe1f
+    // failure class), leaving the link up and no DISCONNECTION_COMPLETE to drive
+    // recovery. gap_disconnect() queues via hci_run() and no-ops a redundant
+    // second request (returns COMMAND_DISALLOWED if a disconnect is already
+    // pending) instead of double-sending.
+    gap_disconnect(acl_handle);
     return true;
 }
 
@@ -411,7 +419,7 @@ bool bt_bond_forget(const uint8_t *addr) {
     // ACL stays up and BTstack re-persists its key.
     if (acl_handle != HCI_CON_HANDLE_INVALID && bd_addr_cmp(a, current_device_addr) == 0) {
         printf("[BT] Forgetting the connected controller -- disconnecting it\n");
-        hci_send_cmd(&hci_disconnect, acl_handle, 0x13);
+        gap_disconnect(acl_handle); // N3: httpd context, GAP state machine
     }
     return true;
 }
@@ -431,7 +439,7 @@ void bt_bond_forget_all() {
         // then sees 0 stored keys (no pairing_window) and opens inquiry itself, so
         // we converge to the open-to-pair state there.
         printf("[BT] Disconnecting the connected controller (forget all)\n");
-        hci_send_cmd(&hci_disconnect, acl_handle, 0x13);
+        gap_disconnect(acl_handle); // N3: httpd context, GAP state machine
         return;
     }
     // No live controller: nothing will trigger the disconnect handler, so open

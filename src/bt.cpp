@@ -915,17 +915,21 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
                 bt_disconnect();
             }
         } else if (channel == hid_control_cid) {
-            // A 1-byte HANDSHAKE is legal on the control channel and
-            // dse_on_control_packet handles size==1; route it first, then
-            // guard the packet[0]/packet[1] reads below against runt frames
-            // from a misbehaving peer.
-            if (size >= 1) dse_on_control_packet(packet, size);
-            if (size < 2) {
+            // Guard the packet reads below against runt frames from a
+            // misbehaving peer, WITHOUT dropping the legitimate 1-byte control
+            // packets we depend on: a HID HANDSHAKE (size==1) is how a non-Edge
+            // DS5 answers our 0x70 GET, and packet[0]==0x02 there is the DS5
+            // detection signal that disarms the connect watchdog. So gate only
+            // the two-byte reads (the 0xA3 DSE check + feature-report caching)
+            // on size>=2; the single-byte packet[0] checks stay reachable at
+            // size>=1. dse_on_control_packet handles size==1 itself.
+            if (size < 1) {
                 if (bt_data_callback) bt_data_callback(CONTROL, packet, size);
                 return;
             }
+            dse_on_control_packet(packet, size);
             if (check_dse) {
-                if (packet[0] == 0xA3 && packet[1] == 0x70) {
+                if (size >= 2 && packet[0] == 0xA3 && packet[1] == 0x70) {
                     printf("Connected DSE Controller\n");
                     check_dse = false;
                     is_dse = true;
@@ -958,7 +962,7 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
 #endif
                 }
             }
-            if (packet[0] == 0xA3) {
+            if (size >= 2 && packet[0] == 0xA3) {
                 uint8_t report_id = packet[1];
                 feature_data[report_id].assign(packet + 1, packet + size);
 #if ENABLE_VERBOSE

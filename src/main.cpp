@@ -285,11 +285,18 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id,
   }
 
   std::vector<uint8_t> feature_data = get_feature_data(report_id, reqlen);
-  if (!feature_data.empty()) {
-    memcpy(buffer, feature_data.data() + 1, feature_data.size() - 1);
+  if (feature_data.empty()) {
+    return 0;
   }
 
-  return feature_data.empty() ? 0 : feature_data.size() - 1;
+  // feature_data is cached verbatim from L2CAP 0xA3 control packets whose size
+  // can run up to the BT MTU; `buffer` is TinyUSB's control buffer capped at
+  // CFG_TUD_HID_EP_BUFSIZE (64 B). Clamp so a hostile/buggy controller answering
+  // a GET with an over-length report can't overflow the buffer.
+  uint16_t n = (uint16_t)(feature_data.size() - 1);
+  if (n > reqlen) n = reqlen;
+  memcpy(buffer, feature_data.data() + 1, n);
+  return n;
 }
 
 bool tud_audio_set_itf_cb(uint8_t rhport,

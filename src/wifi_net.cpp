@@ -374,19 +374,27 @@ int wifi_scan_json(char *out, int cap) {
     }
     int w = snprintf(out, cap, "{\"scanning\":%s,\"nets\":[",
                      scan_in_progress ? "true" : "false");
-    for (int i = 0; i < scan_count && w < cap; i++) {
-        // SSID needs JSON escaping (arbitrary bytes); reuse the shared escaper
-        // via a tiny inline pass for " and \ only -- control chars were already
-        // excluded by ssid_len bounds, but quotes/backslashes can appear.
+    for (int i = 0; i < scan_count; i++) {
+        // Bound this entry's worst-case serialized length so we never emit a
+        // half-written network: SSID up to 2x (every byte escaped) + the fixed
+        // {"ssid":""..."rssi":-nnn,"secure":n} scaffolding + the "," separator,
+        // and leave room for the closing "]}". If it wouldn't fit, stop here --
+        // the list is sorted strongest-first, so we keep the networks the user
+        // most likely wants and still close the JSON cleanly. (Prevents the
+        // truncated-mid-string malformed JSON that broke the portal dropdown in
+        // dense RF; see CODE_REVIEW_2 W2.)
+        int need = 1 /*,*/ + 10 /*{"ssid":"*/ + 2 * (int)strlen(scan_list[i].ssid) +
+                   1 /*"*/ + 34 /*,"rssi":-nnn,"secure":n}*/ + 2 /*]}*/;
+        if (w + need > cap) break;
         w += snprintf(out + w, cap - w, "%s{\"ssid\":\"", i ? "," : "");
-        for (const char *p = scan_list[i].ssid; *p && w < cap - 2; p++) {
+        for (const char *p = scan_list[i].ssid; *p; p++) {
             if (*p == '"' || *p == '\\') out[w++] = '\\';
             out[w++] = *p;
         }
-        if (w < cap) w += snprintf(out + w, cap - w, "\",\"rssi\":%d,\"secure\":%u}",
-                                   scan_list[i].rssi, scan_list[i].secure);
+        w += snprintf(out + w, cap - w, "\",\"rssi\":%d,\"secure\":%u}",
+                      scan_list[i].rssi, scan_list[i].secure);
     }
-    if (w < cap) w += snprintf(out + w, cap - w, "]}");
+    w += snprintf(out + w, cap - w, "]}");
     return w;
 }
 

@@ -420,6 +420,10 @@ extern "C" int fs_read_custom(struct fs_file *file, char *buffer, int count) {
 static char post_buf[POST_BUFSIZE];
 static u16_t post_pos;
 static void *post_conn;
+// Declared Content-Length of the in-flight POST (-1 if the client didn't send
+// one). Used in httpd_post_finished to distinguish a complete body from an
+// aborted connection so a partial body isn't applied + flash-saved (W4).
+static int post_content_len;
 static bool last_save_ok = true; // result of the most recent config_save()
 
 // Which endpoint the in-flight POST targets.
@@ -709,6 +713,7 @@ extern "C" err_t httpd_post_begin(void *connection, const char *uri, const char 
     post_conn = connection;
     post_pos = 0;
     post_target = t;
+    post_content_len = content_len; // -1 when the client sent no Content-Length
     return ERR_OK;
 }
 
@@ -726,6 +731,18 @@ extern "C" err_t httpd_post_receive_data(void *connection, struct pbuf *p) {
 extern "C" void httpd_post_finished(void *connection, char *response_uri, u16_t response_uri_len) {
     if (connection != post_conn) return;
     post_conn = nullptr;
+
+    // lwIP httpd also calls this when a POST connection dies mid-body. If the
+    // client declared a Content-Length and we didn't receive all of it, the
+    // body is partial -- applying it can persist a silently-wrong value and
+    // burn a flash erase/program cycle for a request the client never
+    // finished. Reject without applying. (content_len == -1 means the client
+    // sent no length, so we can't tell; fall through to the old behavior.)
+    if (post_content_len >= 0 && post_pos != (u16_t)post_content_len) {
+        snprintf(response_uri, response_uri_len, "/api/save-failed");
+        return;
+    }
+
     switch (post_target) {
         case POST_BONDS:
             apply_bonds_post(post_buf);

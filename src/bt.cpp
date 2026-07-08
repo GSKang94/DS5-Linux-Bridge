@@ -878,6 +878,15 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
                 bt_disconnect();
             }
         } else if (channel == hid_control_cid) {
+            // A 1-byte HANDSHAKE is legal on the control channel and
+            // dse_on_control_packet handles size==1; route it first, then
+            // guard the packet[0]/packet[1] reads below against runt frames
+            // from a misbehaving peer.
+            if (size >= 1) dse_on_control_packet(packet, size);
+            if (size < 2) {
+                if (bt_data_callback) bt_data_callback(CONTROL, packet, size);
+                return;
+            }
             if (check_dse) {
                 if (packet[0] == 0xA3 && packet[1] == 0x70) {
                     printf("Connected DSE Controller\n");
@@ -919,7 +928,6 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
                 printf("[L2CAP] Stored Feature Report 0x%02X, len=%u\n", report_id, size - 1);
 #endif
             }
-            dse_on_control_packet(packet, size);
 #if ENABLE_VERBOSE
             printf("[L2CAP] HID Control data len=%u\n", size);
             printf_hexdump(packet, size);

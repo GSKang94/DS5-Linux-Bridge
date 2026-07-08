@@ -32,11 +32,11 @@
 //--------------------------------------------------------------------+
 
 // mDNS / network hostname (the "<name>.local" the dongle advertises). User-set
-// so two dongles on one LAN don't both claim ds5wol.local. Max 10 chars + NUL;
+// so two dongles on one LAN don't both claim ds5.local. Max 10 chars + NUL;
 // validated to a DNS label (lowercase a-z, 0-9, hyphen; no leading/trailing
 // hyphen) in config_valid(). See CONFIG_HOSTNAME_DEFAULT.
 #define CONFIG_HOSTNAME_LEN     11
-#define CONFIG_HOSTNAME_DEFAULT "ds5wol"
+#define CONFIG_HOSTNAME_DEFAULT "ds5"
 
 // Home-WLAN credentials for the WiFi-WOL transport's STA join (ENABLE_WIFI_WOL).
 // Filled by the onboarding captive portal and persisted to flash, replacing the
@@ -85,7 +85,7 @@ struct __attribute__((packed)) Config_body {
     uint8_t wol_static_netmask[4]; // reserved (W5500-era; unread, was RAM-only)
     // Network hostname advertised over mDNS as "<hostname>.local" (and set as the
     // netif hostname). Defaults to CONFIG_HOSTNAME_DEFAULT. User-editable in the
-    // web UI so multiple dongles on one LAN don't collide on ds5wol.local.
+    // web UI so multiple dongles on one LAN don't collide on ds5.local.
     // config_valid() sanitizes it to a valid DNS label and re-defaults if empty.
     char hostname[CONFIG_HOSTNAME_LEN];
     // Home-WLAN credentials (WiFi-WOL onboarding). wifi_provisioned: 0 = no creds
@@ -104,6 +104,11 @@ struct __attribute__((packed)) Config_body {
     // a descriptor-variant bounce (usb_request_wake_kbd). Only meaningful in
     // ENABLE_WAKE_HID builds; stored in every build (append-only layout rule).
     uint8_t wake_kbd_enabled;            // bool
+    // Second Wake-on-LAN target (ENABLE_WIFI_WOL builds), e.g. a TV alongside the
+    // PC in wol_target_mac. all-zero == unset (skipped). A "Wake" fires a magic
+    // packet to every configured (non-zero) target. Same unset convention and
+    // every-build-storage rationale as wol_target_mac above.
+    uint8_t wol_target_mac2[6];
 };
 
 struct __attribute__((packed)) Config {

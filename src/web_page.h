@@ -1,7 +1,7 @@
 #ifndef DS5_BRIDGE_WEB_PAGE_H
 #define DS5_BRIDGE_WEB_PAGE_H
 
-// Config UI served over WiFi at http://<hostname>.local/ (default ds5wol.local).
+// Config UI served over WiFi at http://<hostname>.local/ (default ds5.local).
 // Single self-contained page; loads from GET /api/config and persists via
 // POST /api/config. Settings mirror Config_body (src/config.h); the firmware
 // re-validates every field, so the page is a convenience, not the source of
@@ -54,10 +54,25 @@ footer a{color:#60a5fa;text-decoration:none}
 footer a:hover{text-decoration:underline}
 footer .kofi{color:#fff;background:#13c3ff;padding:.3rem .7rem;border-radius:4px}
 footer .kofi:hover{text-decoration:none;opacity:.9}
+nav.tabs{display:flex;gap:.3rem;flex-wrap:wrap;margin:1.2rem 0 .5rem;border-bottom:1px solid #333}
+nav.tabs button{background:none;border:0;border-bottom:2px solid transparent;color:#888;padding:.5rem .8rem;margin:0;border-radius:0;font-size:.95rem;cursor:pointer}
+nav.tabs button:hover{color:#ccc}
+nav.tabs button.active{color:#fff;border-bottom-color:#2563eb}
+section.tab{display:none}
+section.tab.active{display:block}
+section.tab>h2:first-child{margin-top:.3rem}
 </style></head><body>
 <h1>DS5-Linux-Bridge <small id="ver"></small></h1>
 <p>Adapter configuration. Changes are saved to the adapter's flash.</p>
 
+<nav class="tabs">
+  <button data-tab="main" class="active">Controller</button>
+  <button data-tab="bonds">Paired</button>
+  <button data-tab="net" id="tabbtn_net">Network</button>
+  <button data-tab="wake" id="tabbtn_wake">Wake / WOL</button>
+</nav>
+
+<section id="tab-main" class="tab active">
 <div id="statuscard">
   <span class="dot"></span>
   <span class="s" id="st_conn">Checking…</span>
@@ -115,10 +130,10 @@ footer .kofi:hover{text-decoration:none;opacity:.9}
   <span id="status"></span>
 </div>
 <div class="hint">Factory reset restores all settings above to defaults. Paired
-  controllers are kept (use <b>Forget all</b> below to remove those).</div>
+  controllers are kept (use <b>Forget all</b> in the Paired tab to remove those).</div>
+</section>
 
-<hr>
-
+<section id="tab-bonds" class="tab">
 <h2>Paired controllers</h2>
 <div class="hint">Controllers the adapter remembers. The adapter holds up to
   <span id="bond_max">4</span>. Once a controller is paired the adapter stops
@@ -131,10 +146,36 @@ footer .kofi:hover{text-decoration:none;opacity:.9}
   <button id="forgetall" class="fg">Forget all</button>
   <span id="bstatus"></span>
 </div>
+</section>
 
+<section id="tab-net" class="tab">
+<div id="wol_section" style="display:none">
+<h2>Network</h2>
+<div class="hint">AP setup mode is onboarding-only — the controller and the full
+  config work once the adapter is on your home WiFi (STA mode).</div>
+<div class="field">
+  <label class="lbl">Device name</label>
+  <input id="hostname" type="text" inputmode="latin" maxlength="10"
+         placeholder="ds5" pattern="[A-Za-z0-9-]{1,10}">
+  <div class="hint">The name this adapter uses on your network — reach the page at
+    <code>http://&lt;name&gt;.local/</code>. Give each adapter a unique name if you
+    run more than one (otherwise they collide on <code>ds5.local</code>).
+    Letters, digits and hyphens only. Takes effect after the adapter reboots.</div>
+</div>
+<div class="btns">
+  <button id="net_save">Save</button>
+  <span id="nstatus"></span>
+</div>
+<div class="field" id="wifi_reset_field" style="display:none">
+  <button id="wifi_reset" type="button" class="fg">Reset saved WiFi</button>
+  <span id="wrstatus"></span>
+</div>
+</div>
+</section>
+
+<section id="tab-wake" class="tab">
 <div id="wake_section" style="display:none">
-<hr>
-<h2>Wake</h2>
+<h2>Wake keyboard</h2>
 <div class="field chk">
   <input type="checkbox" id="wake_kbd_enabled">
   <label for="wake_kbd_enabled">USB wake keyboard (wake the PC from sleep)</label>
@@ -151,27 +192,7 @@ footer .kofi:hover{text-decoration:none;opacity:.9}
 </div>
 </div>
 
-<div id="wol_section" style="display:none">
-<hr>
-<h2>Network</h2>
-<div class="field">
-  <label class="lbl">Device name</label>
-  <input id="hostname" type="text" inputmode="latin" maxlength="10"
-         placeholder="ds5wol" pattern="[A-Za-z0-9-]{1,10}">
-  <div class="hint">The name this adapter uses on your network — reach the page at
-    <code>http://&lt;name&gt;.local/</code>. Give each adapter a unique name if you
-    run more than one (otherwise they collide on <code>ds5wol.local</code>).
-    Letters, digits and hyphens only. Takes effect after the adapter reboots.</div>
-</div>
-<div class="btns">
-  <button id="net_save">Save</button>
-  <span id="nstatus"></span>
-</div>
-<div class="field" id="wifi_reset_field" style="display:none">
-  <button id="wifi_reset" type="button" class="fg">Reset saved WiFi</button>
-  <span id="wrstatus"></span>
-</div>
-
+<div id="wol_section2" style="display:none">
 <h2>Wake-on-LAN</h2>
 <div class="hint">Wake a PC over the network by sending it a magic packet. Useful
   when the PC is fully off (S4/S5) and USB wake isn't supported by its
@@ -190,16 +211,37 @@ footer .kofi:hover{text-decoration:none;opacity:.9}
     <button id="wol_resolve" type="button">Find MAC</button>
   </div>
 </div>
+<div class="field">
+  <label class="lbl">Second target (optional, e.g. a TV)</label>
+  <input id="wol_target_mac2" type="text" inputmode="latin"
+         placeholder="AA:BB:CC:DD:EE:FF" pattern="([0-9A-Fa-f]{2}[:\-]?){5}[0-9A-Fa-f]{2}">
+  <div class="hint">A second device to wake alongside the PC. Leave blank if you
+    only wake one device. "Wake now" (and a controller press) wakes both.</div>
+</div>
 <div class="btns">
   <button id="wol_save">Save</button>
-  <button id="wol_wake">Wake PC now</button>
+  <button id="wol_wake">Wake now</button>
   <span id="wstatus"></span>
 </div>
 </div>
+</section>
 
 <script>
 const $=id=>document.getElementById(id);
 function setStatus(msg,cls){const s=$('status');s.className=cls||'';s.textContent=msg}
+
+// ----- Tabs (single page, client-side show/hide; selection kept in the hash) -----
+function showTab(id){
+  const btn=document.querySelector('nav.tabs button[data-tab="'+id+'"]');
+  if(!btn||btn.style.display==='none'){id='main';}  // fall back if tab is hidden
+  document.querySelectorAll('section.tab').forEach(s=>
+    s.classList.toggle('active',s.id==='tab-'+id));
+  document.querySelectorAll('nav.tabs button').forEach(b=>
+    b.classList.toggle('active',b.dataset.tab===id));
+}
+document.querySelectorAll('nav.tabs button').forEach(b=>
+  b.onclick=()=>{location.hash=b.dataset.tab;showTab(b.dataset.tab);});
+window.addEventListener('hashchange',()=>showTab(location.hash.slice(1)||'main'));
 
 function bindRange(id,out){const el=$(id);const fn=()=>$(out).textContent=el.value;el.oninput=()=>{fn();markDirty()};return fn}
 const upd=[bindRange('audio_buffer_length','ab_val'),bindRange('inactive_time','it_val')];
@@ -218,17 +260,21 @@ async function load(){
     $('inactive_time').value=c.inactive_time;
     $('disable_inactive_disconnect').checked=!!c.disable_inactive_disconnect;
     $('disable_pico_led').checked=!!c.disable_pico_led;
-    // Network/Wake-on-LAN section. wol_target_mac is 12 hex chars, all-zero ==
+    // Network + Wake-on-LAN. wol_target_mac[2] are 12 hex chars, all-zero ==
     // unset. (wol_capable/wifi_capable are always true on current firmware; the
-    // gates keep the page working against older firmware.)
+    // gates keep the page working against older firmware -- when a gate is false
+    // its tab has no content, so hide the whole tab button too.)
     if(c.wol_capable){
-      $('wol_section').style.display='';
+      $('wol_section').style.display='';   // Network tab: device name
+      $('wol_section2').style.display='';  // Wake tab: Wake-on-LAN
       // Always reflect the current saved name (server returns a sanitized,
       // never-empty hostname). Assign unconditionally so the box shows the real
       // value, not the placeholder, after a rename.
       $('hostname').value=c.hostname||'';
       if(c.wol_target_mac&&c.wol_target_mac!=='000000000000')
         $('wol_target_mac').value=fmtAddr(c.wol_target_mac);
+      if(c.wol_target_mac2&&c.wol_target_mac2!=='000000000000')
+        $('wol_target_mac2').value=fmtAddr(c.wol_target_mac2);
     }
     if(c.wifi_capable){
       $('wifi_reset_field').style.display='';
@@ -239,6 +285,12 @@ async function load(){
       $('wake_section').style.display='';
       $('wake_kbd_enabled').checked=!!c.wake_kbd_enabled;
     }
+    // Hide a tab's nav button when the whole tab is empty on this firmware.
+    if(!c.wol_capable){$('tabbtn_net').style.display='none';}
+    if(!c.wol_capable&&!c.wake_kbd_capable){$('tabbtn_wake').style.display='none';}
+    // Re-apply the selected tab now that hidden buttons are known (a deep-link
+    // to a now-hidden tab falls back to Controller).
+    showTab(location.hash.slice(1)||'main');
     upd.forEach(f=>f());
     $('save').disabled=true;setStatus('');
   }catch(e){setStatus('load failed','err')}
@@ -376,23 +428,26 @@ function wstatus(msg,cls){const s=$('wstatus');s.className=cls||'';s.textContent
 // Normalize "AA:BB:..", "aa-bb-..", "aabb.." -> 12 upper-hex chars, or '' if invalid.
 function macHex(s){const h=s.replace(/[:\-.\s]/g,'').toUpperCase();return /^[0-9A-F]{12}$/.test(h)?h:''}
 $('wol_save').onclick=async()=>{
+  // Both MAC fields: empty is allowed (clears that target -> all-zero "unset");
+  // only a non-empty-but-malformed MAC is an error.
   const raw=$('wol_target_mac').value.trim();
-  // Empty MAC is allowed (clears the WOL target -> all-zero "unset"); only a
-  // non-empty-but-malformed MAC is an error.
-  let h='000000000000';
+  const raw2=$('wol_target_mac2').value.trim();
+  let h='000000000000',h2='000000000000';
   if(raw){h=macHex(raw);if(!h){wstatus('invalid MAC','err');return}}
+  if(raw2){h2=macHex(raw2);if(!h2){wstatus('invalid 2nd MAC','err');return}}
   wstatus('saving…','dirty');
   try{
-    const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'wol_target_mac='+h});
-    if(r.ok){wstatus('Saved ✓','ok');if(raw)$('wol_target_mac').value=fmtAddr(h)}
+    const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'wol_target_mac='+h+'&wol_target_mac2='+h2});
+    if(r.ok){wstatus('Saved ✓','ok');if(raw)$('wol_target_mac').value=fmtAddr(h);if(raw2)$('wol_target_mac2').value=fmtAddr(h2)}
     else wstatus('save failed','err');
   }catch(e){wstatus('save failed','err')}
 };
 $('wol_wake').onclick=async()=>{
-  const h=macHex($('wol_target_mac').value); // send the field value if set, else server uses stored
+  // Wake ALL stored targets: POST action=wake with no mac so the server fires a
+  // magic packet to every configured (non-zero) target.
   wstatus('sending magic packet…','dirty');
   try{
-    const r=await fetch('/api/wol',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'action=wake'+(h?'&mac='+h:'')});
+    const r=await fetch('/api/wol',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'action=wake'});
     if(r.ok)wstatus('Magic packet sent ✓','ok');
     else wstatus('send failed','err');
   }catch(e){wstatus('send failed','err')}
@@ -439,6 +494,7 @@ async function loadStatus(){
   }catch(e){$('st_conn').textContent='status unavailable'}
 }
 
+showTab(location.hash.slice(1)||'main'); // initial render before async load resolves
 load();
 loadBonds();
 loadStatus();

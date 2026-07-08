@@ -146,7 +146,7 @@ set_source_files_properties(src/ram_mem.c PROPERTIES COMPILE_OPTIONS
 # extra driver sources -- the cyw43 driver + WiFi firmware are already linked
 # (pico_cyw43_arch, used for BT). We just add our STA/lwIP glue and ask the SDK
 # to wire lwIP to the WiFi netif (CYW43_LWIP=1, set below where the other CYW43
-# defs live). mDNS for ds5wol.local discovery. web_api.cpp is the httpd core
+# defs live). mDNS for ds5.local discovery. web_api.cpp is the httpd core
 # (fs_open_custom / JSON API / POST handlers), kept in a separate file from the
 # netif glue.
 if (ENABLE_WIFI_WOL)

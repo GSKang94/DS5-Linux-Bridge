@@ -46,7 +46,7 @@
 #define LWIP_UDP                    1
 
 // IP services. In STA mode the dongle is a DHCP *client* of the home router
-// and uses mDNS for discovery (ds5wol.local), so it needs DHCP client + IGMP +
+// and uses mDNS for discovery (ds5.local), so it needs DHCP client + IGMP +
 // DNS + the mDNS responder.
 #define LWIP_DHCP                   1   // DHCP *client*: lease from the home router
 #define LWIP_DNS                    1

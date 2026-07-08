@@ -27,8 +27,13 @@
 // Vendored from raspberrypi/pico-examples (pico_w/wifi/access_point), itself
 // from MicroPython. A tiny DHCP *server* for AP mode: hands a single private
 // lease to a connecting client so a phone/laptop can reach the captive portal.
-// Used ONLY by the WiFi-WOL onboarding AP path (src/wifi_net.cpp). Unmodified
-// except for this note.
+// Used ONLY by the WiFi-WOL onboarding AP path (src/wifi_net.cpp).
+//
+// MODIFIED from upstream: DHCPS_BASE_IP/DHCPS_MAX_IP are re-homed to the DS5 AP's
+// 10.55.55.104/29 subnet (gateway .105, pool .106-.110) instead of the upstream
+// example's /24 (.16+, 8 leases). Leases build off the server IP's first three
+// octets + (DHCPS_BASE_IP + slot) as the last octet (see dhcpserver.c), so the
+// last octet must fall inside the /29 host range. The .c logic is unchanged.
 //
 #ifndef _DHCPSERVER_H_
 #define _DHCPSERVER_H_
@@ -39,8 +44,9 @@
 extern "C" {
 #endif
 
-#define DHCPS_BASE_IP (16)
-#define DHCPS_MAX_IP (8)
+// Tuned to the DS5 AP /29 (10.55.55.104/29, gw .105): leases .106-.110.
+#define DHCPS_BASE_IP (106)
+#define DHCPS_MAX_IP (5)
 
 typedef struct _dhcp_server_lease_t {
     uint8_t mac[6];

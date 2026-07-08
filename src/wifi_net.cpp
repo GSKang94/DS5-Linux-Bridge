@@ -81,6 +81,38 @@ extern "C" bool web_api_wol_send_impl(const uint8_t mac[6]) {
     return wifi_wol_send(mac);
 }
 
+static bool mac_is_zero(const uint8_t mac[6]) {
+    for (int i = 0; i < 6; i++) if (mac[i]) return false;
+    return true;
+}
+
+// Fire a magic packet at every configured (non-zero) WOL target -- currently
+// wol_target_mac (the PC) and wol_target_mac2 (e.g. a TV). Shared by the wake
+// companion (wake_emit_wol) and the web UI's "Wake now" so both wake ALL stored
+// targets. Returns true if at least one packet was sent. Skips silently in AP
+// onboarding mode (no LAN uplink -- the caller usually gates this too).
+bool wifi_wol_send_all(void) {
+    if (wifi_net_in_ap_mode()) return false;
+    const Config_body &c = get_config();
+    const uint8_t *targets[2] = { c.wol_target_mac, c.wol_target_mac2 };
+    bool any = false;
+    for (const uint8_t *mac : targets) {
+        if (mac_is_zero(mac)) continue;
+        const bool sent = wifi_wol_send(mac);
+        printf("[wifi] WOL %02X:%02X:%02X:%02X:%02X:%02X %s\n",
+               mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+               sent ? "sent" : "send failed");
+        any = any || sent;
+    }
+    return any;
+}
+
+// Strong override of the shared web_api "wake all stored targets" hook (weak
+// no-op in web_api.cpp): the manual "Wake now" button with no explicit MAC.
+extern "C" bool web_api_wol_send_all_impl(void) {
+    return wifi_wol_send_all();
+}
+
 //--------------------------------------------------------------------+
 // Non-blocking ARP resolve (IP -> MAC) for the web UI's "Find MAC". The POST
 // callback only records the target; wifi_net_task() drives the cache-check/
@@ -151,16 +183,10 @@ extern "C" int web_api_resolve_mac_poll_impl(uint8_t out_mac[6]) {
 // packet was sent.
 extern "C" bool wake_emit_wol(void) {
     // No LAN in onboarding mode -- the SoftAP carries only the local portal, so
-    // a magic packet has nowhere to go. (wifi_net_in_ap_mode() is defined below.)
+    // a magic packet has nowhere to go. (wifi_wol_send_all() re-checks this too.)
     if (wifi_net_in_ap_mode()) return false;
-    const uint8_t *mac = get_config().wol_target_mac;
-    bool zero = true;
-    for (int i = 0; i < 6; i++) if (mac[i]) { zero = false; break; }
-    if (zero) return false;
-
-    const bool sent = wifi_wol_send(mac);
-    printf("[wifi] wake WOL %s\n", sent ? "sent" : "send failed");
-    return sent;
+    // Wake every configured target (PC + optional 2nd, e.g. a TV).
+    return wifi_wol_send_all();
 }
 
 //--------------------------------------------------------------------+
@@ -175,13 +201,16 @@ static bool in_ap_mode = false;
 static bool force_ap = false;          // set by wifi_net_request_ap_onboarding()
 static bool wifi_mdns_added = false;   // STA: mDNS netif registered once
 
-// AP-mode IP plan: dongle at 192.168.4.1/24, DHCP hands clients .16+ (see
-// dhcpserver.h DHCPS_BASE_IP). The DNS server answers every lookup with .1 so
-// the captive-portal sheet pops on the phone.
-#define AP_GW_A 192
-#define AP_GW_B 168
-#define AP_GW_C 4
-#define AP_GW_D 1
+// AP-mode IP plan: network 10.55.55.104/29, dongle (gateway) at 10.55.55.105,
+// DHCP hands clients .106-.110 (see dhcpserver.h DHCPS_BASE_IP/DHCPS_MAX_IP,
+// tuned to this /29). The /29 caps the pool at 5 client slots so nobody can
+// cram a crowd of stations onto the single radio and starve BT/audio. The DNS
+// server answers every lookup with .105 so the captive-portal sheet pops on the
+// phone.
+#define AP_GW_A 10
+#define AP_GW_B 55
+#define AP_GW_C 55
+#define AP_GW_D 105
 
 static dhcp_server_t ap_dhcp;
 static dns_server_t  ap_dns;
@@ -221,7 +250,7 @@ static void wifi_sta_init(void) {
     cyw43_arch_enable_sta_mode();
 
     // Network hostname advertised as "<hostname>.local". User-set in config so
-    // multiple dongles on one LAN don't collide on ds5wol.local. config_valid()
+    // multiple dongles on one LAN don't collide on ds5.local. config_valid()
     // has already sanitized it to a valid DNS label (and defaulted it if empty),
     // so it's safe to use verbatim.
     const char *hostname = get_config().hostname;
@@ -275,7 +304,10 @@ static void wifi_ap_init(void) {
     // demo does).
     ip4_addr_t gw, mask;
     IP4_ADDR(&gw, AP_GW_A, AP_GW_B, AP_GW_C, AP_GW_D);
-    IP4_ADDR(&mask, 255, 255, 255, 0);
+    // /29 (255.255.255.248): 8 addresses .104-.111, usable hosts .105-.110.
+    // Gateway/dongle at .105, DHCP pool .106-.110 (see dhcpserver.h). Small on
+    // purpose -- 5 client slots max on the single BT/WiFi radio.
+    IP4_ADDR(&mask, 255, 255, 255, 248);
     struct netif *apn = &cyw43_state.netif[CYW43_ITF_AP];
     netif_set_addr(apn, &gw, &mask, &gw);
     // Force broadcast routing out the AP netif. The DHCP server replies to

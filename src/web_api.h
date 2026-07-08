@@ -31,6 +31,12 @@ void web_api_init();
 // Returns true if a packet was actually emitted.
 bool web_api_wol_send(const uint8_t mac[6]);
 
+// Wake EVERY configured (non-zero) WOL target, PROVIDED BY THE TRANSPORT (weak
+// default is a no-op). Used by the UI's "Wake now" button when no explicit MAC
+// is given, so it fires all stored targets (PC + optional 2nd, e.g. a TV)
+// through one code path. Returns true if at least one packet was emitted.
+bool web_api_wol_send_all(void);
+
 // ARP MAC-resolution hooks, PROVIDED BY THE TRANSPORT (weak defaults are
 // no-ops). web_api calls _start() when the UI POSTs /api/resolve_mac with a
 // target IP, so the user can fill in the WOL MAC field without hunting it
@@ -51,6 +57,7 @@ int web_api_resolve_mac_poll(uint8_t out_mac[6]);
 #else
 static inline void web_api_init() {}
 static inline bool web_api_wol_send(const uint8_t *) { return false; }
+static inline bool web_api_wol_send_all(void) { return false; }
 static inline void web_api_resolve_mac_start(const uint8_t *) {}
 static inline int web_api_resolve_mac_poll(uint8_t *) { return -1; }
 #endif // ENABLE_WEBUI

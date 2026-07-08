@@ -47,6 +47,13 @@ extern "C" __attribute__((weak)) bool web_api_wol_send_impl(const uint8_t mac[6]
 }
 bool web_api_wol_send(const uint8_t mac[6]) { return web_api_wol_send_impl(mac); }
 
+// "Wake every stored target" hook: weak no-op default, strong override in
+// wifi_net.cpp (wifi_wol_send_all). Used by the "Wake now" button.
+extern "C" __attribute__((weak)) bool web_api_wol_send_all_impl(void) {
+    return false;
+}
+bool web_api_wol_send_all(void) { return web_api_wol_send_all_impl(); }
+
 //--------------------------------------------------------------------+
 // ARP resolve hooks: weak no-op defaults, strong overrides in wifi_net.cpp.
 // See web_api.h for rationale (non-blocking start/poll split).
@@ -141,6 +148,8 @@ static int json_config(char *out, size_t cap) {
     const Config_body &c = get_config();
     char wol_hex[13];
     mac_to_hex(c.wol_target_mac, wol_hex);
+    char wol_hex2[13];
+    mac_to_hex(c.wol_target_mac2, wol_hex2);
     return snprintf(out, cap,
                     "{\"version\":\"%s\","
                     "\"inactive_time\":%u,"
@@ -150,6 +159,7 @@ static int json_config(char *out, size_t cap) {
                     "\"audio_buffer_length\":%u,"
                     "\"controller_mode\":%u,"
                     "\"wol_target_mac\":\"%s\","
+                    "\"wol_target_mac2\":\"%s\","
                     // hostname is sanitized to [a-z0-9-] in config_valid(), so it
                     // never needs JSON string escaping here.
                     "\"hostname\":\"%s\","
@@ -174,6 +184,7 @@ static int json_config(char *out, size_t cap) {
                     c.audio_buffer_length,
                     c.controller_mode,
                     wol_hex,
+                    wol_hex2,
                     c.hostname,
                     c.wake_kbd_enabled);
 }
@@ -515,6 +526,10 @@ static void apply_post(char *body) {
             // all-zero MAC is the canonical "unset" and is allowed (clears it).
             uint8_t mac[6];
             if (hex_to_addr(eq, mac)) memcpy(c.wol_target_mac, mac, 6);
+        } else if (strcmp(tok, "wol_target_mac2") == 0) {
+            // Second WOL target (e.g. a TV). Same parse/unset convention as #1.
+            uint8_t mac[6];
+            if (hex_to_addr(eq, mac)) memcpy(c.wol_target_mac2, mac, 6);
         } else if (strcmp(tok, "wake_kbd_enabled") == 0) {
             c.wake_kbd_enabled = val ? 1 : 0;
         } else if (strcmp(tok, "hostname") == 0) {
@@ -602,9 +617,10 @@ static void apply_bonds_post(char *body) {
     }
 }
 
-// POST /api/wol -- action=wake[&mac=AABBCCDDEEFF]. With no mac, uses the stored
-// Config_body.wol_target_mac. Fires the transport's WOL send hook (no-op unless
-// the WiFi transport is linked).
+// POST /api/wol -- action=wake[&mac=AABBCCDDEEFF]. With an explicit mac, wakes
+// exactly that target. With no mac (the page's "Wake now" button), fires EVERY
+// stored target (wol_target_mac + wol_target_mac2) via web_api_wol_send_all().
+// Both routes are no-ops unless the WiFi transport is linked.
 static void apply_wol_post(char *body) {
     char action[16] = "";
     uint8_t mac[6];
@@ -623,19 +639,17 @@ static void apply_wol_post(char *body) {
 
     if (strcmp(action, "wake") != 0) return;
 
-    if (!have_mac) {
-        memcpy(mac, get_config().wol_target_mac, 6);
-        // all-zero == unset
-        bool zero = true;
-        for (int i = 0; i < 6; i++) if (mac[i]) { zero = false; break; }
-        if (zero) {
-            printf("[WEB] WOL requested but no target MAC configured\n");
-            return;
-        }
+    if (have_mac) {
+        const bool sent = web_api_wol_send(mac);
+        printf("[WEB] WOL %s via web UI\n", sent ? "sent" : "send failed (no transport)");
+        return;
     }
 
-    const bool sent = web_api_wol_send(mac);
-    printf("[WEB] WOL %s via web UI\n", sent ? "sent" : "send failed (no transport)");
+    // No explicit MAC: wake every configured target. send_all() already skips
+    // unset (all-zero) targets and returns false if none were configured.
+    const bool sent = web_api_wol_send_all();
+    if (!sent) printf("[WEB] WOL requested but no target MAC configured (or no transport)\n");
+    else printf("[WEB] WOL sent to all stored targets via web UI\n");
 }
 
 // POST /api/resolve_mac -- ip=A.B.C.D. Kicks off an ARP lookup for that address

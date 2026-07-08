@@ -18,11 +18,12 @@
 
 constexpr uint32_t CONFIG_MAGIC = 0x66ccff00;
 // Layout version. Only bump on a genuinely incompatible layout change (see the
-// append-only note in config.h); NOT a reset trigger. v9 added WiFi creds
-// (onboarding); v8 hostname; v7 wol static-IP (now reserved); v6
-// wol_target_mac; v5 webconfig_custom_ip; v4 bond_names. v6-v9 shipped only on
-// the wifi-wol experiment branch; this layout is byte-identical to that v9.
-constexpr uint16_t CONFIG_VERSION = 9;
+// append-only note in config.h); NOT a reset trigger. v10 added wol_target_mac2
+// (second WOL target); v9 added WiFi creds (onboarding); v8 hostname; v7 wol
+// static-IP (now reserved); v6 wol_target_mac; v5 webconfig_custom_ip; v4
+// bond_names. v6-v9 shipped only on the wifi-wol experiment branch. Append-only,
+// so an older v9 blob migrates cleanly (its tail zeroes -> wol_target_mac2 unset).
+constexpr uint16_t CONFIG_VERSION = 10;
 // Config lives just BELOW BTstack's link-key bank, NOT in the last flash sector.
 // The RP2350 BOOTSEL/picotool UF2 loader erases the top of flash (the last
 // sector) on download -- even though the UF2 image ends far below it -- so a
@@ -84,6 +85,7 @@ static_assert(offsetof(Config_body, wifi_provisioned) == 130);
 static_assert(offsetof(Config_body, wifi_ssid) == 131);
 static_assert(offsetof(Config_body, wifi_psk) == 164);
 static_assert(offsetof(Config_body, wake_kbd_enabled) == 228);
+static_assert(offsetof(Config_body, wol_target_mac2) == 229);
 
 // CRC over the first `len` bytes of the body. `len` is the stored size, so an
 // older/shorter blob still validates against the bytes it actually wrote.

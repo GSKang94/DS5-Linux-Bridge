@@ -36,16 +36,20 @@ getting it right on Linux / SteamOS (Bazzite).
 - 🔇 **Hybrid hardware mic mute** — driverless local mute via the physical Mute
   button, synced with the host sound panel, yielding to active host drivers
   (e.g. Linux `hid-playstation`) to avoid conflicts.
-- 🌐 **On-device web config + bond management** — the adapter hosts its own
-  configuration page (no app, no WebHID, any browser). Adjust settings and
-  manage remembered controllers. Reachable whether or not a controller is
-  connected.
+- 🌐 **Web config over WiFi + bond management** — the adapter joins your home WiFi
+  and hosts its own configuration page at **http://ds5.local/** (no app, no
+  WebHID, any browser). First-run setup is a phone-friendly captive portal.
+  Adjust settings and manage remembered controllers, connected or not.
 - 🎮 **Decky Loader companion plugin** — a [Decky Loader plugin](https://github.com/kungaa/DS5-Linux-Decky)
   surfaces controller status and settings in the Quick Access Menu, talking to
   the same on-device API as the web page.
-- 🔌 **Wake from sleep (S3 / S5)** — wake the host by turning on the controller
-  (S5 needs a board that wakes from a USB **keyboard**). The DualSense auto-powers
-  off after the host sleeps/shuts down to save its battery.
+- 🖥️ **Wake-on-LAN** — press the controller's PS button to wake a sleeping or
+  fully-off PC (even S4/S5) by sending a magic packet over WiFi. Wakes up to two
+  targets (e.g. your PC and a TV), with a one-click "Find MAC" helper.
+- 🔌 **Wake from sleep (S3)** — an optional USB wake keyboard (a web toggle) lets a
+  controller press wake the host over USB on boards that don't do WiFi WOL. Off by
+  default, so the adapter looks like a plain DualSense over USB. The DualSense also
+  auto-powers off after the host sleeps/shuts down to save its battery.
 - ⚡ **Low-latency performance** — Bluetooth/USB/audio hot paths run from RAM
   (`.time_critical`) to avoid Flash XIP cache thrashing, with tuned scheduling
   and pipelines to minimize latency and eliminate audio stutter.
@@ -63,14 +67,18 @@ page, and OS-specific (Linux / Windows) behavior and troubleshooting.
 
 1. **Flash** — hold **BOOTSEL** on the Pico 2 W, plug it into USB, and drop the
    `.uf2` onto the mounted `RP2350` volume.
-2. **Pair** — put the DualSense in pairing mode (hold **Share + PS** until the
+2. **Onboard WiFi** — the first time, the adapter opens a setup network named
+   **`DS5-Setup-XXXX`**. Join it from your phone or laptop, browse to
+   **http://10.55.55.105/**, pick your home WiFi and enter its password. The
+   adapter reboots and joins your network.
+3. **Pair** — put the DualSense in pairing mode (hold **Share + PS** until the
    lightbar double-blinks). The adapter detects, pairs, and connects; the onboard
    LED goes solid.
-3. **Configure** *(optional)* — browse to **http://10.55.55.105/** to change
-   settings or manage paired controllers.
+4. **Configure** *(optional)* — once on your WiFi, browse to **http://ds5.local/**
+   to change settings, set up Wake by USB or Wake-on-LAN, and manage paired controllers.
 
-Full details, including how to add a second controller and per-OS audio notes,
-are in the **[User Guide](docs/USER_GUIDE.md)**.
+Full details, including onboarding, Wake-on-LAN, adding a second controller, and
+per-OS audio notes, are in the **[User Guide](docs/USER_GUIDE.md)**.
 
 ---
 
@@ -81,16 +89,16 @@ These are the deliberate departures from upstream that define this fork's
 *direction* (upstream is actively developed and excellent — this isn't a list of
 things it gets wrong):
 
-- 🌐 **On-device web config instead of WebHID.** The adapter serves its own
-  config page over a USB network interface — works in any browser on any OS, no
-  WebHID (which never worked in Firefox). Includes bond management.
-- 🎮 **Steam Deck Decky plugin** that drives the same on-device API.
-- 🔌 **Config page reachable with no controller connected**, and a single stable
-  network adapter that survives controller connect/disconnect (the network
-  interface keeps the same identity in both of the adapter's USB modes).
-- 👻 **No "ghost" devices when idle** — when no controller is connected the
-  adapter hides its audio/gamepad interfaces, while staying awake for remote
-  wake and never misrouting input to the keyboard.
+- 🌐 **Web config over WiFi instead of WebHID.** The adapter joins your home WiFi
+  and serves its own config page at `ds5.local` — works in any browser on any OS,
+  no WebHID (which never worked in Firefox). Includes bond management.
+- 🖥️ **Wake-on-LAN.** Press the controller's PS button to wake a sleeping or
+  fully-off PC over the network — including S4/S5, which USB wake can't reach.
+- 🎮 **Decky Loader plugin** that drives the same on-device API.
+- 🕵️ **Plain-DualSense USB face by default.** Over USB the adapter presents only
+  the controller — no keyboard, no network device — so anticheat sees a normal
+  DualSense. The optional USB wake keyboard is a web toggle, off unless you turn
+  it on.
 - 🎚️ **Lightweight boxcar/linear resampler** for haptics and the 512→480 speaker
   resample instead of WDL — cheaper on CPU, tuned to match cabled intensity.
 - 🔈 **Volume fully yielded to the host** — held in RAM only, never written to flash.
@@ -114,8 +122,10 @@ crackling — only do so when actually debugging.
    cmake -DCMAKE_BUILD_TYPE=Release ..
    make
    ```
-3. To disable the low-battery warning LED blink, configure with
-   `-DENABLE_BATT_LED=OFF`. To turn off the web config UI, `-DENABLE_WEBCONFIG=OFF`.
+3. Handy CMake toggles: `-DENABLE_WIFI_WOL=OFF` builds a smaller firmware with no
+   WiFi config page or Wake-on-LAN; `-DENABLE_BATT_LED=OFF` disables the
+   low-battery LED blink; `-DENABLE_WAKE_HID=OFF` drops the wake machinery
+   entirely.
 
 ### Board targets
 

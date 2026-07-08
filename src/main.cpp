@@ -34,6 +34,10 @@
 #include <cstdint>
 #include <cstring>
 
+// S3-wake-wedge leak guard: usbd_edpt_release() to drop a leaked CLAIMED bit on
+// the gamepad IN endpoint after a failed report.
+#include "device/usbd_pvt.h"
+
 int reportSeqCounter = 0;
 bool spk_active = false;
 bool mic_active = false;
@@ -123,15 +127,35 @@ void realtime_hid_queue_requeue_front(const uint8_t *report) {
 // re-sends the same interrupt_in_data unconditionally, so running it on both
 // calls would emit the report up to twice per iteration; restrict it to the
 // single bottom call to preserve the original modes-0/1 cadence.
-// Throttled logger for the tud_hid_report failure path. interrupt_loop runs
-// every main-loop iteration, so an unconditional printf here floods UART (and
-// perturbs loop timing) whenever the HID IN endpoint stays un-drainable -- which
-// happens for a sustained stretch after a suspend/resume/re-enumeration bounce
-// (the host stops polling the endpoint while the bus state settles, so
-// usbd_edpt_xfer/claim keeps failing). Log at most once per second and fold in
-// the suppressed count so a persistent failure is still visible without the
-// flood. (HW-observed: 6000+ identical lines after a 2nd remote-wake re-mount.)
-static void log_hid_report_error() {
+
+// S3-wake-wedge leak guard + throttled logger.
+//
+// tud_hid_report failing while tud_hid_ready() just returned true in the SAME
+// main-loop iteration is an inconsistent TinyUSB state by construction:
+// ready => ep_in != 0 && !BUSY, dcd_edpt_xfer on the RP2 port cannot return
+// false, the 63-byte report always fits CFG_TUD_HID_EP_BUFSIZE, and nothing
+// else runs between the check and the call. The one state that fails
+// PERSISTENTLY is a leaked CLAIMED bit on the gamepad IN endpoint's ep_status
+// slot (claimed=1, busy=0): tud_hid_ready checks only BUSY, usbd_edpt_claim
+// checks both, and only a completed transfer or a bus reset clears CLAIMED. It
+// gets planted during the host's post-wake enumeration churn (a report armed
+// while the host isn't yet polling the interface) and never clears -> the
+// permanent tud_hid_report failure flood + dead pad seen on the S3-wake wedge.
+//
+// FIX: on a failed send, RELEASE the stale claim so the very next iteration can
+// re-claim and succeed. usbd_edpt_release is a no-op unless (claimed && !busy),
+// so on a healthy transient miss it does nothing; on the leaked state it drops
+// the leak. HW-confirmed a single release clears the leak, so releasing on every
+// failed iteration heals it immediately. Belt-and-suspenders guard that makes
+// the wedge unreachable regardless of how the claim got planted; the primary
+// fix is the distinct-bcdDevice-per-variant change in usb_descriptors.cpp.
+static constexpr uint8_t GAMEPAD_EP_IN = 0x84; // FULL gamepad / MINIMAL dummy (shared addr)
+
+static void handle_hid_report_failure() {
+  // Drop a possibly-leaked CLAIMED bit so the next send can proceed. No-op on a
+  // healthy endpoint (release requires claimed && !busy).
+  usbd_edpt_release(0, GAMEPAD_EP_IN);
+
   static uint64_t last_log_us = 0;
   static uint32_t suppressed = 0;
   const uint64_t now = time_us_64();
@@ -167,7 +191,7 @@ void interrupt_loop(bool drain_only = false) {
     if (drain_only)
       return; // non-realtime: only emit from the bottom-of-loop call
     if (!tud_hid_report(0x01, interrupt_in_data, HID_INPUT_REPORT_LEN)) {
-      log_hid_report_error();
+      handle_hid_report_failure();
     }
     return;
   }
@@ -178,7 +202,7 @@ void interrupt_loop(bool drain_only = false) {
   // Only send to TinyUSB if we actually grabbed fresh data
   if (should_send) {
     if (!tud_hid_report(0x01, safe_report, HID_INPUT_REPORT_LEN)) {
-      log_hid_report_error();
+      handle_hid_report_failure();
       realtime_hid_queue_requeue_front(safe_report);
     }
   }

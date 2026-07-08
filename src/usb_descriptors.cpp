@@ -123,10 +123,33 @@ tusb_desc_device_t desc_device =
     .bNumConfigurations = 0x01
 };
 
+#ifdef ENABLE_WAKE_HID
+// Defined further down with the variant orchestrator; forward-declared so the
+// device-descriptor callback (above that code) can read the active variant.
+bool usb_descriptor_variant_is_full(void);
+#endif
+
 // Invoked when received GET DEVICE DESCRIPTOR
 // Application return pointer to descriptor
 uint8_t const *tud_descriptor_device_cb(void) {
     desc_device.idProduct = ds_mode() ? 0x0CE6 : 0x0DF2;
+#ifdef ENABLE_WAKE_HID
+    // S3-wake wedge fix. Per Microsoft's USB docs, the
+    // Windows hub driver CACHES a device's descriptors keyed on
+    // {VID, PID, bcdDevice (device release number)}. On resume from S3 Windows
+    // reactivates that CACHED config instead of re-reading -- so when our
+    // MINIMAL->FULL swap presents a DIFFERENT descriptor under the SAME
+    // VID/PID/bcdDevice it slept with, the host keeps its stale MINIMAL view,
+    // never re-reads (HW-confirmed: cfgreads never advanced across the wake),
+    // and chokes on the topology change -> mount retry-loop + dead pad.
+    //   Fix: give the two variants DIFFERENT bcdDevice values. Now the on-wake
+    // MINIMAL->FULL bounce looks to Windows like a device with a release number
+    // it has NOT cached, so it re-queries the full descriptor set and
+    // enumerates FULL cleanly (audio interfaces appear). FULL keeps the
+    // canonical 0x0100 (the value Windows binds its DualSense driver against);
+    // only the inert MINIMAL placeholder carries the distinct 0x0101.
+    desc_device.bcdDevice = usb_descriptor_variant_is_full() ? 0x0100 : 0x0101;
+#endif
     return reinterpret_cast<uint8_t const *>(&desc_device);
 }
 
@@ -562,6 +585,25 @@ static uint64_t      swap_state_entered = 0;
 static constexpr uint64_t SWAP_DISCONNECT_SETTLE_US = 500000;  // 500 ms
 static constexpr uint64_t SWAP_CONNECT_SETTLE_US    = 1500000; // 1500 ms
 
+// Defensive serialization against the HOST's own re-enumeration on wake:
+// avoid starting our tud_disconnect() while the host is mid re-enumeration
+// (the full re-mount many hosts perform on wake from S3), so two USB
+// reconfiguration cycles don't interleave. (This is hygiene, NOT the wedge
+// fix -- the actual S3-wake wedge was the host reusing its cached descriptor
+// across the MINIMAL->FULL swap; that is solved by the distinct bcdDevice per
+// variant in tud_descriptor_device_cb.) A swap may only START out of IDLE when
+//   (a) we are CONFIGURED (tud_mounted(): a host bus reset clears it until
+//       SET_CONFIGURATION arrives, so this alone keeps the bounce out of the
+//       middle of any enumeration), and
+//   (b) no resume/mount event landed within the last SWAP_HOST_SETTLE_MS --
+//       each event re-stamps the window, so a wake that resolves as
+//       resume-then-re-enumerate keeps pushing the swap out until the host is
+//       actually done.
+// The stamp is a single 32-bit ms word (written by usb_set_host_suspended(false)
+// from the TinyUSB resume/mount callbacks, read here) so it can't tear.
+static constexpr uint32_t SWAP_HOST_SETTLE_MS = 1000;
+static volatile uint32_t last_bus_up_ms = 0;
+
 void usb_request_variant_full(void)    { desired_target.variant = DESC_VARIANT_FULL; }
 void usb_request_variant_minimal(void) { desired_target.variant = DESC_VARIANT_MINIMAL; }
 // Web-UI wake-keyboard toggle: ask for the kbd to (dis)appear. Applied live by
@@ -577,7 +619,12 @@ void usb_descriptor_init_from_config(void) {
     desired_target.kbd = kbd;
     active_target.kbd  = kbd;
 }
-void usb_set_host_suspended(bool s)    { host_suspended_flag = s; }
+void usb_set_host_suspended(bool s) {
+    // Bus coming (back) up -- resume or mount. Re-stamp the host-settle
+    // window so usb_variant_task defers any pending swap (gate (b) above).
+    if (!s) last_bus_up_ms = (uint32_t)(time_us_64() / 1000);
+    host_suspended_flag = s;
+}
 bool usb_host_suspended(void)          { return host_suspended_flag; }
 bool usb_variant_swap_in_progress(void) { return swap_state != SWAP_IDLE; }
 
@@ -621,6 +668,14 @@ void usb_variant_task(void) {
     switch (swap_state) {
         case SWAP_IDLE:
             if (desc_target_differs()) {
+                // Serialize behind the host's own (re-)enumeration -- see the
+                // SWAP_HOST_SETTLE_MS comment above. Unconfigured means the
+                // host is between its bus reset and SET_CONFIGURATION right
+                // now; a fresh resume/mount means it may be about to start
+                // one (S3-wake re-mount). Bouncing the bus in either window
+                // wedges the gamepad IN endpoint.
+                if (!tud_mounted()) return;
+                if ((uint32_t)(now / 1000) - last_bus_up_ms < SWAP_HOST_SETTLE_MS) return;
                 wake_reset_for_variant_swap();
                 tud_disconnect();
                 swap_state = SWAP_DISCONNECTING;
@@ -631,7 +686,12 @@ void usb_variant_task(void) {
             if (now - swap_state_entered < SWAP_DISCONNECT_SETTLE_US) return;
             // Latch the whole target atomically w.r.t. enumeration: the bus is
             // down, so the descriptor callbacks can't observe a half-updated
-            // target.
+            // target. The MINIMAL/FULL variants enumerate under DISTINCT
+            // bcdDevice values (see tud_descriptor_device_cb) so the host's
+            // descriptor cache -- keyed on VID/PID/bcdDevice -- can't survive
+            // this swap: on the next connect it must re-read, which is what
+            // makes the on-wake MINIMAL->FULL swap enumerate cleanly instead of
+            // reusing a stale cached MINIMAL.
             active_target.variant = desired_target.variant;
             active_target.kbd     = desired_target.kbd;
             tud_connect();

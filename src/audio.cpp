@@ -64,6 +64,12 @@ void audio_loop() {
         state_push_to_bt();
     }
 
+    // N7: mic_decode_fifo (and mic_fifo, opus_cs, core1) are only initialized in
+    // audio_init() when !DISABLE_SPEAKER_PROC. On the PicoW build the whole
+    // audio_init() body is compiled out, so draining mic_decode_fifo here would
+    // queue_try_remove() on a zeroed queue_t -> spin_lock_blocking(NULL). It
+    // only "worked" by accident (NULL spinlock derefs ROM@0). Guard it out.
+#if !DISABLE_SPEAKER_PROC
     static mic_decode_element mic_element{};
     static uint16_t mic_write_pos = 0;
     static uint16_t mic_write_len = 0;
@@ -79,6 +85,7 @@ void audio_loop() {
         const uint16_t written = tud_audio_write(data + mic_write_pos, remaining);
         mic_write_pos += written;
     }
+#endif
 
     // 1. 读取 USB 音频数据
     if (!tud_audio_available()) return;
@@ -332,6 +339,13 @@ void core1_entry() {
 extern bool mic_active; // set by tud_audio_set_itf_cb in main.cpp
 
 void mic_add_queue(uint8_t *data) {
+#if DISABLE_SPEAKER_PROC
+    // N7: mic_fifo is never initialized on the PicoW build (audio_init() body is
+    // compiled out), and core1 (which would drain it) never launches. Enqueuing
+    // here would queue_try_add() on a zeroed queue_t -> spin_lock_blocking(NULL).
+    (void)data;
+    return;
+#else
     // Don't decode mic frames if the host isn't streaming the mic interface.
     // Decode load on core1 degrades speaker quality (see findings memo); when
     // nobody is listening we skip the work entirely.
@@ -343,4 +357,5 @@ void mic_add_queue(uint8_t *data) {
     }
     queue_try_add(&mic_fifo,&mic_packet);
     __sev(); // Notify Core 1
+#endif // !DISABLE_SPEAKER_PROC
 }

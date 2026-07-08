@@ -120,11 +120,16 @@ jobs:
           cp build/waveshare/ds5-bridge.uf2 artifacts/ds5-bridge-waveshare.uf2
 
       - name: Build no-batt-led firmware (compile check only)
+        # Also flips ENABLE_WAKE_LINK=ON here (C1): wake_link.cpp compiles under
+        # no other job, so a refactor of wake.cpp / wake_link.h could silently
+        # rot it. Folding it onto this compile-check job guards it without a
+        # whole new matrix entry.
         run: |
           cmake -S . -B build/no-batt-led -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DPICO_SDK_PATH="$PICO_SDK_PATH" \
             -DENABLE_BATT_LED=OFF \
+            -DENABLE_WAKE_LINK=ON \
             -DVERSION="$FIRMWARE_VERSION"
           cmake --build build/no-batt-led --target ds5-bridge
 

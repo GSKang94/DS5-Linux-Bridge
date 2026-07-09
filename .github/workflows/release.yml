@@ -123,6 +123,18 @@ jobs:
           cmake --build build/waveshare --target ds5-bridge
           cp build/waveshare/ds5-bridge.uf2 "artifacts/ds5-bridge-waveshare-${{ github.event.release.tag_name }}.uf2"
 
+      - name: Build Pico W firmware
+        # Original RP2040 Pico W. Same WiFi/BT feature set on the CYW43 radio; a
+        # separate release artifact so Pico W owners don't have to build locally.
+        run: |
+          cmake -S . -B build/picow -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPICO_SDK_PATH="$PICO_SDK_PATH" \
+            -DPICO_W_BUILD=ON \
+            -DVERSION="$FIRMWARE_VERSION"
+          cmake --build build/picow --target ds5-bridge
+          cp build/picow/ds5-bridge.uf2 "artifacts/ds5-bridge-picow-${{ github.event.release.tag_name }}.uf2"
+
       - name: Upload UF2 files to release
         env:
           GH_TOKEN: ${{ github.token }}

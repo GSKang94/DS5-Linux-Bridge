@@ -25,6 +25,7 @@
 #include "usb.h" // usb_request_wake_kbd(): live-apply the wake-kbd toggle
 #include "web_api.h"
 #include "web_page.h"
+#include "weblog.h" // /api/log diagnostic ring + runtime toggle
 #ifdef ENABLE_WIFI_WOL
 #include "wifi_net.h"   // AP-mode detection + scan/provision hooks
 #include "web_portal.h" // onboarding captive-portal page
@@ -172,6 +173,17 @@ static int json_config(char *out, size_t cap) {
 #else
                     "\"wake_kbd_capable\":false,"
 #endif
+                    // Multi-controller support: capable = compiled slot count
+                    // > 1 (the page hides the toggle otherwise); allowed = the
+                    // runtime opt-in (config multi_enabled, default off).
+#if MULTI_SLOT_COUNT > 1
+                    "\"multi_capable\":true,"
+#else
+                    "\"multi_capable\":false,"
+#endif
+                    "\"multi_allowed\":%u,"
+                    "\"multi_slots\":%u,"
+                    "\"weblog_enabled\":%u,"
                     // The web UI only exists on the WiFi transport now, so a
                     // served page always has WOL + WiFi controls available.
                     "\"wol_capable\":true,"
@@ -186,7 +198,10 @@ static int json_config(char *out, size_t cap) {
                     wol_hex,
                     wol_hex2,
                     c.hostname,
-                    c.wake_kbd_enabled);
+                    c.wake_kbd_enabled,
+                    (unsigned) (c.multi_enabled ? 1 : 0),
+                    (unsigned) MULTI_SLOT_COUNT,
+                    c.weblog_enabled);
 }
 
 //--------------------------------------------------------------------+
@@ -242,13 +257,27 @@ static int json_bonds(char *out, size_t cap) {
     uint8_t list[CONFIG_MAX_BOND_NAMES][BT_ADDR_LEN];
     const int n = bt_bond_list(list, CONFIG_MAX_BOND_NAMES);
 
+    // Legacy single-connected field (lowest connected slot) kept for older
+    // clients; connected_all carries EVERY live pad so the bond list can mark
+    // all of them (multi-slot).
     uint8_t conn[BT_ADDR_LEN];
     const bool have_conn = bt_connected_addr(conn);
     char conn_hex[13] = "";
     if (have_conn) mac_to_hex(conn, conn_hex);
 
-    int w = snprintf(out, cap, "{\"connected\":\"%s\",\"max\":%d,\"bonds\":[",
-                     conn_hex, CONFIG_MAX_BOND_NAMES);
+    int w = snprintf(out, cap, "{\"connected\":\"%s\",\"connected_all\":[", conn_hex);
+    int nconn = 0;
+    for (uint8_t slot = 0; slot < BT_MAX_SLOTS && w < (int) cap; slot++) {
+        BtStatus ss;
+        bt_get_status(slot, &ss);
+        if (!ss.connected) continue;
+        char hex[13];
+        mac_to_hex(ss.addr, hex);
+        w += snprintf(out + w, cap - w, "%s\"%s\"", nconn ? "," : "", hex);
+        nconn++;
+    }
+    if (w < (int) cap)
+        w += snprintf(out + w, cap - w, "],\"max\":%d,\"bonds\":[", CONFIG_MAX_BOND_NAMES);
     for (int i = 0; i < n && w < (int) cap; i++) {
         char hex[13];
         mac_to_hex(list[i], hex);
@@ -263,21 +292,44 @@ static int json_bonds(char *out, size_t cap) {
     return w;
 }
 
-// GET /api/status -- live controller health (read-only).
+// GET /api/status -- live controller health (read-only). The top-level fields
+// describe the lowest connected slot (Decky-plugin compatibility: they mean
+// exactly what they did on single-controller firmware); "slots" carries one
+// entry per seat for the multi UI.
 static int json_status(char *out, size_t cap) {
+    const int lowest = bt_lowest_connected_slot();
     BtStatus s;
-    bt_get_status(&s);
-    return snprintf(out, cap,
-                    "{\"connected\":%s,"
-                    "\"model\":\"%s\","
-                    "\"battery_valid\":%s,"
-                    "\"battery_pct\":%u,"
-                    "\"charging\":%s}",
-                    s.connected ? "true" : "false",
-                    s.is_dse ? "DSE" : "DS5",
-                    s.battery_valid ? "true" : "false",
-                    s.battery_pct,
-                    s.charging ? "true" : "false");
+    bt_get_status(lowest < 0 ? 0 : (uint8_t) lowest, &s);
+    int w = snprintf(out, cap,
+                     "{\"connected\":%s,"
+                     "\"model\":\"%s\","
+                     "\"battery_valid\":%s,"
+                     "\"battery_pct\":%u,"
+                     "\"charging\":%s,"
+                     "\"slots\":[",
+                     s.connected ? "true" : "false",
+                     s.is_dse ? "DSE" : "DS5",
+                     s.battery_valid ? "true" : "false",
+                     s.battery_pct,
+                     s.charging ? "true" : "false");
+    for (uint8_t slot = 0; slot < BT_MAX_SLOTS && w < (int) cap; slot++) {
+        BtStatus ss;
+        bt_get_status(slot, &ss);
+        char hex[13] = "";
+        if (ss.connected) mac_to_hex(ss.addr, hex);
+        w += snprintf(out + w, cap - w,
+                      "%s{\"connected\":%s,\"model\":\"%s\",\"addr\":\"%s\","
+                      "\"battery_valid\":%s,\"battery_pct\":%u,\"charging\":%s}",
+                      slot ? "," : "",
+                      ss.connected ? "true" : "false",
+                      ss.is_dse ? "DSE" : "DS5",
+                      hex,
+                      ss.battery_valid ? "true" : "false",
+                      ss.battery_pct,
+                      ss.charging ? "true" : "false");
+    }
+    if (w < (int) cap) w += snprintf(out + w, cap - w, "]}");
+    return w;
 }
 
 // GET /api/resolve_mac -- reports the status of the most recent resolve
@@ -337,7 +389,9 @@ extern "C" int fs_open_custom(struct fs_file *file, const char *name) {
     // Shared JSON scratch: make_file() copies the body into its own malloc'd
     // buffer before returning, and httpd serves one custom file at a time, so a
     // single static buffer is safe for all JSON routes (saves BSS -> heap).
-    static char body[512];
+    // 1024: /api/status now carries a per-slot array (~120 B x 4 slots on top
+    // of the legacy fields), and /api/config grew the multi/weblog flags.
+    static char body[1024];
 #ifdef ENABLE_WIFI_WOL
     if (strcmp(name, "/api/wifi_scan") == 0) {
         // A scan is kicked off on first hit and on explicit ?start=1 (the portal's
@@ -379,6 +433,20 @@ extern "C" int fs_open_custom(struct fs_file *file, const char *name) {
     if (strcmp(name, "/api/resolve_mac") == 0) {
         const int len = json_resolve_mac(body, sizeof(body));
         return make_file(file, "200 OK", "application/json", body, len);
+    }
+    if (strcmp(name, "/api/log") == 0) {
+        // Diagnostic log (RAM-only stdio mirror; see weblog.h). text/plain so
+        // it renders directly in a browser tab for copy-paste bug reports.
+        if (!weblog_enabled()) {
+            static const char off[] =
+                "diagnostic log disabled (enable it in Settings, reproduce, then reload)";
+            return make_file(file, "200 OK", "text/plain; charset=utf-8", off, sizeof(off) - 1);
+        }
+        // Big enough for boot section (1K) + gap marker + ring (1K). Static:
+        // make_file copies it, and httpd serves one custom file at a time.
+        static char logbuf[2112];
+        const int len = weblog_snapshot(logbuf, sizeof(logbuf));
+        return make_file(file, "200 OK", "text/plain; charset=utf-8", logbuf, len);
     }
     // POST /api/config redirects here when config_save() failed to reach flash.
     // Returning a non-2xx status makes the page's `r.ok` check false so it shows
@@ -532,6 +600,10 @@ static void apply_post(char *body) {
             if (hex_to_addr(eq, mac)) memcpy(c.wol_target_mac2, mac, 6);
         } else if (strcmp(tok, "wake_kbd_enabled") == 0) {
             c.wake_kbd_enabled = val ? 1 : 0;
+        } else if (strcmp(tok, "multi_allowed") == 0) {
+            c.multi_enabled = val ? 1 : 0;
+        } else if (strcmp(tok, "weblog_enabled") == 0) {
+            c.weblog_enabled = val ? 1 : 0;
         } else if (strcmp(tok, "hostname") == 0) {
             // mDNS / netif hostname. url_decode then copy raw; set_config() ->
             // config_valid() -> sanitize_hostname() folds case and strips any
@@ -558,6 +630,14 @@ static void apply_post(char *body) {
     // RAM even if the flash save failed). A no-op when the enumerated state
     // already matches -- i.e. for every POST that didn't change the toggle.
     usb_request_wake_kbd(get_config().wake_kbd_enabled != 0);
+
+#ifdef ENABLE_WIFI_WOL
+    // Live-apply the diagnostic-log toggle (same RAM-value pattern). Turning
+    // multi_allowed OFF is deliberately admissions-only: connected pads stay
+    // up (a settings save must never kill live gameplay); the connection
+    // filter enforces capacity 1 for NEW connections from now on.
+    weblog_set_enabled(get_config().weblog_enabled != 0);
+#endif
 }
 
 static void apply_bonds_post(char *body) {
@@ -581,8 +661,12 @@ static void apply_bonds_post(char *body) {
     }
 
     if (strcmp(action, "pair") == 0) {
-        bt_start_pairing();
-        printf("[WEB] start pairing (open inquiry) via web UI\n");
+        // Can fail: every bond seat used, or (multi) all slots connected.
+        // Surface the rejection through the existing save-failed path so the
+        // page shows an error instead of a pairing window that never opened.
+        last_save_ok = bt_start_pairing();
+        printf("[WEB] start pairing (open inquiry) via web UI: %s\n",
+               last_save_ok ? "OK" : "REJECTED");
         return;
     }
 

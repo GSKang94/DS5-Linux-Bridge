@@ -5,6 +5,10 @@
 #ifndef DS5_BRIDGE_USB_H
 #define DS5_BRIDGE_USB_H
 
+#include <cstdint>
+
+#include "slots.h"
+
 extern uint8_t mute[2]; // 0: SPEAKER(0x02) 1: MIC(0x05)
 extern float volume[2]; // 0: SPEAKER(0x02) 1: MIC(0x05)
 
@@ -37,7 +41,26 @@ bool usb_wake_kbd_active(void);
 // USB re-enumeration mid-suspend (a pending change applies after resume).
 void usb_request_variant_full(void);
 void usb_request_variant_minimal(void);
+#if MULTI_SLOT_COUNT > 1
+// MULTI: exposed_slots gamepad interfaces (the session's high-water
+// controller count, clamped 2..MULTI_SLOT_COUNT), NO audio function. See the
+// variant policy in bt.cpp: entered at 2+ pads, exposure grows with each new
+// join (one bounce per new player), sticky until every pad disconnects.
+void usb_request_variant_multi(uint8_t exposed_slots);
+#endif
 void usb_request_wake_kbd(bool enabled);
+
+// How many gamepad interfaces the host currently sees (latched active
+// variant): MULTI -> MULTI_SLOT_COUNT, FULL -> 1, MINIMAL -> 0.
+uint8_t usb_active_gamepad_slots(void);
+
+// Slot <-> HID-instance map for the latched active variant. The keyboard
+// (when active) is pinned at instance 1, so tail slots shift by one at
+// RUNTIME depending on the kbd state -- always go through these, never
+// hardcode. usb_hid_instance_slot returns -1 for the keyboard's instance;
+// callers must also bound the result against usb_active_gamepad_slots().
+uint8_t usb_slot_hid_instance(uint8_t slot);
+int usb_hid_instance_slot(uint8_t instance);
 
 // Seed desired AND active kbd state from the persisted config. Call once at
 // boot, after config_load() and before the first tud_connect(), so the first
@@ -76,6 +99,13 @@ static inline bool usb_host_suspended(void) { return false; }
 static inline bool usb_wake_kbd_active(void) { return false; }
 static inline void usb_request_wake_kbd(bool) {}
 static inline void usb_descriptor_init_from_config(void) {}
+// Non-wake builds have no dynamic descriptors: the (single) gamepad is always
+// interface 3 / HID instance 0, and device visibility is handled with
+// tud_connect()/tud_disconnect(). Multi-slot requires ENABLE_WAKE_HID
+// (enforced in CMakeLists), so the map degenerates to the identity.
+static inline uint8_t usb_active_gamepad_slots(void) { return 1; }
+static inline uint8_t usb_slot_hid_instance(uint8_t slot) { return slot; }
+static inline int usb_hid_instance_slot(uint8_t instance) { return (int) instance; }
 #endif
 
 #endif //DS5_BRIDGE_USB_H

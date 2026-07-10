@@ -11,7 +11,7 @@
 #include "pico/time.h"
 
 // Provided by bt.cpp (bt_control_cid / bt_control_send are declared in bt.h).
-extern std::unordered_map<uint8_t, std::vector<uint8_t> > feature_data;
+
 
 // Unlock state: 0 = idle, 1 = waiting for the controller to process SET 0x80.
 static int unlock_phase = 0;
@@ -53,9 +53,8 @@ void dse_on_connect() {
     const uint16_t cid = bt_control_cid();
     // 1) SET 0x65: verbatim echo of the 0x20 firmware report body (native
     //    sends 63 bytes, no CRC recompute).
-    auto it = feature_data.find(0x20);
-    if (cid != 0 && it != feature_data.end() && it->second.size() >= 62) {
-        const auto &fw = it->second;
+    std::vector<uint8_t> fw;
+    if (cid != 0 && bt_feature_cached(0x20, fw) && fw.size() >= 62) {
         uint8_t handshake[63];
         handshake[0] = 0x53;
         handshake[1] = 0x65;

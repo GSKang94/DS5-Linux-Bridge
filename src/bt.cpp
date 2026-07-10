@@ -21,6 +21,7 @@
 #include "classic/sdp_server.h"
 #include "config.h"
 #include "state_mgr.h"
+#include "tier.h"
 #include "dse.h"
 #include "wake.h"
 #include "pico/util/queue.h"
@@ -45,21 +46,197 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
 
 static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size);
 
+struct bt_slot;
+static void bt_send_full_state(uint8_t slot);
+static void bt_feature_snapshot_refresh(bt_slot *s);
+static void bt_apply_usb_variant_policy();
+
 static btstack_packet_callback_registration_t hci_event_callback_registration, l2cap_event_callback_registration;
-static bd_addr_t current_device_addr;
+
+constexpr size_t BT_SEND_MAX_PACKET_SIZE = 400; // 0xA2 header + 398-byte audio report + slack
+
+struct send_element {
+    uint8_t data[BT_SEND_MAX_PACKET_SIZE];
+    uint16_t len;
+};
+
+//--------------------------------------------------------------------+
+// Slots. One per concurrent controller connection. A slot is a connection
+// seat, assigned at connect time: the lowest free slot wins, so the first
+// pad powered on in a session is always slot 0 / player 1 regardless of
+// pairing order (matches PS5 behavior). Bonds carry no slot number.
+//--------------------------------------------------------------------+
+
+struct bt_slot {
+    hci_con_handle_t acl_handle = HCI_CON_HANDLE_INVALID;
+    bd_addr_t addr{};
+    uint16_t control_cid = 0;
+    uint16_t interrupt_cid = 0;
+    // Only new pairings (outgoing, inquiry-initiated) create the L2CAP
+    // channels from our side; auto-reconnects are controller-initiated and go
+    // through the registered services. 只有新匹配的设备才用创建channel，自动重连走的是service
+    bool new_pair = false;
+    bool check_dse = false;
+    bool is_dse = false;
+    // Per-slot setup watchdog timestamp. 0 == not armed; armed == ACL is up
+    // but the controller hasn't identified yet.
+    absolute_time_t connect_attempt_started = 0;
+    absolute_time_t inactive_time = 0; // 手柄长时间静默
+    unordered_map<uint8_t, vector<uint8_t> > feature_data;
+    // Outbound L2CAP FIFO + can-send-now chain state (see bt_write/bt_pump).
+    // L2CAP TX retry state (N5): hoisted next to the FIFO so slot teardown
+    // resets them together -- otherwise a retry queued just before a
+    // disconnect would replay a stale frame (old seq/state, valid CRC) as the
+    // first packet of the NEXT session, and a can-send-now request in flight
+    // when the channel dies would leave send_chain_active stuck true (wedging
+    // bt_pump until the next kick=true bt_write).
+    queue_t send_fifo{};
+    volatile bool send_chain_active = false;
+    send_element retry_packet{};
+    bool retry_pending = false;
+};
+
+static bt_slot slots[BT_MAX_SLOTS];
+
+static bt_slot *slot_by_handle(hci_con_handle_t handle) {
+    if (handle == HCI_CON_HANDLE_INVALID) return nullptr;
+    for (auto &s : slots) {
+        if (s.acl_handle == handle) return &s;
+    }
+    return nullptr;
+}
+
+static bt_slot *slot_by_addr(const bd_addr_t addr) {
+    for (auto &s : slots) {
+        if (s.acl_handle != HCI_CON_HANDLE_INVALID && bd_addr_cmp(s.addr, addr) == 0) return &s;
+    }
+    return nullptr;
+}
+
+// Find the slot owning an L2CAP CID (control or interrupt).
+static bt_slot *slot_by_cid(uint16_t cid) {
+    if (cid == 0) return nullptr;
+    for (auto &s : slots) {
+        if (s.control_cid == cid || s.interrupt_cid == cid) return &s;
+    }
+    return nullptr;
+}
+
+static bt_slot *slot_by_interrupt_cid(uint16_t cid) {
+    if (cid == 0) return nullptr;
+    for (auto &s : slots) {
+        if (s.interrupt_cid == cid) return &s;
+    }
+    return nullptr;
+}
+
+static int slot_index(const bt_slot *s) {
+    return (int) (s - slots);
+}
+
+static int bt_free_slot_count() {
+    int n = 0;
+    for (auto &s : slots) {
+        if (s.acl_handle == HCI_CON_HANDLE_INVALID) n++;
+    }
+    return n;
+}
+
+int bt_connected_count() {
+    return BT_MAX_SLOTS - bt_free_slot_count();
+}
+
+int bt_lowest_connected_slot() {
+    for (auto &s : slots) {
+        if (s.acl_handle != HCI_CON_HANDLE_INVALID) return slot_index(&s);
+    }
+    return -1;
+}
+
+// Session-order assignment: lowest free slot. (A bond-sticky policy would
+// hook in here.) Returns nullptr when full.
+static bt_slot *slot_alloc(const bd_addr_t addr) {
+    // Same address already seated (stale reconnect race): reuse its slot.
+    if (bt_slot *existing = slot_by_addr(addr)) return existing;
+    for (auto &s : slots) {
+        if (s.acl_handle == HCI_CON_HANDLE_INVALID) return &s;
+    }
+    return nullptr;
+}
+
+// Push a slot's full cached output state (report 0x32: lightbar, player
+// LEDs, rumble/FFB) to whichever pad sits there. Used at connect.
+static void bt_send_full_state(uint8_t slot) {
+    if (slot >= BT_MAX_SLOTS) return;
+    if (slots[slot].interrupt_cid == 0) return;
+    uint8_t report32[142]{};
+    report32[0] = 0x32;
+    report32[1] = 0x10; // reportSeqCounter
+    report32[2] = 0x10 | 0 << 6 | 1 << 7;
+    report32[3] = 0x3f; // 63 bytes
+    state_get(slot, report32 + 4, sizeof(SetStateData));
+    bt_write(slot, report32, sizeof(report32));
+}
+
+// Reset a slot's connection state (does not touch the send FIFO's queue_t
+// storage, which is drained instead of re-inited).
+static void slot_clear(bt_slot *s) {
+    s->acl_handle = HCI_CON_HANDLE_INVALID;
+    s->control_cid = 0;
+    s->interrupt_cid = 0;
+    s->new_pair = false;
+    s->check_dse = false;
+    s->is_dse = false;
+    s->connect_attempt_started = 0;
+    s->feature_data.clear();
+    while (queue_try_remove(&s->send_fifo, NULL)) {}
+    // N5: reset the L2CAP TX send-chain state so nothing leaks into the next
+    // session (stale-frame replay / wedged bt_pump; see the struct comment).
+    s->send_chain_active = false;
+    s->retry_pending = false;
+}
+
+//--------------------------------------------------------------------+
+// Pending pairing attempt (pre-ACL). Only one outgoing inquiry/pair runs at
+// a time, so this stays global; connected state lives in the slots.
+//--------------------------------------------------------------------+
+
+static bd_addr_t current_device_addr; // inquiry target
 static bool device_found = false;
 static bool new_pair = false; // 只有新匹配的设备才用创建channel，自动重连走的是service
 
 // Pairing window opened by the web UI (POST /api/bonds action=pair). While set:
-//   - the active controller (if any) is torn down, keeping its bond, and inquiry
-//     is opened from the disconnect-complete handler (overriding the normal
+//   - inquiry runs even with bonds stored (overriding the normal
 //     "bonded -> page scan, no inquiry" gate);
-//   - incoming auto-reconnects are REJECTED, so the just-disconnected controller
-//     can't page back in and win the slot before the user pairs the new one.
-// Cleared when a new controller opens HID, or when the inquiry window closes
-// with nothing found. This is how the single-controller firmware swaps in a
-// second controller without forgetting the first.
+//   - in single-controller operation (BT_MAX_SLOTS==1 or multi disabled) the
+//     active controller (if any) is torn down, keeping its bond, and inquiry
+//     opens from the disconnect-complete handler;
+//   - incoming auto-reconnects are DECLINED when they would consume the last
+//     free slot, so a just-disconnected controller can't page back in and win
+//     the seat reserved for the new pairing (with multiple free seats they
+//     reconnect freely alongside the window).
+// Cleared when the newly paired controller opens HID, or when the inquiry
+// window closes with nothing found.
 static bool pairing_window = false;
+
+// Pre-ACL connection-attempt watchdog timestamp (outgoing create / incoming
+// accept until CONNECTION_COMPLETE hands off to the slot's own watchdog).
+// 0 == not armed.
+static absolute_time_t connect_attempt_started = 0;
+
+// True while any connection attempt or HID setup is in flight. Deferred
+// flash flushes (blacklist) MUST wait for this to clear: a flash erase blocks
+// interrupts long enough to stall the control-channel feature exchange, and
+// the setup watchdog then kills the link -- seen as "first pair connects then
+// drops; the second connect works" (the second attempt has nothing dirty left
+// to flush).
+static bool bt_setup_in_progress() {
+    if (connect_attempt_started != 0) return true;
+    for (auto &s : slots) {
+        if (s.connect_attempt_started != 0) return true;
+    }
+    return false;
+}
 
 // Persistent blacklist of controllers the user forgot via the web UI. Survives
 // power-cycles via BTstack TLV flash. Without it, forgetting a controller that
@@ -78,39 +255,7 @@ static int bt_cleared_addrs_count = 0;
 static bool bt_blacklist_dirty = false;
 static uint32_t bt_blacklist_dirty_ms = 0;
 
-static hci_con_handle_t acl_handle = HCI_CON_HANDLE_INVALID;
-static uint16_t hid_control_cid;
-static uint16_t hid_interrupt_cid;
 static bt_data_callback_t bt_data_callback = nullptr;
-
-// Connection-attempt watchdog timestamp. 0 == not armed; armed == a connection
-// attempt is in flight. Set when an attempt begins, cleared when controller is
-// identified (USB connects) or on any teardown.
-static absolute_time_t connect_attempt_started = 0;
-static bool check_dse = false;
-unordered_map<uint8_t, vector<uint8_t> > feature_data;
-queue_t send_fifo;
-
-constexpr size_t BT_SEND_MAX_PACKET_SIZE = 400; // 0xA2 header + 398-byte audio report + slack
-
-struct send_element {
-    uint8_t data[BT_SEND_MAX_PACKET_SIZE];
-    uint16_t len;
-};
-
-// L2CAP TX retry state (N5). Hoisted from function-statics in the
-// L2CAP_EVENT_CAN_SEND_NOW handler to file scope so DISCONNECTION_COMPLETE can
-// reset them alongside the send_fifo drain -- otherwise a retry queued just
-// before a disconnect would replay a stale frame (old seq/state, valid CRC) as
-// the first packet of the NEXT session, and a can-send-now request in flight
-// when the channel dies would leave send_chain_active stuck true (wedging
-// bt_pump until the next kick=true bt_write). All three reset together on
-// disconnect. (send_chain_active's usage/rationale is documented at bt_pump.)
-static send_element retry_packet;
-static bool retry_pending = false;
-volatile bool send_chain_active = false;
-
-absolute_time_t inactive_time = 0; // 手柄长时间静默
 
 void bt_register_data_callback(bt_data_callback_t callback) {
     bt_data_callback = callback;
@@ -125,8 +270,8 @@ void bt_register_data_callback(bt_data_callback_t callback) {
 // tore the link down in a loop). Reconnects masked it: a bonded pad initiates
 // auth itself.
 
-bool bt_disconnect() {
-    if (acl_handle == HCI_CON_HANDLE_INVALID) {
+static bool bt_disconnect_slot(bt_slot *s) {
+    if (!s || s->acl_handle == HCI_CON_HANDLE_INVALID) {
         return false;
     }
 
@@ -136,11 +281,25 @@ bool bt_disconnect() {
     // and the auth-failure path -- where BTstack may hold a command in its
     // single outstanding slot; a raw send could be swallowed there (the ba4fe1f
     // failure class), leaving the link up and no DISCONNECTION_COMPLETE to drive
-    // recovery. gap_disconnect() queues via hci_run() and no-ops a redundant
-    // second request (returns COMMAND_DISALLOWED if a disconnect is already
-    // pending) instead of double-sending.
-    gap_disconnect(acl_handle);
+    // recovery. It also matters for back-to-back multi-slot teardown
+    // (forget-all): BTstack has ONE outgoing command buffer, so a second raw
+    // disconnect would go out mangled and that pad would stay connected.
+    // gap_disconnect() queues via hci_run() and no-ops a redundant second
+    // request instead of double-sending.
+    gap_disconnect(s->acl_handle);
     return true;
+}
+
+// Keep the radio connectable exactly while an ADMITTABLE free slot exists
+// (capacity is 1 when multi is disabled). Discoverable tracks connectable
+// (pads page us directly; discoverable is only relevant during their own
+// pairing scans, harmless to leave in step).
+static bool bt_multi_allowed();
+static void bt_update_scan_enable() {
+    const int cap = bt_multi_allowed() ? BT_MAX_SLOTS : 1;
+    const bool open = bt_connected_count() < cap;
+    gap_connectable_control(open ? 1 : 0);
+    gap_discoverable_control(open ? 1 : 0);
 }
 
 // True if BTstack has at least one stored controller link key. Used to gate
@@ -156,6 +315,18 @@ static bool bt_has_stored_link_key() {
     const bool has_key = gap_link_key_iterator_get_next(&it, addr, key, &type);
     gap_link_key_iterator_done(&it);
     return has_key;
+}
+
+static int bt_bond_count() {
+    btstack_link_key_iterator_t it;
+    if (!gap_link_key_iterator_init(&it)) return 0;
+    bd_addr_t addr;
+    link_key_t key;
+    link_key_type_t type;
+    int n = 0;
+    while (gap_link_key_iterator_get_next(&it, addr, key, &type)) n++;
+    gap_link_key_iterator_done(&it);
+    return n;
 }
 
 // Intent flag: "the dongle wants to be running inquiry (open to pair a new
@@ -198,13 +369,17 @@ static void bt_inquiry_close() {
 // Recovery/looping restart of inquiry. Gated on bond presence: with a controller
 // bonded we keep the radio connectable for page-scan reconnect but do NOT
 // re-open inquiry, so a transient failure can't silently reopen pairing.
+// EXCEPT while an explicit pairing window is open: every connect-failure
+// recovery path (create-connection rejected, ACL connect failed, pre-ACL
+// watchdog) lands here, and closing inquiry then left a zombie window --
+// window flag set, no inquiry running, and no inquiry-complete event ever
+// coming to close it.
 static void bt_restart_inquiry() {
     device_found = false;
     new_pair = false;
     connect_attempt_started = 0;
-    gap_connectable_control(1);
-    gap_discoverable_control(1);
-    if (bt_has_stored_link_key()) {
+    bt_update_scan_enable();
+    if (!pairing_window && bt_has_stored_link_key()) {
         printf("[BT] Stored controller -> page scan, skip inquiry restart\n");
         bt_inquiry_close();
         return;
@@ -212,23 +387,36 @@ static void bt_restart_inquiry() {
     bt_inquiry_open();
 }
 
-// Open a fresh 30s inquiry to pair an additional controller, even when one is
-// already bonded. The deliberate "add another controller" path, invoked from
-// the web API (POST /api/bonds action=pair).
+// Open a fresh 30s inquiry to pair an additional controller, even when
+// controllers are already bonded. The deliberate "add another controller"
+// path, invoked from the web API (POST /api/bonds action=pair).
 //
-// This firmware connects ONE controller at a time, and the web/network
-// interface only exists while a controller is connected -- so when this is
-// called there is normally an active controller. We tear that link down (but
-// KEEP its bond, unlike forget) and open inquiry once the disconnect completes;
-// the newly paired controller becomes the active connection, and the old one
-// still reconnects later via its retained link key.
-void bt_start_pairing() {
-    pairing_window = true;
-    if (acl_handle != HCI_CON_HANDLE_INVALID) {
-        printf("[BT] Pair request -> disconnect current (keep bond), then inquire\n");
-        bt_disconnect(); // inquiry opens in the disconnection-complete handler
-        return;
+// Multi-slot: with a free seat available the inquiry simply runs alongside the
+// connected controllers; nothing is torn down. With every bond seat occupied
+// (or every slot connected) the request is rejected. Single-controller
+// operation (BT_MAX_SLOTS==1 or multi disabled) keeps the original swap UX:
+// tear the active link down (KEEPING its bond, unlike forget) and open inquiry
+// once the disconnect completes; the newly paired controller becomes the
+// active connection, and the old one still reconnects later via its retained
+// link key.
+bool bt_start_pairing() {
+    if (bt_bond_count() >= NVM_NUM_LINK_KEYS) {
+        printf("[BT] Pair request rejected: all %d bond seats occupied\n", NVM_NUM_LINK_KEYS);
+        return false;
     }
+    const int cap = bt_multi_allowed() ? BT_MAX_SLOTS : 1;
+    if (bt_connected_count() >= cap) {
+        if (cap == 1) {
+            pairing_window = true;
+            printf("[BT] Pair request -> disconnect current (keep bond), then inquire\n");
+            // Inquiry opens in the disconnection-complete handler.
+            bt_disconnect_slot(&slots[bt_lowest_connected_slot()]);
+            return true;
+        }
+        printf("[BT] Pair request rejected: all %d slots connected\n", cap);
+        return false;
+    }
+    pairing_window = true;
     printf("[BT] Pair request -> open inquiry\n");
     device_found = false;
     new_pair = false;
@@ -236,23 +424,27 @@ void bt_start_pairing() {
     gap_connectable_control(1);
     gap_discoverable_control(1);
     bt_inquiry_open();
+    return true;
 }
 
-void bt_connection_watchdog_tick() {
-    if (connect_attempt_started == 0) return; // not armed
-    if (absolute_time_diff_us(connect_attempt_started, get_absolute_time())
-            < CONNECT_WATCHDOG_TIMEOUT_US) {
-        return;
-    }
-    printf("[BT] Connection watchdog: attempt stalled, recovering\n");
-    connect_attempt_started = 0; // disarm; the next attempt re-arms
+bool bt_pairing_window_open() { return pairing_window; }
 
-    if (acl_handle != HCI_CON_HANDLE_INVALID) {
-        // ACL is up but setup stalled. Cleanly tear down connection.
-        bt_disconnect();
-    } else {
-        // No ACL yet — reset states and restart inquiry immediately.
+void bt_connection_watchdog_tick() {
+    const absolute_time_t now = get_absolute_time();
+    // Pre-ACL attempt (outgoing create / incoming accept that never completed).
+    if (connect_attempt_started != 0 &&
+        absolute_time_diff_us(connect_attempt_started, now) >= CONNECT_WATCHDOG_TIMEOUT_US) {
+        printf("[BT] Connection watchdog: pre-ACL attempt stalled, recovering\n");
+        connect_attempt_started = 0; // disarm; the next attempt re-arms
         bt_restart_inquiry();
+    }
+    // Per-slot setup (ACL up but the controller never identified).
+    for (auto &s : slots) {
+        if (s.connect_attempt_started == 0) continue;
+        if (absolute_time_diff_us(s.connect_attempt_started, now) < CONNECT_WATCHDOG_TIMEOUT_US) continue;
+        printf("[BT] Connection watchdog: slot %d setup stalled, disconnecting\n", slot_index(&s));
+        s.connect_attempt_started = 0; // disarm; teardown re-triggers recovery
+        bt_disconnect_slot(&s);
     }
 }
 
@@ -321,7 +513,7 @@ static bool bt_blacklist_contains(bd_addr_t addr) {
 // Runs in the BTstack run-loop context: read-only, no flash, no blocking.
 // Address-only by design (BTstack does not pass Class of Device here); the COD
 // "is it a gamepad" check stays in the CONNECTION_REQUEST handler, which decides
-// accept-vs-ignore for addresses this filter has already allowed.
+// the bookkeeping for addresses this filter has already allowed.
 static int bt_classic_connection_filter(bd_addr_t addr, hci_link_type_t link_type) {
     (void) link_type;
     // Forgotten controller trying to auto-reconnect (PS-only page). Its side of
@@ -332,12 +524,25 @@ static int bt_classic_connection_filter(bd_addr_t addr, hci_link_type_t link_typ
         printf("[HCI] Filter: decline %s (forgotten; re-pair via PS+Share)\n", bd_addr_to_str(addr));
         return 0;
     }
-    // While the user is pairing a new controller, decline every incoming
-    // reconnect so the just-dropped controller can't page back in and reclaim
-    // the slot before the new one pairs. Its bond is intact; it reconnects once
-    // the window closes.
-    if (pairing_window) {
-        printf("[HCI] Filter: decline %s (pairing window open)\n", bd_addr_to_str(addr));
+    // Already seated (stale reconnect race): let it through; slot_alloc reuses
+    // the same seat at CONNECTION_COMPLETE.
+    if (slot_by_addr(addr)) return 1;
+    // Capacity gate. With multi disabled the effective capacity is one seat
+    // regardless of the compiled slot count.
+    const int cap  = bt_multi_allowed() ? BT_MAX_SLOTS : 1;
+    const int free_seats = cap - bt_connected_count();
+    if (free_seats <= 0) {
+        printf("[HCI] Filter: decline %s (all %d seats occupied)\n", bd_addr_to_str(addr), cap);
+        return 0;
+    }
+    // While the user is pairing a new controller, decline any incoming
+    // reconnect that would consume the LAST free seat, so a just-dropped
+    // controller can't page back in and reclaim the seat reserved for the new
+    // pairing. Its bond is intact; it reconnects once the window closes.
+    // (Single-seat operation: free_seats is always <= 1 here, so this declines
+    // every incoming reconnect during the window -- the original behavior.)
+    if (pairing_window && free_seats <= 1) {
+        printf("[HCI] Filter: decline %s (pairing window open, last seat reserved)\n", bd_addr_to_str(addr));
         return 0;
     }
     return 1;
@@ -377,6 +582,7 @@ void bt_blacklist_persist_if_dirty() {
     if (!bt_blacklist_dirty) return;
     uint32_t now = to_ms_since_boot(get_absolute_time());
     if (now - bt_blacklist_dirty_ms < 5000) return;
+    if (bt_setup_in_progress()) return; // flash write would stall the setup
     bt_blacklist_dirty = false;
     bt_blacklist_persist();
 }
@@ -415,11 +621,11 @@ bool bt_bond_forget(const uint8_t *addr) {
     // Blacklist so it can't immediately auto-reconnect (PS-only) and re-bond.
     // An explicit PS+Share re-pair goes through the inquiry path and clears it.
     bt_blacklist_add(a);
-    // If this is the live controller, drop the link too -- otherwise the active
+    // If this is a live controller, drop the link too -- otherwise the active
     // ACL stays up and BTstack re-persists its key.
-    if (acl_handle != HCI_CON_HANDLE_INVALID && bd_addr_cmp(a, current_device_addr) == 0) {
-        printf("[BT] Forgetting the connected controller -- disconnecting it\n");
-        gap_disconnect(acl_handle); // N3: httpd context, GAP state machine
+    if (bt_slot *s = slot_by_addr(a)) {
+        printf("[BT] Forgetting the connected controller in slot %d -- disconnecting it\n", slot_index(s));
+        bt_disconnect_slot(s); // N3: httpd context, GAP state machine
     }
     return true;
 }
@@ -427,19 +633,25 @@ bool bt_bond_forget(const uint8_t *addr) {
 void bt_bond_forget_all() {
     printf("[BT] Forget all bonds (web UI)\n");
     // Snapshot every stored bond address into the blacklist BEFORE deleting the
-    // keys, plus the currently-connected one (which may already be in the list).
+    // keys, plus the currently-connected ones (which may already be in the list).
     uint8_t list[NVM_NUM_LINK_KEYS][BT_ADDR_LEN];
     const int n = bt_bond_list(list, NVM_NUM_LINK_KEYS);
     for (int i = 0; i < n; i++) bt_blacklist_add(list[i]);
-    if (acl_handle != HCI_CON_HANDLE_INVALID) bt_blacklist_add(current_device_addr);
+    for (auto &s : slots) {
+        if (s.acl_handle != HCI_CON_HANDLE_INVALID) bt_blacklist_add(s.addr);
+    }
 
     gap_delete_all_link_keys();
-    if (acl_handle != HCI_CON_HANDLE_INVALID) {
-        // A controller is live: disconnect it. The disconnection-complete handler
-        // then sees 0 stored keys (no pairing_window) and opens inquiry itself, so
-        // we converge to the open-to-pair state there.
-        printf("[BT] Disconnecting the connected controller (forget all)\n");
-        gap_disconnect(acl_handle); // N3: httpd context, GAP state machine
+    if (bt_connected_count() > 0) {
+        // Controllers are live: disconnect them all. The last disconnection-
+        // complete handler then sees 0 stored keys (no pairing_window) and
+        // opens inquiry itself, so we converge to the open-to-pair state there.
+        for (auto &s : slots) {
+            if (s.acl_handle != HCI_CON_HANDLE_INVALID) {
+                printf("[BT] Disconnecting slot %d (forget all)\n", slot_index(&s));
+                bt_disconnect_slot(&s); // N3: httpd context, GAP state machine
+            }
+        }
         return;
     }
     // No live controller: nothing will trigger the disconnect handler, so open
@@ -457,24 +669,38 @@ void bt_bond_forget_all() {
 }
 
 bool bt_connected_addr(uint8_t *addr_out) {
-    if (acl_handle == HCI_CON_HANDLE_INVALID) return false;
-    if (addr_out) bd_addr_copy(addr_out, current_device_addr);
-    return true;
+    for (auto &s : slots) {
+        if (s.acl_handle != HCI_CON_HANDLE_INVALID) {
+            if (addr_out) bd_addr_copy(addr_out, s.addr);
+            return true;
+        }
+    }
+    return false;
 }
 
-// The latest gamepad input report; byte 52 carries the DualSense battery state
-// (same byte battery_led.cpp watches). Defined in main.cpp; length must match
-// main.cpp's HID_INPUT_REPORT_LEN (63).
-extern uint8_t interrupt_in_data[63];
+// The latest gamepad input reports, one row per slot; byte 52 carries the
+// DualSense battery state (same byte battery_led.cpp watches). Defined in
+// main.cpp; row length must match main.cpp's HID_INPUT_REPORT_LEN (63).
+extern uint8_t interrupt_in_data[][63];
 
-void bt_get_status(BtStatus *out) {
+void bt_get_status(uint8_t slot, BtStatus *out) {
     if (!out) return;
-    out->connected = (acl_handle != HCI_CON_HANDLE_INVALID);
-    out->is_dse = is_dse;
+    if (slot >= BT_MAX_SLOTS) {
+        *out = BtStatus{};
+        return;
+    }
+    const bt_slot &s = slots[slot];
+    out->connected = (s.acl_handle != HCI_CON_HANDLE_INVALID);
+    out->is_dse = s.is_dse;
+    if (out->connected) {
+        memcpy(out->addr, s.addr, sizeof(out->addr));
+    } else {
+        memset(out->addr, 0, sizeof(out->addr));
+    }
 
     // DS5 battery byte: low nibble = level (0-10 -> 0-100% in 10% steps),
     // high nibble = power state (0 discharging, 1 charging, 2 full).
-    const uint8_t b   = interrupt_in_data[52];
+    const uint8_t b   = interrupt_in_data[slot][52];
     const uint8_t lvl = b & 0x0F;
     const uint8_t st  = (b >> 4) & 0x0F;
     // The byte is 0 before any report arrives; treat a connected controller with
@@ -500,7 +726,13 @@ void bt_l2cap_init() {
 }
 
 int bt_init() {
-    queue_init(&send_fifo, sizeof(send_element), 10);
+    for (auto &s : slots) {
+        // Depth 8 (was 10): 4 slots x 400 B elements come out of a heap with
+        // single-digit-KB margin next to the opus states (see core1_entry).
+        // Audio to the pad is one ~400 B packet per 10 ms frame, so 8
+        // outstanding is still generous.
+        queue_init(&s.send_fifo, sizeof(send_element), 8);
+    }
 
     bt_l2cap_init();
 
@@ -524,11 +756,11 @@ int bt_init() {
     hci_event_callback_registration.callback = &hci_packet_handler;
     hci_add_event_handler(&hci_event_callback_registration);
 
-    // Race-free incoming-connection gate (blacklist + pairing window). Evaluated
-    // inside BTstack before it auto-accepts a CONNECTION_REQUEST, replacing the
-    // old raw hci_reject_connection_request in the event handler (which lost the
-    // race against the stack's already-queued accept). See
-    // bt_classic_connection_filter().
+    // Race-free incoming-connection gate (blacklist + capacity + pairing
+    // window). Evaluated inside BTstack before it auto-accepts a
+    // CONNECTION_REQUEST, replacing the old raw hci_reject_connection_request
+    // in the event handler (which lost the race against the stack's
+    // already-queued accept). See bt_classic_connection_filter().
     gap_register_classic_connection_filter(&bt_classic_connection_filter);
 
     hci_power_control(HCI_POWER_ON);
@@ -582,6 +814,8 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             // CoD 0x002508 = Gamepad (Major: Peripheral, Minor: Gamepad)
             if ((cod & 0x000F00) == 0x000500) {
                 printf("[HCI] Gamepad found: %s (CoD: 0x%06x)\n", bd_addr_to_str(addr), (unsigned int) cod);
+                // Already seated (e.g. inquiry raced a reconnect)? Ignore it.
+                if (slot_by_addr(addr)) break;
                 bd_addr_copy(current_device_addr, addr);
                 device_found = true;
                 gap_inquiry_stop();
@@ -636,7 +870,7 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             //
             // Re-arm if we still want to be open to pairing. State is IDLE now, so
             // this start lands cleanly (no stop-then-start race).
-            if (bt_inquiry_wanted && connect_attempt_started == 0) {
+            if (bt_inquiry_wanted && connect_attempt_started == 0 && !bt_setup_in_progress()) {
                 printf("[HCI] Re-arm inquiry\n");
                 bt_inquiry_try_start();
             }
@@ -666,14 +900,33 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
                 const hci_con_handle_t handle = hci_event_connection_complete_get_connection_handle(packet);
                 bd_addr_t conn_addr;
                 hci_event_connection_complete_get_bd_addr(packet, conn_addr);
+                // Is this the pending outgoing pair attempt?
+                const bool pending_pair = new_pair && bd_addr_cmp(conn_addr, current_device_addr) == 0;
                 // No blacklist check here: bt_classic_connection_filter() already
                 // declined forgotten MACs at CONNECTION_REQUEST, so a blacklisted
-                // controller never reaches CONNECTION_COMPLETE. (The old
-                // after-the-fact disconnect was the workaround for the raw-reject
-                // race and is no longer needed.)
-                acl_handle = handle;
-                bd_addr_copy(current_device_addr, conn_addr);
-                printf("[HCI] ACL connected handle=0x%04X\n", handle);
+                // controller never reaches CONNECTION_COMPLETE on the incoming
+                // path, and the outgoing inquiry path (explicit re-pair) is
+                // deliberately allowed.
+                bt_slot *s = slot_alloc(conn_addr);
+                if (!s) {
+                    // Shouldn't happen (the filter enforces capacity), but keep a
+                    // belt-and-suspenders teardown. N3: GAP state machine, not a
+                    // raw hci_disconnect.
+                    printf("[HCI] No free slot for %s - disconnecting\n", bd_addr_to_str(conn_addr));
+                    gap_disconnect(handle);
+                    break;
+                }
+                s->acl_handle = handle;
+                bd_addr_copy(s->addr, conn_addr);
+                s->new_pair = pending_pair;
+                // Hand the watchdog off from the pre-ACL attempt to the slot.
+                s->connect_attempt_started = get_absolute_time();
+                connect_attempt_started = 0;
+                if (pending_pair) {
+                    new_pair = false;
+                    device_found = false;
+                }
+                printf("[HCI] ACL connected handle=0x%04X -> slot %d\n", handle, slot_index(s));
                 // Must be the ONLY command sent from this event: BTstack holds
                 // one outstanding HCI command, and a fresh pair stalls forever
                 // if this gets dropped (the pad waits for us to authenticate).
@@ -755,11 +1008,14 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             const uint8_t status = hci_event_authentication_complete_get_status(packet);
             const hci_con_handle_t handle = hci_event_authentication_complete_get_connection_handle(packet);
             printf("[HCI] Authentication complete handle=0x%04X status=0x%02X\n", handle, status);
+            bt_slot *s = slot_by_handle(handle);
             if (status != ERROR_CODE_SUCCESS) {
-                printf("[HCI] Authentication failed, drop stored key for %s\n", bd_addr_to_str(current_device_addr));
-                gap_drop_link_key_for_bd_addr(current_device_addr);
-                connect_attempt_started = 0; // disarm
-                bt_disconnect();
+                if (s) {
+                    printf("[HCI] Authentication failed, drop stored key for %s\n", bd_addr_to_str(s->addr));
+                    gap_drop_link_key_for_bd_addr(s->addr);
+                    s->connect_attempt_started = 0; // disarm
+                    bt_disconnect_slot(s);
+                }
             } else {
                 hci_send_cmd(&hci_set_connection_encryption, handle, 1);
             }
@@ -771,16 +1027,17 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             const hci_con_handle_t handle = hci_event_encryption_change_get_connection_handle(packet);
             const uint8_t enabled = hci_event_encryption_change_get_encryption_enabled(packet);
             printf("[HCI] Encryption change handle=0x%04X status=0x%02X enabled=%u\n", handle, status, enabled);
-            if (status == ERROR_CODE_SUCCESS && enabled) {
-                printf("[L2CAP] Open HID channels\n");
-                if (new_pair) {
-                    if (hid_control_cid == 0) {
-                        l2cap_create_channel(l2cap_packet_handler, current_device_addr, PSM_HID_CONTROL, MTU_CONTROL,
-                                             &hid_control_cid);
-                    } else if (hid_interrupt_cid == 0) {
-                        l2cap_create_channel(l2cap_packet_handler, current_device_addr, PSM_HID_INTERRUPT,
+            bt_slot *s = slot_by_handle(handle);
+            if (s && status == ERROR_CODE_SUCCESS && enabled) {
+                printf("[L2CAP] Open HID channels (slot %d)\n", slot_index(s));
+                if (s->new_pair) {
+                    if (s->control_cid == 0) {
+                        l2cap_create_channel(l2cap_packet_handler, s->addr, PSM_HID_CONTROL, MTU_CONTROL,
+                                             &s->control_cid);
+                    } else if (s->interrupt_cid == 0) {
+                        l2cap_create_channel(l2cap_packet_handler, s->addr, PSM_HID_INTERRUPT,
                                              MTU_INTERRUPT,
-                                             &hid_interrupt_cid);
+                                             &s->interrupt_cid);
                     }
                 }
             }
@@ -791,7 +1048,7 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             const uint8_t status = hci_event_mode_change_get_status(packet);
             const hci_con_handle_t handle = hci_event_mode_change_get_handle(packet);
             const uint8_t mode = hci_event_mode_change_get_mode(packet);
-            if (handle == acl_handle) {
+            if (slot_by_handle(handle) != nullptr) {
                 if (status == ERROR_CODE_SUCCESS && mode != 0) {
                     // gap_sniff_mode_exit() goes through BTstack's queued GAP
                     // state machine (safe vs. the single command slot); the
@@ -804,18 +1061,24 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
 
         case HCI_EVENT_CONNECTION_REQUEST: {
             // Acceptance is decided by bt_classic_connection_filter() (blacklist +
-            // pairing-window gates), evaluated inside BTstack BEFORE this event is
-            // delivered. If it allowed the addr, BTstack has ALREADY auto-accepted
-            // -- we must NOT send hci_accept_connection_request here (double-accept).
-            // BTstack still forwards this event to us even when the filter DECLINED,
-            // so re-check the same gates and skip our bookkeeping for a declined
-            // addr (otherwise we'd stomp current_device_addr / stop inquiry for a
-            // connection that's being rejected). For an allowed addr the link comes
-            // up in HCI_EVENT_CONNECTION_COMPLETE.
+            // capacity + pairing-window gates), evaluated inside BTstack BEFORE
+            // this event is delivered. If it allowed the addr, BTstack has ALREADY
+            // auto-accepted -- we must NOT send hci_accept_connection_request here
+            // (double-accept). BTstack still forwards this event to us even when
+            // the filter DECLINED, so re-check the same gates and skip our
+            // bookkeeping for a declined addr (otherwise we'd stop inquiry / arm
+            // the watchdog for a connection that's being rejected). For an allowed
+            // addr the link comes up in HCI_EVENT_CONNECTION_COMPLETE.
             bd_addr_t addr;
             hci_event_connection_request_get_bd_addr(packet, addr);
             const uint32_t cod = hci_event_connection_request_get_class_of_device(packet);
-            if (bt_blacklist_contains(addr) || pairing_window) {
+            bool declined = bt_blacklist_contains(addr);
+            if (!declined && !slot_by_addr(addr)) {
+                const int cap = bt_multi_allowed() ? BT_MAX_SLOTS : 1;
+                const int free_seats = cap - bt_connected_count();
+                declined = free_seats <= 0 || (pairing_window && free_seats <= 1);
+            }
+            if (declined) {
                 // Filter already declined this; BTstack is sending the reject.
                 printf("[HCI] Incoming ACL request from %s cod=0x%06x (declined by filter)\n",
                        bd_addr_to_str(addr), (unsigned int) cod);
@@ -823,56 +1086,78 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             }
             printf("[HCI] Incoming ACL request from %s cod=0x%06x (allowed by filter)\n",
                    bd_addr_to_str(addr), (unsigned int) cod);
-            bd_addr_copy(current_device_addr, addr);
-            gap_inquiry_stop();
+            // Don't kill an active pairing inquiry for a routine reconnect;
+            // outside the pairing window keep the original behavior of stopping
+            // inquiry while the connection sets up (radio contention).
+            if (!pairing_window) gap_inquiry_stop();
             connect_attempt_started = get_absolute_time(); // arm connection watchdog (incoming path)
             break;
         }
 
         case HCI_EVENT_DISCONNECTION_COMPLETE: {
-#ifdef ENABLE_WAKE_HID
-            // With ENABLE_WAKE_HID we stay enumerated for remote-wakeup,
-            // but switch to the minimal descriptor variant so the host
-            // no longer sees audio/gamepad ghosts. The variant-swap
-            // orchestrator handles the actual tud_disconnect/swap/
-            // tud_connect bounce on the main loop (gated on host
-            // not-suspended).
-            usb_request_variant_minimal();
-#else
-            // Without ENABLE_WAKE_HID we hide the USB device whenever no
-            // controller is paired (upstream behavior).
-            tud_disconnect();
-#endif
-            gap_connectable_control(1);
-            gap_discoverable_control(1);
+            const hci_con_handle_t handle = hci_event_disconnection_complete_get_connection_handle(packet);
             const uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
+            bt_slot *s = slot_by_handle(handle);
+            if (s) {
+                const uint8_t slot = (uint8_t) slot_index(s);
+                // Capture BEFORE slot_clear changes the connected set: was this
+                // pad the audio owner?
+                const bool was_audio_slot = (slot == tier_audio_slot());
+                printf("[HCI] Slot %d disconnected\n", slot);
+                slot_clear(s);
+                // Neutralize the slot's USB input buffer: in the MULTI variant
+                // the interface stays visible, and a pad that dropped mid-press
+                // must not leave its last buttons frozen "held" on the host.
+                bridge_reset_slot_input(slot);
+                if (was_audio_slot) {
+                    state_reset_mute();
+                }
+#if BT_MAX_SLOTS > 1
+                // A different controller may take this seat next; don't let it
+                // inherit the previous pad's rumble/trigger/lightbar state.
+                // (Single-slot builds keep the original behavior: state
+                // persists across reconnects of the one controller.)
+                state_slot_reset(slot);
+#endif
+#if ENABLE_BATT_LED
+                if (slot == BT_USB_SLOT) {
+                    battery_led_on_disconnect();
+                }
+#endif
+            }
             device_found = false;
             new_pair = false;
-            connect_attempt_started = 0; // disarm
-            state_reset_mute();
-            // D1: reset the wake FSM + stale button-diff bytes now the
-            // controller is gone, so a reconnect can't fire one spurious wake
-            // attempt off last session's button state. No-op in non-wake builds
-            // (header stub). Complements wake_on_bt_connect() on the connect path.
-            wake_on_bt_disconnect();
-            acl_handle = HCI_CON_HANDLE_INVALID;
-            hid_control_cid = 0;
-            hid_interrupt_cid = 0;
-            feature_data.clear();
-            while (queue_try_remove(&send_fifo, NULL)) {}
-            // N5: reset the L2CAP TX send-chain state so nothing leaks into the
-            // next session -- a queued retry would otherwise replay a stale
-            // frame, and a stuck send_chain_active would wedge bt_pump.
-            retry_pending = false;
-            send_chain_active = false;
-            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
-#if ENABLE_BATT_LED
-            battery_led_on_disconnect();
+            connect_attempt_started = 0; // disarm pre-ACL watchdog
+            if (bt_connected_count() == 0) {
+                // D1: reset the wake FSM + stale button-diff bytes now the last
+                // controller is gone, so a reconnect can't fire one spurious wake
+                // attempt off last session's button state. No-op in non-wake
+                // builds (header stub). Complements wake_on_bt_connect().
+                wake_on_bt_disconnect();
+                cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
+            }
+#ifdef ENABLE_WAKE_HID
+            // With ENABLE_WAKE_HID we stay enumerated for remote-wakeup; the
+            // variant policy picks the descriptor face for the new controller
+            // count (MINIMAL at 0, FULL at 1, MULTI at 2+; leaves within MULTI
+            // are seamless, the 2->1 crossing re-plugs to bring audio back).
+            // The swap orchestrator handles the actual tud_disconnect/swap/
+            // tud_connect bounce on the main loop (gated on host
+            // not-suspended).
+            bt_apply_usb_variant_policy();
+#else
+            // Without ENABLE_WAKE_HID we hide the USB device whenever no
+            // controller is connected (upstream behavior).
+            if (bt_connected_count() == 0) {
+                tud_disconnect();
+            }
 #endif
+            bt_update_scan_enable();
             // An explicit web-UI pair request forces inquiry even with a bond
-            // stored (we just dropped the active controller to make room for a
-            // new one); otherwise a bonded controller reconnects via page scan,
-            // so we only inquire when nothing is bonded.
+            // stored (single-seat operation just dropped the active controller
+            // to make room for a new one); otherwise a bonded controller
+            // reconnects via page scan, so we only inquire when nothing is
+            // bonded.
             if (pairing_window) {
                 // Keep the window open across the disconnect; it closes when the
                 // new controller opens HID or the inquiry finds nothing.
@@ -891,13 +1176,17 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
 }
 
 static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
-    (void) channel;
-
     if (packet_type == L2CAP_DATA_PACKET) {
-        if (channel == hid_interrupt_cid) {
+        bt_slot *s = slot_by_cid(channel);
+        if (!s) {
+            printf("[L2CAP] Data on unknown channel 0x%04X\n", channel);
+            return;
+        }
+        const uint8_t slot = (uint8_t) slot_index(s);
+        if (channel == s->interrupt_cid) {
             // printf("[L2CAP] HID Interrupt data len=%u\n", size);
             // printf_hexdump(packet, size);
-            if (bt_data_callback) bt_data_callback(INTERRUPT, packet, size);
+            if (bt_data_callback) bt_data_callback(slot, INTERRUPT, packet, size);
 
             // The inactivity watchdog below reads packet[2..12]; a runt frame
             // from a misbehaving peer would read out of bounds. The callback
@@ -920,14 +1209,14 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
                 packet[7] > 0 || packet[8] > 0 ||
                 packet[10] != 0x08 || packet[11] != 0x00 ||
                 packet[12] != 0x00) {
-                inactive_time = get_absolute_time();
-            } else if (absolute_time_diff_us(inactive_time, get_absolute_time()) >
+                s->inactive_time = get_absolute_time();
+            } else if (absolute_time_diff_us(s->inactive_time, get_absolute_time()) >
                        static_cast<int64_t>(get_config().inactive_time) * 60 * 1000 * 1000) {
-                printf("disconnect when inactive\n");
-                inactive_time = get_absolute_time();
-                bt_disconnect();
+                printf("disconnect when inactive (slot %d)\n", slot);
+                s->inactive_time = get_absolute_time();
+                bt_disconnect_slot(s);
             }
-        } else if (channel == hid_control_cid) {
+        } else if (channel == s->control_cid) {
             // Guard the packet reads below against runt frames from a
             // misbehaving peer, WITHOUT dropping the legitimate 1-byte control
             // packets we depend on: a HID HANDSHAKE (size==1) is how a non-Edge
@@ -937,39 +1226,54 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
             // on size>=2; the single-byte packet[0] checks stay reachable at
             // size>=1. dse_on_control_packet handles size==1 itself.
             if (size < 1) {
-                if (bt_data_callback) bt_data_callback(CONTROL, packet, size);
+                if (bt_data_callback) bt_data_callback(slot, CONTROL, packet, size);
                 return;
             }
-            dse_on_control_packet(packet, size);
-            if (check_dse) {
+            // The DSE profile module is bound to the USB-identity slot; a DSE
+            // seated elsewhere works as a gamepad but its profile machinery
+            // isn't driven (Edge profiles aren't reachable over the
+            // composite's single identity anyway).
+            if (slot == BT_USB_SLOT) {
+                dse_on_control_packet(packet, size);
+            }
+            if (s->check_dse) {
                 if (size >= 2 && packet[0] == 0xA3 && packet[1] == 0x70) {
-                    printf("Connected DSE Controller\n");
-                    check_dse = false;
-                    is_dse = true;
-                    connect_attempt_started = 0; // fully up — disarm watchdog
-                    // Unlock Edge profiles; USB connects immediately, profile
-                    // reads are gated until the snapshot is prepared.
-                    dse_on_connect();
+                    printf("Connected DSE Controller (slot %d)\n", slot);
+                    s->check_dse = false;
+                    s->is_dse = true;
+                    s->connect_attempt_started = 0; // fully up — disarm watchdog
+                    if (slot == BT_USB_SLOT) {
+                        // The USB identity (PID / report descriptor) follows
+                        // the USB-identity slot's model only.
+                        is_dse = true;
+                        // Unlock Edge profiles; USB connects immediately,
+                        // profile reads are gated until the snapshot is
+                        // prepared.
+                        dse_on_connect();
+                    }
                     // Wake the host if it's suspended (turn-on-to-wake). No-op
                     // when the host is awake; the variant swap stays deferred
                     // until the wake lands.
                     wake_on_bt_connect();
 #ifdef ENABLE_WAKE_HID
-                    usb_request_variant_full();
+                    bt_apply_usb_variant_policy();
 #else
                     tud_connect();
 #endif
                 } else if (packet[0] == 0x02) {
-                    printf("Connected DS5 Controller\n");
-                    check_dse = false;
-                    is_dse = false;
-                    connect_attempt_started = 0; // fully up — disarm watchdog
+                    printf("Connected DS5 Controller (slot %d)\n", slot);
+                    s->check_dse = false;
+                    s->is_dse = false;
+                    s->connect_attempt_started = 0; // fully up — disarm watchdog
+                    if (slot == BT_USB_SLOT) {
+                        is_dse = false;
+                    }
                     // Wake the host if it's suspended (turn-on-to-wake). No-op
                     // when the host is awake; the variant swap stays deferred
                     // until the wake lands.
                     wake_on_bt_connect();
 #ifdef ENABLE_WAKE_HID
-                    usb_request_variant_full();
+                    bt_apply_usb_variant_policy();
 #else
                     tud_connect();
 #endif
@@ -977,19 +1281,17 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
             }
             if (size >= 2 && packet[0] == 0xA3) {
                 uint8_t report_id = packet[1];
-                feature_data[report_id].assign(packet + 1, packet + size);
+                s->feature_data[report_id].assign(packet + 1, packet + size);
 #if ENABLE_VERBOSE
-                printf("[L2CAP] Stored Feature Report 0x%02X, len=%u\n", report_id, size - 1);
+                printf("[L2CAP] Stored Feature Report 0x%02X (slot %d), len=%u\n", report_id, slot, size - 1);
 #endif
+                bt_feature_snapshot_refresh(s);
             }
 #if ENABLE_VERBOSE
             printf("[L2CAP] HID Control data len=%u\n", size);
             printf_hexdump(packet, size);
 #endif
-            if (bt_data_callback) bt_data_callback(CONTROL, packet, size);
-        } else {
-            printf("[L2CAP] Data on unknown channel 0x%04X (Interrupt: 0x%04X, Control: 0x%04X)\n",
-                   channel, hid_interrupt_cid, hid_control_cid);
+            if (bt_data_callback) bt_data_callback(slot, CONTROL, packet, size);
         }
         return;
     }
@@ -999,58 +1301,68 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
         case L2CAP_EVENT_CHANNEL_OPENED: {
             const uint8_t status = l2cap_event_channel_opened_get_status(packet);
             const uint16_t local_cid = l2cap_event_channel_opened_get_local_cid(packet);
+            const hci_con_handle_t handle = l2cap_event_channel_opened_get_handle(packet);
+            bt_slot *s = slot_by_handle(handle);
+            if (!s) {
+                printf("[L2CAP] Channel opened on unknown handle 0x%04X\n", handle);
+                break;
+            }
             if (status == 0) {
                 const uint16_t psm = l2cap_event_channel_opened_get_psm(packet);
                 if (psm == PSM_HID_CONTROL) {
-                    printf("[L2CAP] HID Control opened cid=0x%04X\n", local_cid);
-                    hid_control_cid = local_cid;
+                    printf("[L2CAP] HID Control opened cid=0x%04X (slot %d)\n", local_cid, slot_index(s));
+                    s->control_cid = local_cid;
 
-                    const auto mtu = l2cap_get_remote_mtu_for_local_cid(hid_control_cid);
-                    printf("[L2CAP] Remote Control MTU: %d\n",mtu);
+                    const auto mtu = l2cap_get_remote_mtu_for_local_cid(s->control_cid);
+                    printf("[L2CAP] Remote Control MTU: %d\n", mtu);
                 } else if (psm == PSM_HID_INTERRUPT) {
-                    printf("[L2CAP] HID Interrupt opened cid=0x%04X\n", local_cid);
-                    hid_interrupt_cid = local_cid;
-                    // A controller is fully connected -- close any open pairing
-                    // window so bonded controllers can auto-reconnect again, and
-                    // stop wanting inquiry so it doesn't re-arm under us.
-                    pairing_window = false;
-                    bt_inquiry_close();
+                    printf("[L2CAP] HID Interrupt opened cid=0x%04X (slot %d)\n", local_cid, slot_index(s));
+                    s->interrupt_cid = local_cid;
+                    // The NEWLY PAIRED controller is fully connected -- close
+                    // the pairing window and stop wanting inquiry. Gated on
+                    // new_pair: an already-bonded pad auto-reconnecting
+                    // mid-window must not steal the window from the pad the
+                    // user is actively holding in pairing mode (that read as a
+                    // random dropout).
+                    if (s->new_pair) {
+                        if (pairing_window) {
+                            pairing_window = false;
+                            printf("[L2CAP] Pairing window closed (new controller connected)\n");
+                        }
+                        bt_inquiry_close();
+                    }
                     // Successful pair removes this MAC from the blacklist -- an
                     // explicit PS+Share re-pair is the user un-forgetting it.
-                    bt_blacklist_remove(current_device_addr);
+                    bt_blacklist_remove(s->addr);
 
                     if (!get_config().disable_pico_led) {
                         cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, true);
                     }
-                    inactive_time = get_absolute_time();
+                    s->inactive_time = get_absolute_time();
 
-                    printf("Init DualSense\n");
+                    printf("Init DualSense (slot %d)\n", slot_index(s));
 
-                    init_feature();
-                    // 初始化手柄状态
-                    uint8_t report32[142]{};
-                    report32[0] = 0x32;
-                    report32[1] = 0x10; // reportSeqCounter
-                    report32[2] = 0x10 | 0 << 6 | 1 << 7;
-                    report32[3] = 0x3f; // 63 bytes
-                    state_get(report32 + 4, sizeof(SetStateData));
-                    bt_write(report32, sizeof(report32));
+                    init_feature((uint8_t) slot_index(s));
+                    // 初始化手柄状态 (per-slot state carries the slot's player
+                    // indicators on multi-slot builds)
+                    bt_send_full_state((uint8_t) slot_index(s));
 
-                    const auto mtu = l2cap_get_remote_mtu_for_local_cid(hid_interrupt_cid);
-                    printf("[L2CAP] Remote Interrupt MTU: %d\n",mtu);
+                    const auto mtu = l2cap_get_remote_mtu_for_local_cid(s->interrupt_cid);
+                    printf("[L2CAP] Remote Interrupt MTU: %d\n", mtu);
 
-                    gap_connectable_control(false);
-                    gap_discoverable_control(false);
+                    // Stay connectable while admittable seats remain; stop
+                    // scanning only when the last seat fills.
+                    bt_update_scan_enable();
                 } else {
                     printf("[L2CAP] Unknown Channel psm: 0x%02X", psm);
                 }
             } else {
                 const uint16_t psm = l2cap_event_channel_opened_get_psm(packet);
-                hid_control_cid = 0;
-                hid_interrupt_cid = 0;
+                s->control_cid = 0;
+                s->interrupt_cid = 0;
                 device_found = false;
-                printf("[L2CAP] Open failed psm=0x%04X status=0x%02X\n", psm, status);
-                bt_disconnect();
+                printf("[L2CAP] Open failed psm=0x%04X status=0x%02X (slot %d)\n", psm, status, slot_index(s));
+                bt_disconnect_slot(s);
             }
             break;
         }
@@ -1065,17 +1377,20 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
 
         case L2CAP_EVENT_CHANNEL_CLOSED: {
             const uint16_t local_cid = l2cap_event_channel_closed_get_local_cid(packet);
-            if (local_cid == hid_control_cid) {
-                hid_control_cid = 0;
-                printf("[L2CAP] HID Control closed cid=0x%04X\n", local_cid);
-            } else if (local_cid == hid_interrupt_cid) {
-                hid_interrupt_cid = 0;
-                printf("[L2CAP] HID Interrupt closed cid=0x%04X\n", local_cid);
-            } else {
+            bt_slot *s = slot_by_cid(local_cid);
+            if (!s) {
                 printf("[L2CAP] Channel closed cid=0x%04X\n", local_cid);
+                break;
             }
-            if (hid_control_cid == 0 && hid_interrupt_cid == 0) {
-                bt_disconnect();
+            if (local_cid == s->control_cid) {
+                s->control_cid = 0;
+                printf("[L2CAP] HID Control closed cid=0x%04X (slot %d)\n", local_cid, slot_index(s));
+            } else if (local_cid == s->interrupt_cid) {
+                s->interrupt_cid = 0;
+                printf("[L2CAP] HID Interrupt closed cid=0x%04X (slot %d)\n", local_cid, slot_index(s));
+            }
+            if (s->control_cid == 0 && s->interrupt_cid == 0) {
+                bt_disconnect_slot(s);
             }
             break;
         }
@@ -1083,65 +1398,209 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
         case L2CAP_EVENT_CAN_SEND_NOW: {
             // printf("[L2CAP] L2CAP_EVENT_CAN_SEND_NOW\n");
             const uint16_t local_cid = l2cap_event_can_send_now_get_local_cid(packet);
-            if (local_cid != hid_interrupt_cid) {
+            bt_slot *s = slot_by_interrupt_cid(local_cid);
+            if (!s) {
                 break;
             }
 
             send_element send_packet;
-            if (retry_pending || queue_try_remove(&send_fifo, &send_packet)) {
-                if (retry_pending) {
-                    send_packet = retry_packet;
+            if (s->retry_pending || queue_try_remove(&s->send_fifo, &send_packet)) {
+                if (s->retry_pending) {
+                    send_packet = s->retry_packet;
                 }
-                const uint8_t status = l2cap_send(hid_interrupt_cid, send_packet.data, send_packet.len);
+                const uint8_t status = l2cap_send(s->interrupt_cid, send_packet.data, send_packet.len);
                 if (status != 0) {
-                    retry_packet = send_packet;
-                    retry_pending = true;
-                    send_chain_active = false;
+                    s->retry_packet = send_packet;
+                    s->retry_pending = true;
+                    s->send_chain_active = false;
                     break;
                 }
-                retry_pending = false;
+                s->retry_pending = false;
             }
-            if (retry_pending || !queue_is_empty(&send_fifo)) {
+            if (s->retry_pending || !queue_is_empty(&s->send_fifo)) {
                 // Self-chain: still have data, keep chain active.
-                l2cap_request_can_send_now_event(hid_interrupt_cid);
+                l2cap_request_can_send_now_event(s->interrupt_cid);
             } else {
                 // Chain idle. bt_pump from main loop will kick it again
                 // when new data arrives.
-                send_chain_active = false;
+                s->send_chain_active = false;
             }
             break;
         }
     }
 }
 
-// Accessors used by the DSE profile module (dse.cpp).
+//--------------------------------------------------------------------+
+// USB descriptor variant policy. Central place where controller-count
+// transitions decide the composite's face:
+//   0 fully-up pads        -> MINIMAL (no gamepad: nothing to ghost)
+//   1 fully-up pad         -> FULL (byte-pure DualSense face, audio on)
+//   2+ fully-up pads       -> MULTI (one gamepad interface PER CONNECTED
+//                             CONTROLLER, high-water, NO audio)
+// MULTI is STICKY until the count returns to 0, and its gamepad exposure is
+// a HIGH-WATER mark: the bus bounces once per NEW player joining (1->2 and
+// each first-time 3rd/4th join), but a player LEAVING never bounces -- the
+// remaining players keep playing uninterrupted, and the host briefly keeps
+// a freed interface (served neutral input) until the group fully drains.
+// Exposing exactly the high-water count (not the compiled max) keeps Steam
+// and the OS from listing ghost pads that were never connected.
+//
+// Audio/HD-haptics are FULL-only: MULTI carries no audio function (the BT
+// airtime can't serve two pads' audio, and a silent-but-enumerated audio
+// device confused hosts). Deliberate consequence of stickiness, DOCUMENTED
+// in the user guide: to get audio back after a multi-pad session, power all
+// pads off (-> MINIMAL) and reconnect one (-> FULL). No mid-game re-plug.
+//
+// Counting only FULLY-UP pads (interrupt channel open + identified) keeps a
+// half-set-up pad from triggering a premature bounce. Note n>=2 keeps MULTI
+// regardless of the multi_allowed toggle: flipping it OFF mid-session is
+// admissions-only (connected pads keep playing; the filter blocks new 2+
+// groups).
+//--------------------------------------------------------------------+
+
+static bool bt_multi_allowed() {
+#if BT_MAX_SLOTS > 1
+    return get_config().multi_enabled != 0;
+#else
+    return false;
+#endif
+}
+
+#ifdef ENABLE_WAKE_HID
+static void bt_apply_usb_variant_policy() {
+#if BT_MAX_SLOTS > 1
+    // High-water gamepad exposure for the current MULTI session; 0 = not in
+    // MULTI. Grows with the fully-up count, never shrinks until 0 pads.
+    static uint8_t multi_exposed = 0;
+#endif
+    int n = 0;
+    for (auto &s : slots) {
+        if (s.acl_handle != HCI_CON_HANDLE_INVALID && s.interrupt_cid != 0 && !s.check_dse) n++;
+    }
+    if (n == 0) {
+#if BT_MAX_SLOTS > 1
+        multi_exposed = 0;
+#endif
+        usb_request_variant_minimal();
+        return;
+    }
+#if BT_MAX_SLOTS > 1
+    if (n >= 2 || multi_exposed > 0) {
+        uint8_t want = (n < 2) ? 2 : (uint8_t) n;
+        if (want < multi_exposed) want = multi_exposed; // sticky high-water
+        if (want > BT_MAX_SLOTS) want = BT_MAX_SLOTS;
+        multi_exposed = want;
+        usb_request_variant_multi(multi_exposed);
+        return;
+    }
+#endif
+    usb_request_variant_full();
+}
+#else
+// Non-wake builds have no dynamic descriptors; visibility is handled with
+// tud_connect()/tud_disconnect() at the call sites. Inline so the unused
+// stub doesn't warn.
+static inline void bt_apply_usb_variant_policy() {}
+#endif
+
+// Accessors used by the DSE profile module (dse.cpp). DSE profile support is
+// bound to the USB-identity slot (see the control-channel handler above).
 uint16_t bt_control_cid() {
-    return hid_control_cid;
+    return slots[BT_USB_SLOT].control_cid;
 }
 
 void bt_control_send(const uint8_t *data, uint16_t len) {
-    if (hid_control_cid != 0) {
-        l2cap_send(hid_control_cid, const_cast<uint8_t *>(data), len);
+    if (slots[BT_USB_SLOT].control_cid != 0) {
+        l2cap_send(slots[BT_USB_SLOT].control_cid, const_cast<uint8_t *>(data), len);
     }
 }
 
-void bt_write(const uint8_t *data, const uint16_t len, bool kick) {
-    if (hid_interrupt_cid == 0) return;
+bool bt_feature_cached(uint8_t reportId, vector<uint8_t> &out) {
+    auto &cache = slots[BT_USB_SLOT].feature_data;
+    auto it = cache.find(reportId);
+    if (it == cache.end()) return false;
+    out = it->second;
+    return true;
+}
+
+bool bt_feature_cached_any(uint8_t reportId, vector<uint8_t> &out) {
+    for (auto &s : slots) {
+        if (s.acl_handle == HCI_CON_HANDLE_INVALID) continue;
+        auto it = s.feature_data.find(reportId);
+        if (it == s.feature_data.end()) continue;
+        out = it->second;
+        return true;
+    }
+    return false;
+}
+
+//--------------------------------------------------------------------+
+// RAM-only snapshot of the bind-time feature reports (calibration 0x05,
+// firmware 0x20, pairing 0x09). MULTI is only ever entered while pads are
+// connected, so empty-slot bind probes are normally answered from a live
+// pad's cache (bt_feature_cached_any). The one hole: every pad powers off
+// while the host sleeps -- the deferred down-swap correctly waits out the
+// suspend, so on resume the host re-binds the still-enumerated MULTI
+// interfaces against ZERO live caches, and stalled probes leave dead pads
+// until the swap lands. This snapshot (refreshed from whichever pad most
+// recently completed its feature exchange) bridges exactly that window.
+// Deliberately NOT persisted to flash: a cold boot enumerates MINIMAL, so
+// MULTI-with-no-history is unreachable from boot. ~130 B of RAM, no flash
+// writes, none of the rebind machinery a persistent snapshot would need.
+//--------------------------------------------------------------------+
+
+static vector<uint8_t> feature_snapshot_cal;  // 0x05
+static vector<uint8_t> feature_snapshot_fw;   // 0x20
+static vector<uint8_t> feature_snapshot_pair; // 0x09
+
+static void bt_feature_snapshot_refresh(bt_slot *s) {
+#if BT_MAX_SLOTS > 1
+    auto cal = s->feature_data.find(0x05);
+    auto fw  = s->feature_data.find(0x20);
+    auto pr  = s->feature_data.find(0x09);
+    if (cal == s->feature_data.end() || fw == s->feature_data.end() ||
+        pr == s->feature_data.end()) {
+        return;
+    }
+    feature_snapshot_cal  = cal->second;
+    feature_snapshot_fw   = fw->second;
+    feature_snapshot_pair = pr->second;
+#else
+    (void) s;
+#endif
+}
+
+bool bt_feature_snapshot_get(uint8_t reportId, vector<uint8_t> &out) {
+    switch (reportId) {
+        case 0x05: out = feature_snapshot_cal;  break;
+        case 0x20: out = feature_snapshot_fw;   break;
+        case 0x09: out = feature_snapshot_pair; break;
+        default: return false;
+    }
+    return !out.empty();
+}
+
+void bt_write(uint8_t slot, const uint8_t *data, const uint16_t len, bool kick) {
+    if (slot >= BT_MAX_SLOTS) return;
+    bt_slot &s = slots[slot];
+    if (s.interrupt_cid == 0) return;
     if (static_cast<size_t>(len) + 1 > BT_SEND_MAX_PACKET_SIZE) {
         printf("[L2CAP bt_write] Error: packet too large: %u\n", len);
         return;
     }
+    // Single scratch element: bt_write only runs on the core0 main-loop
+    // context, so one staging buffer serves every slot.
     static send_element packet{};
     packet.len = len + 1;
     packet.data[0] = 0xA2;
     memcpy(packet.data + 1, data, len);
     fill_output_report_checksum(packet.data + 1, len);
 
-    if (!queue_try_add(&send_fifo, &packet)) {
+    if (!queue_try_add(&s.send_fifo, &packet)) {
         if (!kick) {
             return;
         }
-        printf("[L2CAP bt_write] Error: Failed to add packet to send FIFO\n");
+        printf("[L2CAP bt_write] Error: Failed to add packet to send FIFO (slot %d)\n", slot);
         return;
     }
 
@@ -1152,45 +1611,56 @@ void bt_write(const uint8_t *data, const uint16_t len, bool kick) {
     // path costs ~535 us/call under PICO_CYW43_ARCH_POLL because it
     // dispatches event handlers (including the actual l2cap_send and
     // SPI transmit) inline.
-    if (kick && queue_get_level(&send_fifo) == 1) {
-        l2cap_request_can_send_now_event(hid_interrupt_cid);
+    if (kick && !s.send_chain_active && queue_get_level(&s.send_fifo) == 1) {
+        s.send_chain_active = true;
+        l2cap_request_can_send_now_event(s.interrupt_cid);
     }
 }
 
-// Called from main loop after cyw43_arch_poll(). Kicks the can-send-now
-// chain if there's pending data AND we're not already in flight. This
-// moves the ~535 us l2cap_request_can_send_now_event cost off the audio
+// Called from main loop after cyw43_arch_poll(). Kicks each slot's
+// can-send-now chain if there's pending data AND it's not already in flight.
+// This moves the ~535 us l2cap_request_can_send_now_event cost off the audio
 // thread and onto the main loop, which is already paying that cost in
 // cyw43_arch_poll().
 //
-// Tracks a "kick pending" flag so we don't request a second event while
-// one is already in flight (would be wasted work). Cleared by the
-// L2CAP_EVENT_CAN_SEND_NOW handler. Set here when we issue a request.
-// (send_chain_active is defined at file scope near send_element for N5.)
+// Each slot tracks a "chain active" flag so we don't request a second event
+// while one is already in flight (would be wasted work). Cleared by the
+// L2CAP_EVENT_CAN_SEND_NOW handler; set here (and in bt_write's kick path)
+// when we issue a request.
 
-// RAM-resident: runs every main-loop iteration to kick the L2CAP TX chain. Tiny
-// but called constantly, so a flash-refetch stall here directly perturbs the
-// loop cadence -- keep it out of XIP. (l2cap_request_can_send_now_event itself
-// is SDK code; the l2cap TX pump it drives is already relocated in CMakeLists.)
+// RAM-resident: runs every main-loop iteration to kick the L2CAP TX chains.
+// Tiny but called constantly, so a flash-refetch stall here directly perturbs
+// the loop cadence -- keep it out of XIP. (l2cap_request_can_send_now_event
+// itself is SDK code; the l2cap TX pump it drives is already relocated in
+// CMakeLists.)
 void __not_in_flash_func(bt_pump)() {
-    if (hid_interrupt_cid == 0) return;
-    if (send_chain_active) return;
-    if (queue_is_empty(&send_fifo)) return;
-    send_chain_active = true;
-    l2cap_request_can_send_now_event(hid_interrupt_cid);
+    for (auto &s : slots) {
+        if (s.interrupt_cid == 0) continue;
+        if (s.send_chain_active) continue;
+        if (queue_is_empty(&s.send_fifo) && !s.retry_pending) continue;
+        s.send_chain_active = true;
+        l2cap_request_can_send_now_event(s.interrupt_cid);
+    }
 }
 
 bool bt_send_pending() {
-    return !queue_is_empty(&send_fifo) || send_chain_active;
+    for (auto &s : slots) {
+        if (s.interrupt_cid == 0) continue;
+        if (s.send_chain_active || !queue_is_empty(&s.send_fifo)) return true;
+    }
+    return false;
 }
 
-vector<uint8_t> get_feature_data(uint8_t reportId, uint16_t len) {
-    // 若为0x81则会请求新内容，其他若有旧数据则不进行请求
+vector<uint8_t> get_feature_data(uint8_t slot, uint8_t reportId, uint16_t len) {
+    (void) len;
     auto ret = vector<uint8_t>{};
-    if (feature_data.contains(reportId)) {
-        ret = feature_data[reportId];
+    if (slot >= BT_MAX_SLOTS) return ret;
+    bt_slot &s = slots[slot];
+    // 若为0x81则会请求新内容，其他若有旧数据则不进行请求
+    if (s.feature_data.contains(reportId)) {
+        ret = s.feature_data[reportId];
     }
-    if (!feature_data.contains(reportId) ||
+    if (!s.feature_data.contains(reportId) ||
         // Get Test Command Result
         reportId == 0x81 ||
         // DSE: Set Profile Save?
@@ -1201,19 +1671,21 @@ vector<uint8_t> get_feature_data(uint8_t reportId, uint16_t len) {
         // PS app's unlock(0x80) -> re-read flow sees fresh controller data.
         dse_is_profile_report(reportId)
     ) {
-        if (hid_control_cid != 0) {
+        if (s.control_cid != 0) {
             uint8_t get_feature[] = {0x43, reportId};
-            l2cap_send(hid_control_cid, get_feature, sizeof(get_feature));
+            l2cap_send(s.control_cid, get_feature, sizeof(get_feature));
 #if ENABLE_VERBOSE
-            printf("[L2CAP] Requesting Get Feature Report 0x%02X\n", reportId);
+            printf("[L2CAP] Requesting Get Feature Report 0x%02X (slot %d)\n", reportId, slot);
 #endif
         }
     }
     return ret;
 }
 
-void set_feature_data(uint8_t reportId, uint8_t *data, uint16_t len) {
-    if (hid_control_cid == 0) return;
+void set_feature_data(uint8_t slot, uint8_t reportId, uint8_t *data, uint16_t len) {
+    if (slot >= BT_MAX_SLOTS) return;
+    bt_slot &s = slots[slot];
+    if (s.control_cid == 0) return;
     // Largest legitimate DS/DSE feature report payload is ~63 bytes; +2 for
     // SET_REPORT header. Cap at 128 to keep this off the stack as a VLA and
     // prevent a too-large len (or attacker-influenced value) from smashing
@@ -1228,29 +1700,30 @@ void set_feature_data(uint8_t reportId, uint8_t *data, uint16_t len) {
     get_feature[1] = reportId;
     memcpy(get_feature + 2, data, len);
     fill_feature_report_checksum(get_feature + 1, len + 1);
-    l2cap_send(hid_control_cid, get_feature, len + 2);
+    l2cap_send(s.control_cid, get_feature, len + 2);
 #if ENABLE_VERBOSE
-    printf("[L2CAP] Requesting Set Feature Report 0x%02X\n", reportId);
+    printf("[L2CAP] Requesting Set Feature Report 0x%02X (slot %d)\n", reportId, slot);
     printf_hexdump(get_feature, len + 2);
 #endif
-    dse_on_profile_write(reportId);
+    if (slot == BT_USB_SLOT) {
+        dse_on_profile_write(reportId);
+    }
 }
 
-void init_feature() {
-    get_feature_data(0x09, 20);
-    get_feature_data(0x20, 64);
-    get_feature_data(0x22, 64);
-    get_feature_data(0x05, 41);
+void init_feature(uint8_t slot) {
+    if (slot >= BT_MAX_SLOTS) return;
+    get_feature_data(slot, 0x09, 20);
+    get_feature_data(slot, 0x20, 64);
+    get_feature_data(slot, 0x22, 64);
+    get_feature_data(slot, 0x05, 41);
     // DSE
     // check DSE by request 0x70 feature report. DSE return DEFAULT
     // If len == 1, it's DS5
-    check_dse = true;
-    get_feature_data(0x70, 64);
+    slots[slot].check_dse = true;
+    get_feature_data(slot, 0x70, 64);
 }
 
-void bt_dualsense_power_off() {
-    if (hid_control_cid == 0) return; // no controller connected, nothing to do
-
+void bt_slot_power_off(uint8_t slot) {
     // DualSense feature report 0x08 ("Set USB Settings 1") accepts a
     // sub-command at byte 0; sub-command 0x02 is power-off, equivalent to
     // a long PS-button hold. Remaining bytes are settings fields we leave
@@ -1261,7 +1734,15 @@ void bt_dualsense_power_off() {
     constexpr uint8_t SUBCMD_POWER_OFF             = 0x02;
     constexpr size_t  REPORT_08_PAYLOAD_LEN        = 47;
 
+    if (slot >= BT_MAX_SLOTS) return;
+    if (slots[slot].control_cid == 0) return; // empty slot, nothing to do
     uint8_t payload[REPORT_08_PAYLOAD_LEN] = {0};
     payload[0] = SUBCMD_POWER_OFF;
-    set_feature_data(REPORT_ID_SET_USB_SETTINGS_1, payload, sizeof(payload));
+    set_feature_data(slot, REPORT_ID_SET_USB_SETTINGS_1, payload, sizeof(payload));
+}
+
+void bt_dualsense_power_off() {
+    for (uint8_t slot = 0; slot < BT_MAX_SLOTS; slot++) {
+        bt_slot_power_off(slot);
+    }
 }

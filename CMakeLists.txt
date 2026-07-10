@@ -74,6 +74,14 @@ message(STATUS "DS5-Linux-Bridge build target -- WAVESHARE_RP2350B_PLUS_W_BUILD=
 # audio-contention notes. Turning this OFF leaves NO config UI (settings keep
 # their flash values); it exists for a zero-WiFi minimal build only.
 option(ENABLE_WIFI_WOL "Serve the config page + send Wake-on-LAN over the onboard CYW43 Wi-Fi (STA mode)" ON)
+# Concurrent controller slots. 1 = single-controller firmware (original
+# behavior); 2-4 = the MULTI descriptor variant + per-slot BT connections
+# become available (audio streams only while exactly one pad is connected --
+# see src/tier.h). Bond capacity is NVM_NUM_LINK_KEYS (4) regardless.
+set(MULTI_SLOT_COUNT 4 CACHE STRING "Maximum concurrent DualSense controllers (1-4)")
+if (MULTI_SLOT_COUNT LESS 1 OR MULTI_SLOT_COUNT GREATER 4)
+    message(FATAL_ERROR "MULTI_SLOT_COUNT must be 1-4 (got ${MULTI_SLOT_COUNT})")
+endif ()
 option(ENABLE_VERBOSE "Enable Log Verbose" OFF)
 if(ENABLE_VERBOSE)
     set(ENABLE_VERBOSE_VALUE 1)
@@ -133,8 +141,15 @@ add_executable(ds5-bridge
         src/config.cpp
         src/flash_safety.cpp
         src/state_mgr.cpp
+        src/tier.cpp
         src/ram_mem.c
 )
+
+# MULTI_SLOT_COUNT reaches every source (btstack_config.h / tusb_config.h /
+# slots.h mirror a =1 fallback for safety). Global add_compile_definitions is
+# NOT enough: BTstack + TinyUSB sources compile inside the ds5-bridge target
+# and read it from btstack_config.h/tusb_config.h, which ARE per-target.
+target_compile_definitions(ds5-bridge PRIVATE MULTI_SLOT_COUNT=${MULTI_SLOT_COUNT})
 
 # RAM-resident memcpy/memset/memmove (src/ram_mem.c). Must be built with
 # -fno-builtin and -fno-tree-loop-distribute-patterns so the compiler does not
@@ -152,6 +167,7 @@ set_source_files_properties(src/ram_mem.c PROPERTIES COMPILE_OPTIONS
 if (ENABLE_WIFI_WOL)
     target_sources(ds5-bridge PRIVATE
             src/web_api.cpp
+            src/weblog.cpp
             src/wifi_net.cpp
             # Onboarding captive portal (AP mode): tiny DHCP + DNS servers so an
             # unprovisioned dongle can hand a phone a lease and redirect every
@@ -227,8 +243,12 @@ add_subdirectory(lib/opus)
 set(OPUS_RELOC_DIR ${CMAKE_BINARY_DIR}/opus_reloc)
 add_custom_command(
     OUTPUT ${CMAKE_BINARY_DIR}/opus_ram_relocate.stamp
-    # Blanket-relocate all of libopus into RAM.
-    COMMAND ${CMAKE_OBJCOPY} --rename-section .text=.time_critical.opus_text --rename-section .rodata=.time_critical.opus_rodata --rename-section .rodata.str1.4=.time_critical.opus_strings $<TARGET_FILE:opus>
+    # Blanket-relocate libopus code + lookup tables into RAM. String literals
+    # (.rodata.str1.4, ~11 KB of error/assert messages) deliberately stay in
+    # flash: they are never touched on the per-frame audio path, so they cost
+    # zero XIP pressure -- and the heap needs the RAM (see the OOM note in
+    # audio.cpp core1_entry).
+    COMMAND ${CMAKE_OBJCOPY} --rename-section .text=.time_critical.opus_text --rename-section .rodata=.time_critical.opus_rodata $<TARGET_FILE:opus>
     # Then un-relocate the never-executed analysis path back to flash. This is a
     # cmake -P helper (not inline COMMANDs) because the archive member names are
     # not stable across toolchains (.c.obj here vs .c.o in CI), so it must query
@@ -322,6 +342,15 @@ if(ENABLE_WAKE_HID)
         target_compile_definitions(ds5-bridge PRIVATE ENABLE_WAKE_LINK)
         target_sources(ds5-bridge PRIVATE src/wake_link.cpp)
     endif()
+else()
+    # Multi-slot rides on the dynamic-descriptor machinery (the MULTI variant
+    # + the mount-gated swap orchestrator live behind ENABLE_WAKE_HID). A
+    # non-wake build is single-controller only.
+    if (MULTI_SLOT_COUNT GREATER 1)
+        message(FATAL_ERROR "MULTI_SLOT_COUNT>1 requires ENABLE_WAKE_HID=ON "
+                "(the MULTI descriptor variant uses the dynamic-descriptor machinery); "
+                "build with -DMULTI_SLOT_COUNT=1 for a non-wake firmware")
+    endif ()
 endif()
 
 option(WAKE_DEBUG "Print wake-FSM transitions to UART (developer use)" OFF)

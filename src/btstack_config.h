@@ -11,12 +11,22 @@
 
 // CYW43 HCI Transport requires pre-buffer space for packet header
 
-// Se estiver 1 ou 2, o 0x31 do DualSense causa estouro
-#define MAX_NR_HCI_ACL_PACKETS 4
+// Concurrent controller support: connection/channel/buffer caps scale with
+// MULTI_SLOT_COUNT (CMake option; slots.h can't be included here because
+// BTstack's C sources compile this header too, so mirror its fallback).
+#ifndef MULTI_SLOT_COUNT
+#define MULTI_SLOT_COUNT 1
+#endif
 
-#define MAX_NR_HCI_CONNECTIONS 1
-#define MAX_NR_L2CAP_CHANNELS  2
-#define MAX_NR_L2CAP_SERVICES  3 // GDP + CONTROL + INTERRUPT
+// Se estiver 1 ou 2, o 0x31 do DualSense causa estouro (per link).
+// Each ACL buffer is ~1 KB of static RAM; 2 per link + 2 shared slack keeps
+// the pool honest at 4 slots without eating the heap the opus states need.
+// (At MULTI_SLOT_COUNT=1 this is the original value 4.)
+#define MAX_NR_HCI_ACL_PACKETS (2 * MULTI_SLOT_COUNT + 2)
+
+#define MAX_NR_HCI_CONNECTIONS MULTI_SLOT_COUNT
+#define MAX_NR_L2CAP_CHANNELS  (2 * MULTI_SLOT_COUNT) // control + interrupt per slot
+#define MAX_NR_L2CAP_SERVICES  3 // GDP + CONTROL + INTERRUPT (shared)
 //
 #define HCI_ACL_PAYLOAD_SIZE 1021
 #define HCI_ACL_CHUNK_SIZE_ALIGNMENT 4

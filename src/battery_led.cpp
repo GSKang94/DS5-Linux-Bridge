@@ -9,10 +9,13 @@
 #include "config.h"
 #include "pico/cyw43_arch.h"
 #include "pico/time.h"
+#include "slots.h"
 
-// Latest gamepad input report, defined in main.cpp; length must match
-// main.cpp's HID_INPUT_REPORT_LEN (63).
-extern uint8_t interrupt_in_data[63];
+// Latest gamepad input reports, one row per slot, defined in main.cpp; row
+// length must match main.cpp's HID_INPUT_REPORT_LEN (63). The battery LED
+// watches the USB-identity slot only (one onboard LED, one pad it can speak
+// for; battery_led_note_report is likewise slot-0-gated in main.cpp).
+extern uint8_t interrupt_in_data[][63];
 
 namespace {
 
@@ -65,7 +68,7 @@ void battery_led_tick(void) {
         return;
     }
 
-    const uint8_t b   = interrupt_in_data[52];
+    const uint8_t b   = interrupt_in_data[BT_USB_SLOT][52];
     const uint8_t pct = b & 0x0F;
     const uint8_t st  = (b >> 4) & 0x0F;
     const bool low    = (st == POWER_STATE_DISCHARGING) && (pct <= THRESHOLD_LEVEL);

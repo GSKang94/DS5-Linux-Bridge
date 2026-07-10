@@ -123,13 +123,17 @@ jobs:
         # Also flips ENABLE_WAKE_LINK=ON here (C1): wake_link.cpp compiles under
         # no other job, so a refactor of wake.cpp / wake_link.h could silently
         # rot it. Folding it onto this compile-check job guards it without a
-        # whole new matrix entry.
+        # whole new matrix entry. MULTI_SLOT_COUNT=1 rides along for the same
+        # reason: the single-controller (parity) firmware must keep compiling
+        # with the wake/dynamic-descriptor machinery ON while every #if
+        # MULTI_SLOT_COUNT>1 region is excluded.
         run: |
           cmake -S . -B build/no-batt-led -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DPICO_SDK_PATH="$PICO_SDK_PATH" \
             -DENABLE_BATT_LED=OFF \
             -DENABLE_WAKE_LINK=ON \
+            -DMULTI_SLOT_COUNT=1 \
             -DVERSION="$FIRMWARE_VERSION"
           cmake --build build/no-batt-led --target ds5-bridge
 
@@ -138,11 +142,15 @@ jobs:
         # guard: it excludes wake.cpp + the dynamic MINIMAL/FULL descriptor and
         # host-suspend machinery, so a cleanup can silently break that path
         # unless something compiles it.
+        # MULTI_SLOT_COUNT=1 is REQUIRED here: multi-slot rides on the dynamic
+        # descriptors that ENABLE_WAKE_HID provides, and CMake hard-errors on
+        # the (default 4, wake off) combination.
         run: |
           cmake -S . -B build/no-wake -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DPICO_SDK_PATH="$PICO_SDK_PATH" \
             -DENABLE_WAKE_HID=OFF \
+            -DMULTI_SLOT_COUNT=1 \
             -DVERSION="$FIRMWARE_VERSION"
           cmake --build build/no-wake --target ds5-bridge
 

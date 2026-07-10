@@ -109,6 +109,21 @@ struct __attribute__((packed)) Config_body {
     // packet to every configured (non-zero) target. Same unset convention and
     // every-build-storage rationale as wol_target_mac above.
     uint8_t wol_target_mac2[6];
+    // Multi-controller opt-in (v11). 0 (default) = single-controller only,
+    // exactly the pre-multi behavior: a 2nd pad is declined at connect and
+    // the descriptor never leaves MINIMAL/FULL -- existing users see nothing
+    // new until they enable it. 1 = up to MULTI_SLOT_COUNT concurrent pads.
+    // The append-only migration zero-fills new tail fields, which lands on
+    // the OFF default by construction. Exposed to the web UI as
+    // "multi_allowed". Only meaningful when MULTI_SLOT_COUNT > 1; stored in
+    // every build (append-only layout rule).
+    uint8_t multi_enabled;               // bool; 0 (default) = single-controller
+    // Diagnostic web log (v11). 1 = mirror printf into the RAM ring served at
+    // /api/log (weblog.cpp); 0 (default) = mirror disabled, /api/log answers
+    // "disabled". RAM-only -- log lines never touch flash. Persisted so a
+    // user can enable it, reproduce an issue across reboots (boot logs
+    // captured), and copy the log from the browser.
+    uint8_t weblog_enabled;              // bool
 };
 
 struct __attribute__((packed)) Config {

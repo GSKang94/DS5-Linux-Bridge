@@ -92,14 +92,19 @@
 
 //------------- CLASS -------------//
 #define CFG_TUD_AUDIO             1
-// HID class instance count. 2 unconditionally: the wake keyboard is a RUNTIME
-// web-UI toggle now (Config_body.wake_kbd_enabled), so instance 1 must exist in
-// every build -- gamepad/dummy at instance 0, boot keyboard at instance 1 when
-// the kbd-bearing descriptor variants are enumerated. With the kbd disabled
-// (default, pure-DualSense face) instance 1 simply never appears in a served
-// descriptor and sits idle (~130 B of buffers -- cheap, and it keeps the count
-// independent of the toggle, which TinyUSB could not change at runtime anyway).
-#define CFG_TUD_HID               2
+// HID class instance count: one per controller slot, plus one for the wake
+// keyboard. The keyboard is a RUNTIME web-UI toggle (Config_body.
+// wake_kbd_enabled), so its instance must exist in every build -- slot-0
+// gamepad/dummy at instance 0, boot keyboard at instance 1 when the
+// kbd-bearing descriptor variants are enumerated, tail gamepads after (see
+// the slot<->instance map in usb_descriptors.cpp). Instances not enumerated
+// by the active variant sit idle (~130 B of buffers each -- cheap, and
+// TinyUSB could not change the count at runtime anyway). At MULTI_SLOT_COUNT
+// 1 this is the original value 2.
+#ifndef MULTI_SLOT_COUNT
+#define MULTI_SLOT_COUNT 1
+#endif
+#define CFG_TUD_HID               (MULTI_SLOT_COUNT + 1)
 #define CFG_TUD_CDC               0
 // No CDC-NCM: the config web UI is served over WiFi (ENABLE_WIFI_WOL), keeping
 // the USB face DualSense-only. Diagnostics go over UART0 (GP0 TX, 115200 8N1),

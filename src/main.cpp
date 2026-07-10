@@ -15,9 +15,12 @@
 #include "utils.h"
 #include "wake.h"
 #include <cstdio>
+#include <malloc.h> // mallinfo(): boot heap telemetry
 
 #include "config.h"
 #include "dse.h"
+#include "tier.h"
+#include "weblog.h"
 #include "wifi_net.h"
 
 #if defined(ENABLE_WIFI_WOL)
@@ -38,16 +41,18 @@
 // the gamepad IN endpoint after a failed report.
 #include "device/usbd_pvt.h"
 
-int reportSeqCounter = 0;
+int reportSeqCounter[BT_MAX_SLOTS] = {};
 bool spk_active = false;
 bool mic_active = false;
 
 namespace {
 constexpr uint8_t HID_INPUT_REPORT_LEN = 63;
 constexpr uint8_t BT_INPUT_REPORT_OFFSET = 3;
-constexpr uint8_t REALTIME_HID_QUEUE_DEPTH = 4;
+// Depth 8 (was 4 single-slot): shared across up to 4 pads' 1 kHz streams.
+constexpr uint8_t REALTIME_HID_QUEUE_DEPTH = 8;
 
 struct RealtimeHidReport {
+  uint8_t slot; // which gamepad interface this report belongs to
   uint8_t data[HID_INPUT_REPORT_LEN];
 };
 
@@ -59,30 +64,38 @@ uint8_t realtime_hid_count = 0;
 uint8_t realtime_hid_prev_index(uint8_t index) {
   return index == 0 ? REALTIME_HID_QUEUE_DEPTH - 1 : index - 1;
 }
-} // namespace
 
-uint8_t interrupt_in_data[HID_INPUT_REPORT_LEN] = {
+// Neutral/idle DualSense input report: centered sticks, no buttons. Every
+// slot's buffer starts from this so the host sees a quiet pad (not garbage)
+// before the first BT report lands.
+constexpr uint8_t idle_input_report[HID_INPUT_REPORT_LEN] = {
     0x7f, 0x7d, 0x7f, 0x7e, 0x00, 0x00, 0xa7, 0x08, 0x00, 0x00, 0x00,
     0x52, 0x43, 0x30, 0x41, 0x01, 0x00, 0x0e, 0x00, 0xef, 0xff, 0x03,
     0x03, 0x7b, 0x1b, 0x18, 0xf0, 0xcc, 0x9c, 0x60, 0x00, 0xfc, 0x80,
     0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x09, 0x09, 0x00,
     0x00, 0x00, 0x00, 0x00, 0xa7, 0xad, 0x60, 0x00, 0x29, 0x18, 0x00,
     0x53, 0x9f, 0x28, 0x35, 0xa5, 0xa8, 0x0c, 0x8b};
+} // namespace
+
+// Latest gamepad input report per slot (bt.cpp and battery_led.cpp read these
+// too). Row `slot` feeds HID instance usb_slot_hid_instance(slot).
+uint8_t interrupt_in_data[BT_MAX_SLOTS][HID_INPUT_REPORT_LEN];
 
 critical_section_t report_cs;
 
-void realtime_hid_queue_push(const uint8_t *report) {
+void realtime_hid_queue_push(uint8_t slot, const uint8_t *report) {
   critical_section_enter_blocking(&report_cs);
 
   // Keep interrupt_in_data as the latest report for non-HID side consumers
-  // such as battery_led_tick().
-  memcpy(interrupt_in_data, report, HID_INPUT_REPORT_LEN);
+  // such as battery_led_tick() and /api/status.
+  memcpy(interrupt_in_data[slot], report, HID_INPUT_REPORT_LEN);
 
   if (realtime_hid_count == REALTIME_HID_QUEUE_DEPTH) {
     realtime_hid_tail = (realtime_hid_tail + 1) % REALTIME_HID_QUEUE_DEPTH;
     realtime_hid_count--;
   }
 
+  realtime_hid_queue[realtime_hid_head].slot = slot;
   memcpy(realtime_hid_queue[realtime_hid_head].data, report, HID_INPUT_REPORT_LEN);
   realtime_hid_head = (realtime_hid_head + 1) % REALTIME_HID_QUEUE_DEPTH;
   realtime_hid_count++;
@@ -90,11 +103,12 @@ void realtime_hid_queue_push(const uint8_t *report) {
   critical_section_exit(&report_cs);
 }
 
-bool realtime_hid_queue_pop(uint8_t *report) {
+bool realtime_hid_queue_pop(uint8_t *slot, uint8_t *report) {
   bool popped = false;
 
   critical_section_enter_blocking(&report_cs);
   if (realtime_hid_count > 0) {
+    *slot = realtime_hid_queue[realtime_hid_tail].slot;
     memcpy(report, realtime_hid_queue[realtime_hid_tail].data, HID_INPUT_REPORT_LEN);
     realtime_hid_tail = (realtime_hid_tail + 1) % REALTIME_HID_QUEUE_DEPTH;
     realtime_hid_count--;
@@ -105,7 +119,7 @@ bool realtime_hid_queue_pop(uint8_t *report) {
   return popped;
 }
 
-void realtime_hid_queue_requeue_front(const uint8_t *report) {
+void realtime_hid_queue_requeue_front(uint8_t slot, const uint8_t *report) {
   critical_section_enter_blocking(&report_cs);
 
   if (realtime_hid_count == REALTIME_HID_QUEUE_DEPTH) {
@@ -114,10 +128,21 @@ void realtime_hid_queue_requeue_front(const uint8_t *report) {
   }
 
   realtime_hid_tail = realtime_hid_prev_index(realtime_hid_tail);
+  realtime_hid_queue[realtime_hid_tail].slot = slot;
   memcpy(realtime_hid_queue[realtime_hid_tail].data, report, HID_INPUT_REPORT_LEN);
   realtime_hid_count++;
 
   critical_section_exit(&report_cs);
+}
+
+// Reset one slot's USB-facing input buffer to the neutral idle report (see
+// slots.h). Called on BT disconnect so a pad that drops mid-press doesn't
+// leave its buttons frozen "held" on the host. The realtime-queue push makes
+// the 1 kHz path emit the neutral report once; fixed-cadence modes re-send
+// the buffer anyway.
+void bridge_reset_slot_input(uint8_t slot) {
+  if (slot >= BT_MAX_SLOTS) return;
+  realtime_hid_queue_push(slot, idle_input_report);
 }
 
 // Called twice per main-loop iteration: once early (right after tud_task, to
@@ -149,12 +174,16 @@ void realtime_hid_queue_requeue_front(const uint8_t *report) {
 // failed iteration heals it immediately. Belt-and-suspenders guard that makes
 // the wedge unreachable regardless of how the claim got planted; the primary
 // fix is the distinct-bcdDevice-per-variant change in usb_descriptors.cpp.
-static constexpr uint8_t GAMEPAD_EP_IN = 0x84; // FULL gamepad / MINIMAL dummy (shared addr)
+// Per-slot gamepad IN endpoints. Slot 0 = 0x84 (FULL gamepad / MINIMAL dummy,
+// shared addr); slots 1-3 are the MULTI tail interfaces. Must match the
+// endpoint plan in usb_descriptors.cpp.
+static constexpr uint8_t GAMEPAD_EP_IN[MULTI_SLOT_COUNT > 4 ? MULTI_SLOT_COUNT : 4] = {
+    0x84, 0x88, 0x89, 0x8A};
 
-static void handle_hid_report_failure() {
+static void handle_hid_report_failure(uint8_t slot) {
   // Drop a possibly-leaked CLAIMED bit so the next send can proceed. No-op on a
   // healthy endpoint (release requires claimed && !busy).
-  usbd_edpt_release(0, GAMEPAD_EP_IN);
+  usbd_edpt_release(0, GAMEPAD_EP_IN[slot]);
 
   static uint64_t last_log_us = 0;
   static uint32_t suppressed = 0;
@@ -174,53 +203,72 @@ static void handle_hid_report_failure() {
 }
 
 void interrupt_loop(bool drain_only = false) {
-#ifdef ENABLE_WAKE_HID
-  // Only the FULL variant exposes the real gamepad (HID instance 0). In MINIMAL
-  // instance 0 is an inert dummy HID, so don't emit gamepad reports there.
-  // (The keyboard is instance 1 in BOTH variants, so a gamepad report can never
-  // reach it regardless -- see usb_descriptors.cpp. This guard just avoids
-  // pushing reports at the dummy / before the controller is connected.)
-  if (!usb_descriptor_variant_is_full())
-    return;
-#endif
-  if (!tud_hid_ready())
+  // Only variants that expose gamepad interfaces emit gamepad reports: in
+  // MINIMAL instance 0 is an inert dummy HID. (The keyboard's instance can
+  // never receive a gamepad report regardless -- see the slot<->instance map
+  // in usb_descriptors.cpp. This guard just avoids pushing reports at the
+  // dummy / before any controller is connected.)
+  const uint8_t exposed = usb_active_gamepad_slots();
+  if (exposed == 0)
     return;
 
   // TODO: Refactor for better code reuse
   if (get_config().polling_rate_mode != 2) {
     if (drain_only)
       return; // non-realtime: only emit from the bottom-of-loop call
-    if (!tud_hid_report(0x01, interrupt_in_data, HID_INPUT_REPORT_LEN)) {
-      handle_hid_report_failure();
+    // Fixed-cadence mode: re-send every exposed slot's latest buffer; empty
+    // slots keep reporting their neutral idle state.
+    for (uint8_t slot = 0; slot < exposed; slot++) {
+      const uint8_t inst = usb_slot_hid_instance(slot);
+      if (!tud_hid_n_ready(inst))
+        continue;
+      if (!tud_hid_n_report(inst, 0x01, interrupt_in_data[slot], HID_INPUT_REPORT_LEN)) {
+        handle_hid_report_failure(slot);
+      }
     }
     return;
   }
 
+  uint8_t slot;
   uint8_t safe_report[HID_INPUT_REPORT_LEN];
-  const bool should_send = realtime_hid_queue_pop(safe_report);
+  const bool should_send = realtime_hid_queue_pop(&slot, safe_report);
 
   // Only send to TinyUSB if we actually grabbed fresh data
   if (should_send) {
-    if (!tud_hid_report(0x01, safe_report, HID_INPUT_REPORT_LEN)) {
-      handle_hid_report_failure();
-      realtime_hid_queue_requeue_front(safe_report);
+    if (slot >= exposed)
+      return; // slot not exposed by the active variant (e.g. mid-swap); drop
+    const uint8_t inst = usb_slot_hid_instance(slot);
+    if (!tud_hid_n_ready(inst)) {
+      realtime_hid_queue_requeue_front(slot, safe_report);
+      return;
+    }
+    if (!tud_hid_n_report(inst, 0x01, safe_report, HID_INPUT_REPORT_LEN)) {
+      handle_hid_report_failure(slot);
+      realtime_hid_queue_requeue_front(slot, safe_report);
     }
   }
 }
 
+// Push one slot's cached output state to its controller as a BT 0x31 report.
 // RAM-resident: on the controller->host output path. Kept out of flash so a
 // core1 Opus-decode XIP-cache eviction can't add a flash-refetch stall here.
-void __not_in_flash_func(state_push_to_bt)() {
-  if (spk_active) {
-    return;
-  }
+void __not_in_flash_func(state_push_slot_to_bt)(uint8_t slot) {
   uint8_t outputData[78]{};
   outputData[0] = 0x31;
-  outputData[1] = reportSeqCounter << 4;
-  reportSeqCounter = (reportSeqCounter + 1) & 0x0F;
+  outputData[1] = reportSeqCounter[slot] << 4;
+  reportSeqCounter[slot] = (reportSeqCounter[slot] + 1) & 0x0F;
   outputData[2] = 0x10;
-  state_get(outputData + 3, sizeof(SetStateData));
-  bt_write(outputData, sizeof(outputData));
+  state_get(slot, outputData + 3, sizeof(SetStateData));
+  bt_write(slot, outputData, sizeof(outputData));
+}
+
+void __not_in_flash_func(state_push_to_bt)() {
+  // Skip only while audio frames are actually flowing (they carry the state
+  // themselves); see the matching condition in tud_hid_set_report_cb.
+  if (spk_active && tier_audio_allowed()) {
+    return;
+  }
+  state_push_slot_to_bt(tier_audio_slot());
 }
 
 // RAM-resident: this is THE per-packet controller input handler -- it runs for
@@ -228,11 +276,17 @@ void __not_in_flash_func(state_push_to_bt)() {
 // relocate_to_ram() list in CMakeLists.txt); this is the application tail of
 // that path. Keeping it out of flash XIP means a core1 Opus-decode cache thrash
 // can't stall the next incoming report's processing (the outlier-tail mechanism).
-void __not_in_flash_func(on_bt_data)(CHANNEL_TYPE channel, uint8_t *data, uint16_t len) {
-  // printf("[Main] BT data callback: channel=%u len=%u\n", channel, len);
+void __not_in_flash_func(on_bt_data)(uint8_t slot, CHANNEL_TYPE channel, uint8_t *data, uint16_t len) {
+  // printf("[Main] BT data callback: slot=%u channel=%u len=%u\n", slot, channel, len);
   if (channel == INTERRUPT && len > 2 && data[1] == 0x31) {
+    // Audio-path concerns (mic frames, mute button, headset jack) belong to
+    // the audio slot only; other pads' reports skip straight to the input
+    // bridge below.
+    const bool is_audio_slot = (slot == tier_audio_slot());
     if (data[2] >> 1 & 1) {
-      mic_add_queue(data + 4);
+      if (is_audio_slot && tier_audio_allowed()) {
+        mic_add_queue(data + 4);
+      }
       return;
     }
     if (len < BT_INPUT_REPORT_OFFSET + HID_INPUT_REPORT_LEN) {
@@ -240,7 +294,7 @@ void __not_in_flash_func(on_bt_data)(CHANNEL_TYPE channel, uint8_t *data, uint16
     }
 
     // Mute button detection (data[12] corresponds to byte 9 of input data)
-    if (!g_host_hid_manages_mute) {
+    if (is_audio_slot && !g_host_hid_manages_mute) {
       static bool prev_mute_pressed = false;
       bool mute_pressed = (data[12] & 0x04) != 0;
       if (mute_pressed && !prev_mute_pressed) {
@@ -254,25 +308,28 @@ void __not_in_flash_func(on_bt_data)(CHANNEL_TYPE channel, uint8_t *data, uint16
     // Track actual DS5 jack state separately — interrupt_in_data[53]
     // has its HP_DETECT bit forced high for host UCM routing and cannot
     // be used as the previous-state comparison here.
-    static uint8_t last_jack_state =
-        0xFF; // sentinel: force set_headset on first report
-    const uint8_t cur_jack_state = data[56] & 1;
-    if (cur_jack_state != last_jack_state) {
-      set_headset(cur_jack_state);
-      last_jack_state = cur_jack_state;
+    if (is_audio_slot) {
+      static uint8_t last_jack_state =
+          0xFF; // sentinel: force set_headset on first report
+      const uint8_t cur_jack_state = data[56] & 1;
+      if (cur_jack_state != last_jack_state) {
+        set_headset(cur_jack_state);
+        last_jack_state = cur_jack_state;
+      }
     }
 
     // Wake-on-PS must observe every BT input report regardless of polling
     // mode: the wake feature has its own state to maintain (button-byte
     // diff for edge detection) and short-circuiting it on non-2 polling
-    // modes silently breaks wake while the host is suspended.
+    // modes silently breaks wake while the host is suspended. Any pad's PS
+    // press may wake the host.
     // Wake path: USB remote-wakeup (wake.cpp) AND, on ENABLE_WIFI_WOL builds, a
     // companion Wake-on-LAN packet fired from the same request_host_wake()
     // chokepoint inside wake.cpp. Both run when the host is suspended -- USB wake
     // covers S3, WOL covers S4/S5 (indistinguishable over USB; see wake.cpp).
     wake_on_bt_input(data + 3, len - 3);
 
-    // interrupt_in_data[53] = dualsense_input_report.status[1]:
+    // interrupt_in_data[slot][53] = dualsense_input_report.status[1]:
     //   bit 0 = HP_DETECT  (headphones plugged into DS5 3.5mm jack)
     //   bit 1 = MIC_DETECT (headset mic plugged into DS5 3.5mm jack)
     // hid-playstation (≥6.18) reads these and emits SW_HEADPHONE_INSERT /
@@ -281,17 +338,13 @@ void __not_in_flash_func(on_bt_data)(CHANNEL_TYPE channel, uint8_t *data, uint16
     // which alsa-ucm-conf uses to switch between mono Internal Speaker and
     // stereo Headphones profiles. We pass the DS5's real values through
     // unchanged — the DS5 hardware jack sensor is authoritative.
-    if (get_config().polling_rate_mode != 2) {
-      memcpy(interrupt_in_data, data + BT_INPUT_REPORT_OFFSET, HID_INPUT_REPORT_LEN);
+    // (realtime_hid_queue_push also refreshes interrupt_in_data[slot], so
+    // both polling paths keep the latest-report row current.)
+    realtime_hid_queue_push(slot, data + BT_INPUT_REPORT_OFFSET);
 #if ENABLE_BATT_LED
+    if (slot == BT_USB_SLOT) {
       battery_led_note_report();
-#endif
-      return;
     }
-
-    realtime_hid_queue_push(data + BT_INPUT_REPORT_OFFSET);
-#if ENABLE_BATT_LED
-    battery_led_note_report();
 #endif
   }
 }
@@ -303,9 +356,11 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id,
                                hid_report_type_t report_type, uint8_t *buffer,
                                uint16_t reqlen) {
 #ifdef ENABLE_WAKE_HID
-  // Route instance 1 to the wake keyboard only while the kbd is actually in
-  // the ENUMERATED configuration (usb_wake_kbd_active(), latched at swap time
-  // -- not the config value, which may differ while a swap is pending).
+  // Route the keyboard instance to the wake keyboard only while the kbd is
+  // actually in the ENUMERATED configuration (usb_wake_kbd_active(), latched
+  // at swap time -- not the config value, which may differ while a swap is
+  // pending). With the kbd inactive its instance number belongs to a gamepad
+  // slot (see the slot<->instance map in usb_descriptors.cpp).
   if (usb_wake_kbd_active() && itf == usb_kbd_hid_instance()) {
     if (reqlen >= 8) {
       memset(buffer, 0, 8);
@@ -313,28 +368,59 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id,
     }
     return 0;
   }
-  // MINIMAL instance 0 is the inert dummy HID, NOT the gamepad. Don't route its
-  // GET_REPORT into the BT feature path (which would query a controller that
-  // isn't connected). Return 0 (STALL); the host never reads it.
-  if (!usb_descriptor_variant_is_full()) {
+#endif
+  (void)report_type;
+
+  // MINIMAL's instance 0 is the inert dummy HID, NOT a gamepad. Don't route
+  // its GET_REPORT into the BT feature path (which would query a controller
+  // that isn't connected). Return 0 (STALL); the host never reads it.
+  // usb_hid_instance_slot() also rejects instances beyond the active
+  // variant's exposure (and the kbd instance).
+  const int mapped = usb_hid_instance_slot(itf);
+  if (mapped < 0 || mapped >= (int) usb_active_gamepad_slots()) {
     return 0;
   }
-#endif
-  (void)itf;
-  (void)report_id;
-  (void)report_type;
-  (void)buffer;
-  (void)reqlen;
+  const uint8_t slot = (uint8_t) mapped;
+
+  BtStatus st;
+  bt_get_status(slot, &st);
+  if (!st.connected) {
+    // Empty slot: serve a plausible blob so hid-playstation's bind-time
+    // probes (calibration 0x05, firmware 0x20, pairing 0x09) don't stall the
+    // interface — a stalled probe fails the driver bind and the slot stays
+    // dead until re-enumeration. Prefer a live pad's cache, else the RAM
+    // snapshot from the last pad that completed its feature exchange (covers
+    // the all-pads-off-during-host-sleep resume window). Caveat: a pad that
+    // connects AFTER enumeration inherits the placeholder IMU calibration
+    // until the next re-enumeration.
+    std::vector<uint8_t> ph;
+    if (!bt_feature_cached_any(report_id, ph)) {
+      bt_feature_snapshot_get(report_id, ph);
+    }
+    if (ph.size() <= 1) {
+      return 0;
+    }
+    uint16_t n = (uint16_t)(ph.size() - 1);
+    if (n > reqlen) n = reqlen;
+    memcpy(buffer, ph.data() + 1, n);
+    if (report_id == 0x09 && n >= 6) {
+      // Pairing info carries the controller MAC, which hosts use as the
+      // device's unique id — make each empty slot's MAC distinct.
+      buffer[0] ^= (uint8_t)(slot + 1);
+    }
+    return n;
+  }
 
   // DSE profiles: while the unlock + prefetch is still in progress, return 0
   // (NAK) for profile reads so the PS app retries rather than caching an
-  // empty snapshot. Still kick off the background BT fetch.
-  if (dse_is_profile_report(report_id) && !dse_profiles_ready()) {
-    get_feature_data(report_id, reqlen);
+  // empty snapshot. Still kick off the background BT fetch. (The DSE profile
+  // machinery serves the USB-identity slot only.)
+  if (slot == BT_USB_SLOT && dse_is_profile_report(report_id) && !dse_profiles_ready()) {
+    get_feature_data(slot, report_id, reqlen);
     return 0;
   }
 
-  std::vector<uint8_t> feature_data = get_feature_data(report_id, reqlen);
+  std::vector<uint8_t> feature_data = get_feature_data(slot, report_id, reqlen);
   if (feature_data.empty()) {
     return 0;
   }
@@ -377,19 +463,19 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id,
     // Drop keyboard SET_REPORT (host LED state).
     return;
   }
-  // MINIMAL instance 0 is the inert dummy HID; ignore any report to it.
-  if (!usb_descriptor_variant_is_full()) {
+#endif
+  (void)report_type;
+
+  // MINIMAL's instance 0 is the inert dummy HID; ignore any report to it, and
+  // reject instances beyond the active variant's exposure.
+  const int mapped = usb_hid_instance_slot(itf);
+  if (mapped < 0 || mapped >= (int) usb_active_gamepad_slots()) {
     return;
   }
-#endif
-  (void)itf;
-  (void)report_id;
-  (void)report_type;
-  (void)buffer;
-  (void)bufsize;
+  const uint8_t slot = (uint8_t) mapped;
 
   // A zero-length interrupt-OUT transfer (host quirk / fuzzing) would read
-  // buffer[0] OOB below, and state_update(buffer + 1, bufsize - 1) would
+  // buffer[0] OOB below, and state_update(slot, buffer + 1, bufsize - 1) would
   // underflow bufsize to 65535 (which is > 47, so state_update's own length
   // check would NOT reject it). Guard both here.
   if (bufsize == 0) return;
@@ -398,24 +484,24 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id,
   if (report_id == 0) {
     switch (buffer[0]) {
     case 0x02: {
-      state_update(buffer + 1, bufsize - 1);
-      // When the headset/speaker is active, output reports normally piggyback
-      // on the audio frame path, so we defer (break) here to avoid double-send.
-      // But a rumble-bearing SetStateData (UseRumbleNotHaptics flags set) must
-      // go out NOW, or rumble lags/drops a frame while audio is streaming.
+      state_update(slot, buffer + 1, bufsize - 1);
+      // When the headset/speaker is active, output reports for the audio slot
+      // normally piggyback on the audio frame path, so we defer (break) here
+      // to avoid double-send. But a rumble-bearing SetStateData
+      // (UseRumbleNotHaptics flags set) must go out NOW, or rumble lags/drops
+      // a frame while audio is streaming. Non-audio slots have no frame to
+      // piggyback on and always send immediately.
       // (Ported from upstream awalol/DS5Dongle 07ecbb3, issue #182.)
       bool send_now = ((buffer[1] >> 1) & 1) ||  // UseRumbleNotHaptics
                       ((buffer[39] >> 3) & 1);   // UseRumbleNotHaptics2
-      if (!send_now && spk_active) {
+      // Piggybacking only works while audio frames are actually flowing:
+      // spk_active is host-side stream state, tier_audio_allowed() is our
+      // emission gate (false at 2+ pads, including the pre-swap window where
+      // the host still streams at a FULL face we've already muted).
+      if (!send_now && slot == tier_audio_slot() && spk_active && tier_audio_allowed()) {
         break;
       }
-      uint8_t outputData[78]{};
-      outputData[0] = 0x31;
-      outputData[1] = reportSeqCounter << 4;
-      reportSeqCounter = (reportSeqCounter + 1) & 0x0F;
-      outputData[2] = 0x10;
-      state_get(outputData + 3, sizeof(SetStateData));
-      bt_write(outputData, sizeof(outputData));
+      state_push_slot_to_bt(slot);
       break;
     }
     }
@@ -423,7 +509,7 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id,
   if (report_id == 0x80 ||
       // DSE: Write Profile Block
       report_id == 0x60 || report_id == 0x62 || report_id == 0x61) {
-    set_feature_data(report_id, const_cast<uint8_t *>(buffer), bufsize);
+    set_feature_data(slot, report_id, const_cast<uint8_t *>(buffer), bufsize);
     return;
   }
 }
@@ -443,6 +529,9 @@ int main() {
 #endif
 
   board_init();
+  // Prepare the /api/log stdio mirror (registered disabled; attached below
+  // once config_load() tells us whether the persisted toggle is on).
+  weblog_init();
   tusb_rhport_init_t dev_init = {.role = TUSB_ROLE_DEVICE,
                                  .speed = TUSB_SPEED_FULL};
   tusb_init(BOARD_TUD_RHPORT, &dev_init);
@@ -489,6 +578,12 @@ int main() {
   // the saved values must be in place first.
   config_load();
 
+  // Attach the /api/log stdio mirror per the persisted toggle. Prints between
+  // board_init() and here are not captured when enabling -- acceptable: the
+  // toggle persists across reboots, so a boot AFTER enabling captures
+  // everything from this point (config, WiFi join, BT bring-up, [MEM]).
+  weblog_set_enabled(get_config().weblog_enabled != 0);
+
   // Seed the USB descriptor target with the persisted wake-keyboard toggle
   // BEFORE the first tud_connect() below, so the initial enumeration already
   // carries (or omits) the keyboard -- no cosmetic re-plug right after boot.
@@ -527,8 +622,22 @@ int main() {
     printf("Clean boot\n");
   }
 
+  {
+    extern char __StackLimit[], __bss_end__[];
+    printf("[MEM] heap region %d bytes (bss_end %p..stacklimit %p), malloc used %d\n",
+           (int) (__StackLimit - __bss_end__), (void *) __bss_end__,
+           (void *) __StackLimit, mallinfo().uordblks);
+  }
+
   // Initialize the critical section for the report buffer
   critical_section_init(&report_cs);
+
+  // Seed every slot's input buffer with the neutral idle report so the host
+  // sees centered sticks (not zeros) before the first BT report arrives.
+  for (int slot = 0; slot < BT_MAX_SLOTS; slot++) {
+    memcpy(interrupt_in_data[slot], idle_input_report, sizeof(idle_input_report));
+  }
+
   wake_init();
 
   // WiFi onboarding (AP + captive portal) is a dedicated setup mode: no

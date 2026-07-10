@@ -80,6 +80,7 @@ section.tab>h2:first-child{margin-top:.3rem}
     <span class="bar"><span class="fill" id="st_fill"></span></span>
     <span id="st_pct"></span>
   </span>
+  <div id="st_slots" style="display:none;margin-top:.35rem;font-size:.9rem;color:#aaa"></div>
 </div>
 
 <div class="field">
@@ -124,6 +125,20 @@ section.tab>h2:first-child{margin-top:.3rem}
   <label for="disable_pico_led">Disable the onboard Pico LED</label>
 </div>
 
+<div class="field chk" id="multi_field" style="display:none">
+  <input type="checkbox" id="multi_allowed">
+  <label for="multi_allowed">Allow multiple controllers simultaneously (up to <span id="multi_max">4</span>)</label>
+</div>
+<div class="hint" id="multi_hint" style="display:none">Off by default: the
+  adapter connects one controller at a time, exactly as before. When enabled,
+  two or more controllers can play together &mdash; the adapter then presents
+  one plain gamepad per controller and no audio: it briefly re-plugs itself
+  each time a <b>new</b> player joins, but never when someone leaves.
+  Controller audio / HD haptics are single-controller features (classic
+  rumble works for everyone); to get them back after a multi session, power
+  <b>all</b> controllers off, then reconnect one. Turning this back off keeps
+  an already-connected group playing; it applies to new connections.</div>
+
 <div>
   <button id="save">Save</button>
   <button id="factoryreset" class="fg">Factory reset</button>
@@ -166,6 +181,24 @@ section.tab>h2:first-child{margin-top:.3rem}
   <button id="net_save">Save</button>
   <span id="nstatus"></span>
 </div>
+<div class="field" id="diag_field">
+  <label class="lbl">Diagnostics</label>
+  <div class="field chk" style="margin:.2rem 0">
+    <input type="checkbox" id="weblog_enabled">
+    <label for="weblog_enabled">Capture firmware log (readable at
+      <a href="/api/log" target="_blank" rel="noopener">/api/log</a>)</label>
+  </div>
+  <div class="hint">Off by default. When on, the adapter mirrors its diagnostic
+    output into a small memory buffer you can open in a browser tab and
+    copy-paste into a bug report. Survives reboots (enable it, reproduce the
+    problem — including unplugging/replugging — then open the log). Kept in
+    RAM only; it never writes to flash and is lost on power-off.</div>
+  <div class="btns">
+    <button id="diag_save">Save</button>
+    <span id="dstatus"></span>
+  </div>
+</div>
+
 <div class="field" id="wifi_reset_field" style="display:none">
   <button id="wifi_reset" type="button" class="fg">Reset saved WiFi</button>
   <span id="wrstatus"></span>
@@ -247,7 +280,8 @@ function bindRange(id,out){const el=$(id);const fn=()=>$(out).textContent=el.val
 const upd=[bindRange('audio_buffer_length','ab_val'),bindRange('inactive_time','it_val')];
 
 function markDirty(){$('save').disabled=false;setStatus('unsaved changes','dirty')}
-['controller_mode','polling_rate_mode','disable_inactive_disconnect','disable_pico_led']
+['controller_mode','polling_rate_mode','disable_inactive_disconnect','disable_pico_led',
+ 'multi_allowed']
   .forEach(id=>$(id).onchange=markDirty);
 
 async function load(){
@@ -285,6 +319,18 @@ async function load(){
       $('wake_section').style.display='';
       $('wake_kbd_enabled').checked=!!c.wake_kbd_enabled;
     }
+    // Multi-controller toggle: only shown when the firmware was built with
+    // more than one slot.
+    window.multiOn=false;
+    if(c.multi_capable){
+      $('multi_field').style.display='';
+      $('multi_hint').style.display='';
+      $('multi_allowed').checked=!!c.multi_allowed;
+      $('multi_max').textContent=c.multi_slots;
+      window.multiOn=!!c.multi_allowed;
+    }
+    // Diagnostic log toggle (any firmware serving this page supports it).
+    $('weblog_enabled').checked=!!c.weblog_enabled;
     // Hide a tab's nav button when the whole tab is empty on this firmware.
     if(!c.wol_capable){$('tabbtn_net').style.display='none';}
     if(!c.wol_capable&&!c.wake_kbd_capable){$('tabbtn_wake').style.display='none';}
@@ -297,14 +343,20 @@ async function load(){
 }
 
 async function save(){
-  const body=[
+  const fields=[
     'controller_mode='+$('controller_mode').value,
     'polling_rate_mode='+$('polling_rate_mode').value,
     'audio_buffer_length='+$('audio_buffer_length').value,
     'inactive_time='+$('inactive_time').value,
     'disable_inactive_disconnect='+($('disable_inactive_disconnect').checked?1:0),
     'disable_pico_led='+($('disable_pico_led').checked?1:0)
-  ].join('&');
+  ];
+  // Only firmware that showed the toggle should receive it.
+  if($('multi_field').style.display!=='none'){
+    fields.push('multi_allowed='+($('multi_allowed').checked?1:0));
+    window.multiOn=$('multi_allowed').checked;
+  }
+  const body=fields.join('&');
   setStatus('saving…','dirty');
   try{
     const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});
@@ -337,8 +389,11 @@ async function loadBonds(){
     const box=$('bonds');box.innerHTML='';
     const bonds=d.bonds||[];
     $('bonds_empty').style.display=bonds.length?'none':'block';
+    // connected_all lists every live pad (multi-slot); fall back to the
+    // legacy single-connected field against older firmware.
+    const conn=d.connected_all||(d.connected?[d.connected]:[]);
     bonds.forEach(b=>{
-      const connected=d.connected&&d.connected===b.addr;
+      const connected=conn.includes(b.addr);
       const row=document.createElement('div');row.className='bond';
       const nm=document.createElement('input');
       nm.className='nm';nm.maxLength=15;nm.value=b.name;
@@ -374,7 +429,12 @@ function forgetBond(addr,label){
   postBonds('action=forget&addr='+addr,'forgetting…');
 }
 $('pair').onclick=()=>{
-  if(!confirm('Pair a new controller?\nThe controller you are using now will disconnect (it stays remembered and reconnects later). Then put the new controller in pairing mode (hold Share + PS until the light bar flashes).'))return;
+  // Multi mode keeps connected controllers playing while pairing; single mode
+  // (or the toggle off) swaps the active controller out first.
+  const msg=window.multiOn
+    ?'Pair a new controller?\nConnected controllers keep playing. Put the new controller in pairing mode (hold Share + PS until the light bar flashes).'
+    :'Pair a new controller?\nThe controller you are using now will disconnect (it stays remembered and reconnects later). Then put the new controller in pairing mode (hold Share + PS until the light bar flashes).';
+  if(!confirm(msg))return;
   postBonds('action=pair','opening pairing…');
 };
 $('forgetall').onclick=()=>{
@@ -406,6 +466,18 @@ $('net_save').onclick=async()=>{
     if(r.ok)nstatus('Saved ✓ (reboot adapter to apply)','ok');
     else nstatus('save failed','err');
   }catch(e){nstatus('save failed','err')}
+};
+
+// ----- Diagnostics (firmware log toggle) -----
+function dstatus(msg,cls){const s=$('dstatus');s.className=cls||'';s.textContent=msg}
+$('weblog_enabled').onchange=()=>dstatus('unsaved change','dirty');
+$('diag_save').onclick=async()=>{
+  dstatus('saving…','dirty');
+  try{
+    const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'weblog_enabled='+($('weblog_enabled').checked?1:0)});
+    if(r.ok)dstatus('Saved ✓','ok');
+    else dstatus('save failed — not written to flash, try again','err');
+  }catch(e){dstatus('save failed','err')}
 };
 
 function wrstatus(msg,cls){const s=$('wrstatus');s.className=cls||'';s.textContent=msg}
@@ -479,7 +551,20 @@ async function loadStatus(){
     const s=await (await fetch('/api/status')).json();
     const card=$('statuscard');
     card.className=s.connected?'on':'';
-    if(s.connected){
+    const slots=(s.slots||[]).map((p,i)=>({...p,n:i+1})).filter(p=>p.connected);
+    if(slots.length>1){
+      // Multi-pad: the ONE status card carries everything -- headline with the
+      // count, then a per-player line each (battery inline; the single-pad
+      // battery bar is hidden, it can't speak for two pads).
+      $('st_conn').innerHTML='<b>'+slots.length+' controllers</b> connected';
+      $('st_batt').style.display='none';
+      $('st_slots').style.display='';
+      $('st_slots').innerHTML=slots.map(p=>
+        'P'+p.n+' · '+(p.model==='DSE'?'DualSense Edge':'DualSense')
+        +(p.battery_valid?(' · '+p.battery_pct+'%'+(p.charging?' ⚡':'')):'')
+      ).join('<br>');
+    }else if(s.connected){
+      $('st_slots').style.display='none';
       $('st_conn').innerHTML='<b>'+(s.model==='DSE'?'DualSense Edge':'DualSense')+'</b> connected';
       if(s.battery_valid){
         $('st_batt').style.display='';
@@ -488,6 +573,7 @@ async function loadStatus(){
         $('st_batt').className='s batt'+((s.battery_pct<=20&&!s.charging)?' low':'');
       }else{$('st_batt').style.display='none'}
     }else{
+      $('st_slots').style.display='none';
       $('st_conn').textContent='No controller connected';
       $('st_batt').style.display='none';
     }

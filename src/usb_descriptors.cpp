@@ -26,6 +26,7 @@
 #include "bsp/board_api.h"
 #include "tusb.h"
 #include "config.h"
+#include "slots.h"
 
 bool ds_mode() {
     if (get_config().controller_mode == 2) {
@@ -50,6 +51,9 @@ enum {
     DS5_KBD_ITF_DESC_LEN = 25,
     // Dummy HID interface (MINIMAL placeholder), same 25-byte shape.
     DS5_DUMMY_ITF_DESC_LEN = 25,
+    // Tail gamepad interface (MULTI variant, slots 1..N-1): 9 (interface) +
+    // 9 (HID class) + 7 (EP IN) + 7 (EP OUT).
+    DS5_GAMEPAD_TAIL_LEN = 32,
 };
 
 // String Descriptor Index
@@ -80,6 +84,26 @@ enum {
     0x09, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22, 0x2D, 0x00, \
     0x07, 0x05, 0x87, 0x03, 0x08, 0x00, 0x0A
 #endif // ENABLE_WAKE_HID
+
+#if defined(ENABLE_WAKE_HID) && MULTI_SLOT_COUNT > 1
+// DualSense gamepad HID interface block for the MULTI variant's tail slots
+// (1..N-1), parameterised by interface number and endpoint pair. 32 bytes
+// (DS5_GAMEPAD_TAIL_LEN): 9 (interface) + 9 (HID class) + 7 (EP IN) +
+// 7 (EP OUT) -- same shape and field order as the canonical gamepad block at
+// the end of DS5_FULL_ITFS, which stays hand-written/frozen. wDescriptorLength
+// defaults to the DS value (0x0111); it and the EP bIntervals are patched at
+// descriptor-fetch time in tud_descriptor_configuration_cb(), whose patch
+// loop walks tail blocks by this fixed size -- keep the layout in sync.
+#define DS5_GAMEPAD_ITF_DESC(itf, ep_in, ep_out) \
+    /* Interface: HID gamepad, 2 endpoints */ \
+    0x09, 0x04, (itf), 0x00, 0x02, 0x03, 0x00, 0x00, 0x00, \
+    /* HID descriptor: bcdHID 1.11, report descriptor length 0x0111 (DS) */ \
+    0x09, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22, 0x11, 0x01, \
+    /* Endpoint IN: interrupt, 64 bytes, bInterval 1 */ \
+    0x07, 0x05, (ep_in), 0x03, 0x40, 0x00, 0x01, \
+    /* Endpoint OUT: interrupt, 64 bytes, bInterval 1 */ \
+    0x07, 0x05, (ep_out), 0x03, 0x40, 0x00, 0x01
+#endif // ENABLE_WAKE_HID && MULTI_SLOT_COUNT > 1
 
 #ifdef ENABLE_WAKE_HID
 // Inert dummy HID interface used in MINIMAL where the gamepad sits in FULL.
@@ -127,6 +151,7 @@ tusb_desc_device_t desc_device =
 // Defined further down with the variant orchestrator; forward-declared so the
 // device-descriptor callback (above that code) can read the active variant.
 bool usb_descriptor_variant_is_full(void);
+static uint16_t usb_active_bcd_device(void);
 #endif
 
 // Invoked when received GET DEVICE DESCRIPTOR
@@ -142,13 +167,14 @@ uint8_t const *tud_descriptor_device_cb(void) {
     // VID/PID/bcdDevice it slept with, the host keeps its stale MINIMAL view,
     // never re-reads (HW-confirmed: cfgreads never advanced across the wake),
     // and chokes on the topology change -> mount retry-loop + dead pad.
-    //   Fix: give the two variants DIFFERENT bcdDevice values. Now the on-wake
-    // MINIMAL->FULL bounce looks to Windows like a device with a release number
-    // it has NOT cached, so it re-queries the full descriptor set and
-    // enumerates FULL cleanly (audio interfaces appear). FULL keeps the
-    // canonical 0x0100 (the value Windows binds its DualSense driver against);
-    // only the inert MINIMAL placeholder carries the distinct 0x0101.
-    desc_device.bcdDevice = usb_descriptor_variant_is_full() ? 0x0100 : 0x0101;
+    //   Fix: give every variant a DIFFERENT bcdDevice value. Now any on-wake
+    // bounce between variants looks to Windows like a device with a release
+    // number it has NOT cached, so it re-queries the full descriptor set and
+    // enumerates cleanly (audio interfaces appear). FULL keeps the canonical
+    // 0x0100 (the value Windows binds its DualSense driver against); the inert
+    // MINIMAL placeholder carries 0x0101 and the multi-controller MULTI
+    // variant 0x0102.
+    desc_device.bcdDevice = usb_active_bcd_device();
 #endif
     return reinterpret_cast<uint8_t const *>(&desc_device);
 }
@@ -513,6 +539,57 @@ uint8_t descriptor_configuration_minimal_kbd[] = {
 static_assert(sizeof(descriptor_configuration_minimal_kbd) == CONFIG_DESC_LEN_MINIMAL_KBD,
               "descriptor_configuration_minimal_kbd size mismatch");
 
+#if MULTI_SLOT_COUNT > 1
+// MULTI config descriptors: one gamepad HID interface per slot, NO audio
+// function. Entered while 2+ controllers are connected; see
+// bt_apply_usb_variant_policy() in bt.cpp. Audio is deliberately ABSENT: the
+// BT airtime can't carry even one pad's audio/HD-haptics stream alongside a
+// second pad (see tier.h), and a silent-but-enumerated audio device confused
+// hosts/users -- so at 2+ pads the host sees pure gamepads, and returning to
+// one pad bounces back to FULL (audio reappears; one deliberate re-plug).
+// Every gamepad block is macro-emitted (32 bytes, DS5_GAMEPAD_ITF_DESC) --
+// slot 0 keeps its FULL endpoints 0x84/0x03; tails use 0x88/0x08, 0x89/0x09,
+// 0x8A/0x0A. Interface numbers stay ascending (Windows rejects out-of-order
+// interfaces); with the keyboard enabled it sits at interface 1 so it stays
+// HID instance 1 (parse order: slot0, kbd, slot1..3 -- the same slot<->
+// instance map as FULL+kbd).
+#define CONFIG_DESC_LEN_MULTI (9 + MULTI_SLOT_COUNT * DS5_GAMEPAD_TAIL_LEN)
+uint8_t descriptor_configuration_multi[] = {
+    DS5_CFG_HDR_DESC(CONFIG_DESC_LEN_MULTI, MULTI_SLOT_COUNT),
+    DS5_GAMEPAD_ITF_DESC(0, 0x84, 0x03), // slot 0
+#if MULTI_SLOT_COUNT >= 2
+    DS5_GAMEPAD_ITF_DESC(1, 0x88, 0x08), // slot 1
+#endif
+#if MULTI_SLOT_COUNT >= 3
+    DS5_GAMEPAD_ITF_DESC(2, 0x89, 0x09), // slot 2
+#endif
+#if MULTI_SLOT_COUNT >= 4
+    DS5_GAMEPAD_ITF_DESC(3, 0x8A, 0x0A), // slot 3
+#endif
+};
+static_assert(sizeof(descriptor_configuration_multi) == CONFIG_DESC_LEN_MULTI,
+              "descriptor_configuration_multi size mismatch");
+
+#define CONFIG_DESC_LEN_MULTI_KBD \
+    (CONFIG_DESC_LEN_MULTI + DS5_KBD_ITF_DESC_LEN)
+uint8_t descriptor_configuration_multi_kbd[] = {
+    DS5_CFG_HDR_DESC(CONFIG_DESC_LEN_MULTI_KBD, MULTI_SLOT_COUNT + 1),
+    DS5_GAMEPAD_ITF_DESC(0, 0x84, 0x03), // slot 0 (HID instance 0)
+    DS5_KBD_ITF_DESC(1),                 // keyboard (HID instance 1)
+#if MULTI_SLOT_COUNT >= 2
+    DS5_GAMEPAD_ITF_DESC(2, 0x88, 0x08), // slot 1 (HID instance 2)
+#endif
+#if MULTI_SLOT_COUNT >= 3
+    DS5_GAMEPAD_ITF_DESC(3, 0x89, 0x09), // slot 2 (HID instance 3)
+#endif
+#if MULTI_SLOT_COUNT >= 4
+    DS5_GAMEPAD_ITF_DESC(4, 0x8A, 0x0A), // slot 3 (HID instance 4)
+#endif
+};
+static_assert(sizeof(descriptor_configuration_multi_kbd) == CONFIG_DESC_LEN_MULTI_KBD,
+              "descriptor_configuration_multi_kbd size mismatch");
+#endif // MULTI_SLOT_COUNT > 1
+
 // Runtime selector: which descriptor to present on the next GET_CONFIGURATION.
 // ONE atomic target -- the variant (controller connected or not) AND whether
 // the boot keyboard rides along (web-UI wake toggle) -- so any difference
@@ -521,31 +598,99 @@ static_assert(sizeof(descriptor_configuration_minimal_kbd) == CONFIG_DESC_LEN_MI
 // but not the other. `active` is latched by the orchestrator at swap time and
 // is the ONLY thing the descriptor callbacks read; live config is never
 // consulted mid-enumeration.
+// Order matters: the suspend-nudge in usb_variant_task() treats a HIGHER
+// desired variant as an UP-swap ("more device just appeared") that may resume
+// the bus; DOWN-swaps never nudge (they can legitimately pend across S3).
 typedef enum {
     DESC_VARIANT_MINIMAL = 0, // no controller: dummy HID (+ kbd if enabled)
-    DESC_VARIANT_FULL,        // controller connected: audio + gamepad (+ kbd)
+    DESC_VARIANT_FULL,        // one controller: audio + gamepad (+ kbd)
+    DESC_VARIANT_MULTI,       // 2+ controllers: N gamepads, NO audio (+ kbd)
 } desc_variant_t;
 typedef struct {
     desc_variant_t variant;
     bool kbd;
+    // MULTI only: how many gamepad interfaces to expose (2..MULTI_SLOT_COUNT,
+    // the session's high-water controller count -- see the policy in bt.cpp).
+    // 0 for the other variants so the plain field compare in
+    // desc_target_differs() can't see a stale count.
+    uint8_t multi_slots;
 } usb_desc_target;
-// Field-wise volatile access is enough: both fields are only written from
+// Field-wise volatile access is enough: all fields are only written from
 // main-loop context (BT event handlers, httpd POST handlers, usb_variant_task).
-static volatile usb_desc_target active_target  = {DESC_VARIANT_MINIMAL, false};
-static volatile usb_desc_target desired_target = {DESC_VARIANT_MINIMAL, false};
+static volatile usb_desc_target active_target  = {DESC_VARIANT_MINIMAL, false, 0};
+static volatile usb_desc_target desired_target = {DESC_VARIANT_MINIMAL, false, 0};
 
 bool usb_descriptor_variant_is_full(void) {
     return active_target.variant == DESC_VARIANT_FULL;
 }
-// The boot keyboard is HID instance 1 in BOTH variants: in FULL the gamepad is
-// instance 0 (its interface is parsed first), and MINIMAL keeps a dummy HID at
-// instance 0 so the kbd stays instance 1. Stable across variant swaps -- this
-// is what makes the "rogue keyboard on wake" structurally impossible.
+// Windows caches descriptors keyed on {VID, PID, bcdDevice}; every variant
+// gets a distinct value so no swap can be answered from a stale cache (see
+// tud_descriptor_device_cb).
+static uint16_t usb_active_bcd_device(void) {
+    switch (active_target.variant) {
+        case DESC_VARIANT_MINIMAL: return 0x0101;
+        // Each exposure count is its own cacheable identity (0x0102 for two
+        // pads .. 0x0104 for four): a grow bounce (say MULTI-2 -> MULTI-3)
+        // changes the topology just like MINIMAL->FULL does, so it needs the
+        // same cache-buster.
+        case DESC_VARIANT_MULTI:   return (uint16_t)(0x0100 + active_target.multi_slots);
+        case DESC_VARIANT_FULL:
+        default:                   return 0x0100;
+    }
+}
+// The boot keyboard is HID instance 1 in EVERY variant: in FULL/MULTI the
+// slot-0 gamepad is instance 0 (its interface is parsed first), and MINIMAL
+// keeps a dummy HID at instance 0 so the kbd stays instance 1. Stable across
+// variant swaps -- this is what makes the "rogue keyboard on wake"
+// structurally impossible.
 uint8_t usb_kbd_hid_instance(void) { return 1; }
 // True while the ENUMERATED configuration carries the boot keyboard. This is
 // the gate for all kbd runtime behavior (F15 FSM, HID callback routing) -- NOT
 // the config value, which may already differ while a swap is still pending.
 bool usb_wake_kbd_active(void) { return active_target.kbd; }
+
+// How many gamepad interfaces the HOST currently sees (per the LATCHED active
+// variant): MULTI exposes the latched high-water count, FULL exactly one,
+// MINIMAL none.
+uint8_t usb_active_gamepad_slots(void) {
+    switch (active_target.variant) {
+#if MULTI_SLOT_COUNT > 1
+        case DESC_VARIANT_MULTI:   return active_target.multi_slots;
+#endif
+        case DESC_VARIANT_FULL:    return 1;
+        case DESC_VARIANT_MINIMAL:
+        default:                   return 0;
+    }
+}
+
+// Slot <-> HID-instance map. TinyUSB numbers HID instances by descriptor
+// parse order, counting only HID interfaces. The keyboard, WHEN ACTIVE, is
+// pinned at instance 1 (see usb_kbd_hid_instance); tail gamepads therefore
+// shift by one depending on the RUNTIME kbd state -- unlike a compile-time
+// map, this must read the latched active_target:
+//   kbd on : slot0=inst0, kbd=inst1, slot1..3 = inst2..4
+//   kbd off: slot0=inst0,            slot1..3 = inst1..3
+uint8_t usb_slot_hid_instance(uint8_t slot) {
+    if (slot == 0) return 0;
+    return active_target.kbd ? (uint8_t)(slot + 1) : slot;
+}
+// Inverse map: -1 for the keyboard's instance (when active) and for
+// out-of-range instances. Callers must additionally bound the result against
+// usb_active_gamepad_slots() (an instance can exist in CFG_TUD_HID without
+// being enumerated by the active variant).
+int usb_hid_instance_slot(uint8_t instance) {
+    if (instance == 0) {
+        // Instance 0 is the slot-0 gamepad in FULL/MULTI but the inert dummy
+        // in MINIMAL; the exposure bound (usb_active_gamepad_slots()==0)
+        // handles the MINIMAL case at the caller.
+        return 0;
+    }
+    if (active_target.kbd) {
+        if (instance == 1) return -1; // the keyboard
+        return (int) instance - 1;
+    }
+    return (int) instance;
+}
 
 //--------------------------------------------------------------------+
 // Variant swap orchestrator
@@ -604,8 +749,22 @@ static constexpr uint64_t SWAP_CONNECT_SETTLE_US    = 1500000; // 1500 ms
 static constexpr uint32_t SWAP_HOST_SETTLE_MS = 1000;
 static volatile uint32_t last_bus_up_ms = 0;
 
-void usb_request_variant_full(void)    { desired_target.variant = DESC_VARIANT_FULL; }
-void usb_request_variant_minimal(void) { desired_target.variant = DESC_VARIANT_MINIMAL; }
+void usb_request_variant_full(void) {
+    desired_target.variant = DESC_VARIANT_FULL;
+    desired_target.multi_slots = 0;
+}
+void usb_request_variant_minimal(void) {
+    desired_target.variant = DESC_VARIANT_MINIMAL;
+    desired_target.multi_slots = 0;
+}
+#if MULTI_SLOT_COUNT > 1
+void usb_request_variant_multi(uint8_t exposed_slots) {
+    if (exposed_slots < 2) exposed_slots = 2;
+    if (exposed_slots > MULTI_SLOT_COUNT) exposed_slots = MULTI_SLOT_COUNT;
+    desired_target.variant = DESC_VARIANT_MULTI;
+    desired_target.multi_slots = exposed_slots;
+}
+#endif
 // Web-UI wake-keyboard toggle: ask for the kbd to (dis)appear. Applied live by
 // usb_variant_task() through the same bounce a variant change uses; a no-op if
 // the enumerated state already matches.
@@ -630,7 +789,8 @@ bool usb_variant_swap_in_progress(void) { return swap_state != SWAP_IDLE; }
 
 static bool desc_target_differs(void) {
     return desired_target.variant != active_target.variant ||
-           desired_target.kbd != active_target.kbd;
+           desired_target.kbd != active_target.kbd ||
+           desired_target.multi_slots != active_target.multi_slots;
 }
 
 // Cold-boot autosuspend recovery (issue #4). While the gate below holds a
@@ -650,12 +810,16 @@ static uint64_t swap_gate_last_resume_us = 0;
 
 void usb_variant_task(void) {
     if (host_suspended_flag) {
-        // Never re-enumerate during host suspend. But if an UP-swap to FULL is
-        // pending and the host has us suspended, keep nudging the bus back up so
-        // the gate can clear -- otherwise a host that suspends MINIMAL and never
-        // re-mounts strands the controller in MINIMAL forever (issue #4).
-        if (desired_target.variant == DESC_VARIANT_FULL &&
-            active_target.variant == DESC_VARIANT_MINIMAL) {
+        // Never re-enumerate during host suspend. But if an UP-swap (a pad
+        // just connected/joined: MINIMAL->FULL/MULTI, FULL->MULTI, or a MULTI
+        // exposure grow) is pending and the host has us suspended, keep
+        // nudging the bus back up so the gate can clear -- otherwise a host
+        // that suspends MINIMAL and never re-mounts strands the controller in
+        // MINIMAL forever (issue #4). DOWN-swaps never nudge: they can
+        // legitimately pend across a genuine S3 (pads powered off after the
+        // host slept) and a resume there would wake the sleeping host.
+        if (desired_target.variant > active_target.variant ||
+            desired_target.multi_slots > active_target.multi_slots) {
             const uint64_t now = time_us_64();
             if (now - swap_gate_last_resume_us >= SWAP_GATE_RESUME_RETRY_US) {
                 swap_gate_last_resume_us = now;
@@ -686,14 +850,26 @@ void usb_variant_task(void) {
             if (now - swap_state_entered < SWAP_DISCONNECT_SETTLE_US) return;
             // Latch the whole target atomically w.r.t. enumeration: the bus is
             // down, so the descriptor callbacks can't observe a half-updated
-            // target. The MINIMAL/FULL variants enumerate under DISTINCT
-            // bcdDevice values (see tud_descriptor_device_cb) so the host's
-            // descriptor cache -- keyed on VID/PID/bcdDevice -- can't survive
-            // this swap: on the next connect it must re-read, which is what
-            // makes the on-wake MINIMAL->FULL swap enumerate cleanly instead of
-            // reusing a stale cached MINIMAL.
-            active_target.variant = desired_target.variant;
-            active_target.kbd     = desired_target.kbd;
+            // target. The variants enumerate under DISTINCT bcdDevice values
+            // (see tud_descriptor_device_cb) so the host's descriptor cache --
+            // keyed on VID/PID/bcdDevice -- can't survive this swap: on the
+            // next connect it must re-read, which is what makes the on-wake
+            // MINIMAL->FULL swap enumerate cleanly instead of reusing a stale
+            // cached MINIMAL.
+            active_target.variant     = desired_target.variant;
+            active_target.kbd         = desired_target.kbd;
+            active_target.multi_slots = desired_target.multi_slots;
+            // Audio alt-setting state resets with the bus: variants without an
+            // audio function (MINIMAL/MULTI) never receive the SET_INTERFACE
+            // that would clear these, and a stale spk_active=true wedges the
+            // output-report piggyback path in main.cpp (reports deferred to an
+            // audio frame that never flows). The host re-opens the streams
+            // after enumerating an audio-bearing variant.
+            {
+                extern bool spk_active, mic_active; // defined in main.cpp
+                spk_active = false;
+                mic_active = false;
+            }
             tud_connect();
             swap_state = SWAP_CONNECTING;
             swap_state_entered = now;
@@ -718,8 +894,17 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
         return active_target.kbd ? descriptor_configuration_minimal_kbd
                                  : descriptor_configuration_minimal;
     }
-    uint8_t *desc_full = active_target.kbd ? descriptor_configuration_full_kbd
-                                           : descriptor_configuration;
+    uint8_t *desc_full;
+#if MULTI_SLOT_COUNT > 1
+    if (active_target.variant == DESC_VARIANT_MULTI) {
+        desc_full = active_target.kbd ? descriptor_configuration_multi_kbd
+                                      : descriptor_configuration_multi;
+    } else
+#endif
+    {
+        desc_full = active_target.kbd ? descriptor_configuration_full_kbd
+                                      : descriptor_configuration;
+    }
 #else
     uint8_t *desc_full = descriptor_configuration;
 #endif
@@ -735,17 +920,49 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
             bInterval = 0x01;
             break;
     }
-    // Patch offsets are relative to the canonical FULL run (header + 218
+    const uint8_t report_len_lo = ds_mode()
+        ? 0x11  // DS report desc low byte (0x0111 = 273)
+        : 0x85; // DSE report desc low byte (0x0185 = 389)
+    // Per 32-byte gamepad block, counting from its END:
+    //   end-1  = EP OUT bInterval, end-8 = EP IN bInterval,
+    //   end-16 = HID wDescriptorLength low byte.
+    // (The canonical FULL block and the DS5_GAMEPAD_ITF_DESC macro share this
+    // exact layout.)
+#if defined(ENABLE_WAKE_HID) && MULTI_SLOT_COUNT > 1
+    if (active_target.variant == DESC_VARIANT_MULTI) {
+        // MULTI: header(9) + uniform 32-byte gamepad blocks, with the 25-byte
+        // keyboard interface (when enumerated) inserted after slot 0's block.
+        // The static array carries every compiled slot; TRUNCATE the served
+        // portion to the latched high-water exposure (multi_slots) by
+        // patching the header's wTotalLength + bNumInterfaces -- TinyUSB
+        // serves exactly wTotalLength bytes, so trailing blocks simply don't
+        // exist for the host. Ghost pads that were never connected this
+        // session are thus never enumerated.
+        const uint8_t exposed = active_target.multi_slots;
+        const uint16_t kbd_len = active_target.kbd ? DS5_KBD_ITF_DESC_LEN : 0;
+        const uint16_t total = 9 + (uint16_t)(exposed * DS5_GAMEPAD_TAIL_LEN) + kbd_len;
+        desc_full[2] = (uint8_t)(total & 0xFF);        // wTotalLength lo
+        desc_full[3] = (uint8_t)(total >> 8);          // wTotalLength hi
+        desc_full[4] = (uint8_t)(exposed + (active_target.kbd ? 1 : 0)); // bNumInterfaces
+        for (int k = 0; k < exposed; k++) {
+            const uint16_t kbd_off =
+                (active_target.kbd && k >= 1) ? DS5_KBD_ITF_DESC_LEN : 0;
+            const uint16_t end = 9 + (uint16_t)((k + 1) * DS5_GAMEPAD_TAIL_LEN)
+                                 + kbd_off;
+            desc_full[end - 1] = bInterval;
+            desc_full[end - 8] = bInterval;
+            desc_full[end - 16] = report_len_lo;
+        }
+        return desc_full;
+    }
+#endif
+    // FULL: patch offsets are relative to the canonical run (header + 218
     // bytes); they land on the same bytes in both FULL arrays because the kbd
     // is appended strictly AFTER the gamepad interface.
     constexpr auto offset = CONFIG_DESC_LEN_BASE;
     desc_full[offset - 1] = bInterval;
     desc_full[offset - 8] = bInterval;
-    if (ds_mode()) {
-        desc_full[offset - 16] = 0x11; // DS report desc low byte (0x0111 = 273)
-    }else {
-        desc_full[offset - 16] = 0x85; // DSE report desc low byte (0x0185 = 389)
-    }
+    desc_full[offset - 16] = report_len_lo;
     return desc_full;
 }
 

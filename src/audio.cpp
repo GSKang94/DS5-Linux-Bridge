@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdio>
+#include <malloc.h> // mallinfo(): heap telemetry around the opus allocations
 #include "opus.h"
 #include "utils.h"
 #include "pico/multicore.h"
@@ -17,6 +18,7 @@
 #include "flash_safety.h"
 #include "config.h"
 #include "state_mgr.h"
+#include "tier.h"
 #include "usb.h"
 
 #define INPUT_CHANNELS    4
@@ -92,6 +94,14 @@ void audio_loop() {
 
     int16_t raw[192];
     uint32_t bytes_read = tud_audio_read(raw, sizeof(raw)); // 每次读入 384 bytes
+    // Tier gate: with 2+ pads connected the BT airtime can't carry audio.
+    // Keep draining the UAC FIFO so the host still sees a working audio
+    // device, but emit no BT audio frames (the controller falls back to
+    // classic rumble; rumble-bearing output reports take the immediate
+    // state_push path in tud_hid_set_report_cb).
+    if (!tier_audio_allowed()) {
+        return;
+    }
     int frames = bytes_read / (INPUT_CHANNELS * sizeof(int16_t));
     if (frames == 0) {
         return;
@@ -208,7 +218,8 @@ void audio_loop() {
         pkt[1] = reportSeqCounter << 4;
         reportSeqCounter = (reportSeqCounter + 1) & 0x0F;
         pkt[10] = packetCounter++;
-        state_get(pkt + 13, 63);
+        // Audio frames carry the designated audio slot's output state.
+        state_get(tier_audio_slot(), pkt + 13, 63);
         memcpy(pkt + 78, haptic_buf, SAMPLE_SIZE);
 #if !DISABLE_SPEAKER_PROC
         critical_section_enter_blocking(&opus_cs);
@@ -216,7 +227,7 @@ void audio_loop() {
         critical_section_exit(&opus_cs);
 #endif
 
-        bt_write(pkt, sizeof(pkt), /*kick=*/false);
+        bt_write(tier_audio_slot(), pkt, sizeof(pkt), /*kick=*/false);
     }
 }
 
@@ -290,6 +301,10 @@ void core1_entry() {
     // instead of letting it fault on XIP. Requires PICO_FLASH_ASSUME_CORE1_SAFE=0.
     flash_safe_execute_core_init();
     int error = 0;
+    // Heap telemetry: the opus encoder (~70 KB) + decoder (~26 KB) are the
+    // largest heap users on a tight heap; log usage so an OOM here is
+    // attributable from the boot log.
+    printf("[Audio] core1 up; heap used %d before opus\n", mallinfo().uordblks);
     encoder = opus_encoder_create(48000, 2,OPUS_APPLICATION_AUDIO, &error);
     if (error != 0) {
         printf("[Audio] OpusEncoder create failed\n");
@@ -303,6 +318,7 @@ void core1_entry() {
     if (error != 0) {
         printf("[Audio] OpusDecoder create failed\n");
     }
+    printf("[Audio] opus ready; heap used %d\n", mallinfo().uordblks);
 
     while (true) {
         bool worked = false;

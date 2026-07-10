@@ -18,12 +18,14 @@
 
 constexpr uint32_t CONFIG_MAGIC = 0x66ccff00;
 // Layout version. Only bump on a genuinely incompatible layout change (see the
-// append-only note in config.h); NOT a reset trigger. v10 added wol_target_mac2
-// (second WOL target); v9 added WiFi creds (onboarding); v8 hostname; v7 wol
-// static-IP (now reserved); v6 wol_target_mac; v5 webconfig_custom_ip; v4
-// bond_names. v6-v9 shipped only on the wifi-wol experiment branch. Append-only,
-// so an older v9 blob migrates cleanly (its tail zeroes -> wol_target_mac2 unset).
-constexpr uint16_t CONFIG_VERSION = 10;
+// append-only note in config.h); NOT a reset trigger. v11 added multi_enabled
+// (multi-controller opt-in, default off) and weblog_enabled; v10 added
+// wol_target_mac2 (second WOL target); v9 added WiFi creds (onboarding); v8
+// hostname; v7 wol static-IP (now reserved); v6 wol_target_mac; v5
+// webconfig_custom_ip; v4 bond_names. v6-v9 shipped only on the wifi-wol
+// experiment branch. Append-only, so an older v10 blob migrates cleanly (its
+// tail zeroes -> multi off, weblog off).
+constexpr uint16_t CONFIG_VERSION = 11;
 // Config lives just BELOW BTstack's link-key bank, NOT in the last flash sector.
 // The RP2350 BOOTSEL/picotool UF2 loader erases the top of flash (the last
 // sector) on download -- even though the UF2 image ends far below it -- so a
@@ -86,6 +88,8 @@ static_assert(offsetof(Config_body, wifi_ssid) == 131);
 static_assert(offsetof(Config_body, wifi_psk) == 164);
 static_assert(offsetof(Config_body, wake_kbd_enabled) == 228);
 static_assert(offsetof(Config_body, wol_target_mac2) == 229);
+static_assert(offsetof(Config_body, multi_enabled) == 235);
+static_assert(offsetof(Config_body, weblog_enabled) == 236);
 
 // CRC over the first `len` bytes of the body. `len` is the stored size, so an
 // older/shorter blob still validates against the bytes it actually wrote.
@@ -191,6 +195,11 @@ void config_valid() {
   // (W5500-era, unread by any current transport -- see config.h). Just keep the
   // flag boolean-sane in case a blob written by that firmware carried junk.
   if (body->wol_use_static_ip > 1) body->wol_use_static_ip = 0;
+  // Multi-controller opt-in: boolean; default 0 (single-controller -- a
+  // migrated pre-v11 blob zero-fills to off, so existing users are unchanged).
+  if (body->multi_enabled > 1) body->multi_enabled = 0;
+  // Diagnostic web log: boolean; default 0 (off).
+  if (body->weblog_enabled > 1) body->weblog_enabled = 0;
 }
 
 // Reset the in-RAM config to all defaults (does NOT touch flash). Most fields

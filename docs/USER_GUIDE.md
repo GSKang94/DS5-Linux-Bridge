@@ -8,6 +8,7 @@ source and debugging, see the [README](../README.md).
 - [First-time WiFi setup](#first-time-wifi-setup)
 - [Pairing a controller](#pairing-a-controller)
 - [Adding a second controller](#adding-a-second-controller)
+- [Using multiple controllers at once](#using-multiple-controllers-at-once)
 - [The configuration page](#the-configuration-page)
   - [Live status](#live-status)
   - [Paired controllers (bond management)](#paired-controllers-bond-management)
@@ -76,23 +77,64 @@ reconnects it automatically.
 
 ## Adding a second controller
 
-Because the adapter connects **one controller at a time**, and it stops scanning
-once a controller is remembered, adding a *second* controller is a deliberate
-action rather than something that happens automatically.
+The adapter stops scanning once a controller is remembered, so *pairing* an
+additional controller is a deliberate action rather than something that
+happens automatically. (Already-paired controllers just reconnect on their own
+with a PS press — see [Using multiple controllers](#using-multiple-controllers-at-once)
+for how they behave together.)
 
 On the [config page](#the-configuration-page), under **Paired controllers**,
-click **Pair new controller**. This:
+click **Pair new controller**. By default (single-controller mode) this:
 
-1. Disconnects the controller you're currently using — but **keeps its bond**, so
-   it still reconnects later.
+1. Disconnects the controller you're currently using — but **keeps its bond**,
+   so it still reconnects later.
 2. Opens a 30-second pairing window. Put the new controller into **Share + PS**
    pairing mode during that window.
 3. The new controller connects and is remembered as an additional bond. The
    previous controller is held off during the window so it can't grab the slot
    back before the new one finishes pairing.
 
+With **Allow multiple controllers simultaneously** enabled (Controller tab),
+nothing is disconnected: already-connected controllers **keep playing** while
+the window is open, one seat is reserved for the new controller, and it joins
+alongside them.
+
 > The config page is reachable whether or not a controller is connected, so you
 > can also reach it (and pair) when the adapter is idle.
+
+---
+
+## Using multiple controllers at once
+
+Up to **4 paired controllers** can be connected at the same time (local
+co-op). This is **off by default** — out of the box the adapter behaves like
+it always has, connecting one controller at a time. Enable **Allow multiple
+controllers simultaneously** on the config page's Controller tab to use it.
+
+Once enabled, each controller shows up on the PC as its own DualSense gamepad;
+the first controller powered on is player 1, the next player 2, and so on.
+Each pad's player LEDs show its number.
+
+What to expect:
+
+- **Joining:** each time a *new* player joins, the adapter briefly re-plugs
+  itself (a couple of seconds — existing players' input pauses while the PC
+  re-detects the adapter). A pad reconnecting into a seat it (or another pad)
+  already used this session does **not** re-plug.
+- **Leaving:** a player disconnecting never interrupts the others.
+- **Audio & HD haptics are single-controller features.** With two or more
+  controllers connected the adapter presents plain gamepads and **no audio
+  device** — there isn't enough Bluetooth airtime for even one controller's
+  audio stream next to a second controller's input, and HD (audio-based)
+  haptics ride that same stream. **Classic rumble and adaptive triggers keep
+  working on every controller.**
+- **Getting audio / HD haptics back:** the adapter stays in multi-controller
+  mode as long as *any* controller from the group is connected, so nobody's
+  game is interrupted when others leave. To return to the full
+  single-controller experience (audio, mic, HD haptics), power **all**
+  controllers off, then reconnect one.
+- Turning the toggle back **off** mid-session doesn't disconnect anyone; it
+  applies to new connections only (the next second controller is refused).
 
 ---
 

@@ -27,6 +27,13 @@ getting it right on Linux / SteamOS (Bazzite).
 - 🎮 **Full wireless controller emulation** — DualSense Bluetooth reports → standard
   USB HID gamepad at up to 1000 Hz. Supports DualSense (DS5) and DualSense Edge
   (DSE), including DSE PS-app profiles.
+- 👥 **Multiple controllers (local co-op, opt-in)** — up to 4 DualSense pads
+  connected at once, each as its own USB gamepad with per-player LEDs. Off by
+  default (a web-page toggle enables it; the default behavior is unchanged
+  single-controller). Audio and HD haptics are single-controller features (not
+  enough Bluetooth airtime beside a second pad); classic rumble and adaptive
+  triggers work for everyone. See the
+  [user guide](docs/USER_GUIDE.md#using-multiple-controllers-at-once).
 - 📳 **Wireless HD haptics** — recreates the cabled audio-based haptic feedback over
   Bluetooth, streaming the dedicated haptic waveforms to the controller's
   voice-coil actuators. Compatibility mirrors the wired experience.

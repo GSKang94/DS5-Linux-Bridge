@@ -522,24 +522,56 @@ static bool parse_sha256_hex(const char *s, uint8_t out[32]) {
         ota_finish(OTA_RESULT_NO_WIFI_CREDS);
     }
 
-    // --- STA join (mirrors wifi_net.cpp's join, minus its cred-wiping AP
-    // fallback: a transient join failure here must NEVER cost the user their
-    // provisioning -- we just report and reboot back).
+    // --- STA join (mirrors wifi_net.cpp's join SUPERVISION, minus its
+    // cred-wiping AP fallback: a transient join failure here must NEVER cost
+    // the user their provisioning -- we just report and reboot back).
+    //
+    // CRITICAL (HW-observed 2026-07-11): the CYW43 commonly fails the first
+    // join or two with transient FAIL/NONET, and a failed join PARKS the
+    // driver's join state machine -- it never self-recovers. The join must be
+    // RE-ISSUED on failure states (wifi_net.cpp retries every ~5 s for the
+    // same reason). The first cut of this loop issued connect_async once and
+    // passively waited 45 s: it timed out "WiFi join failed" on hardware that
+    // joined fine seconds later in normal mode.
     status_state = "wifi";
     cyw43_arch_enable_sta_mode();
     const uint32_t auth = (c.wifi_psk[0] == '\0') ? CYW43_AUTH_OPEN
                                                   : CYW43_AUTH_WPA2_MIXED_PSK;
-    if (cyw43_arch_wifi_connect_async(c.wifi_ssid, c.wifi_psk, auth) != 0) {
-        ota_finish(OTA_RESULT_WIFI_JOIN_FAILED);
-    }
+    printf("[OTA] joining SSID \"%s\"...\n", c.wifi_ssid);
     {
+        int rc = cyw43_arch_wifi_connect_async(
+            c.wifi_ssid, c.wifi_psk[0] ? c.wifi_psk : NULL, auth);
+        if (rc) printf("[OTA] connect kickoff failed (rc=%d); will retry\n", rc);
         const absolute_time_t deadline = make_timeout_time_ms(45000);
+        absolute_time_t next_retry = make_timeout_time_ms(5000);
+        int prev_link = -100; // impossible value: log the first state too
         while (true) {
             ota_pump();
             const int link = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
+            if (link != prev_link) {
+                printf("[OTA] wifi link %s\n",
+                       (link == CYW43_LINK_UP) ? "UP"
+                       : (link == CYW43_LINK_JOIN) ? "JOINING"
+                       : (link == CYW43_LINK_NOIP) ? "NO-IP"
+                       : (link == CYW43_LINK_FAIL) ? "FAIL"
+                       : (link == CYW43_LINK_NONET) ? "NO-NET"
+                       : (link == CYW43_LINK_BADAUTH) ? "BADAUTH" : "DOWN");
+                prev_link = link;
+            }
             if (link == CYW43_LINK_UP && netif_default &&
                 !ip4_addr_isany_val(*netif_ip4_addr(netif_default))) {
                 break;
+            }
+            // Re-issue the join on any parked failure state, ~5 s apart (not
+            // while JOIN/NOIP -- that's a join in progress).
+            if ((link == CYW43_LINK_DOWN || link == CYW43_LINK_FAIL ||
+                 link == CYW43_LINK_NONET || link == CYW43_LINK_BADAUTH) &&
+                time_reached(next_retry)) {
+                printf("[OTA] retrying join...\n");
+                rc = cyw43_arch_wifi_connect_async(
+                    c.wifi_ssid, c.wifi_psk[0] ? c.wifi_psk : NULL, auth);
+                if (rc) printf("[OTA] connect kickoff failed (rc=%d)\n", rc);
+                next_retry = make_timeout_time_ms(5000);
             }
             if (time_reached(deadline)) {
                 ota_finish(OTA_RESULT_WIFI_JOIN_FAILED);

@@ -218,6 +218,7 @@ struct OtaCtx {
 
     // Transfer state
     uint32_t body_rx;         // body bytes consumed (incl. discarded tail)
+    uint32_t recv_calls;      // stall probe: outer recv callback invocations
     volatile bool complete;   // this hop reached its success criteria
     volatile bool failed;
     volatile bool done;       // complete/failed/FIN/error -- pump loop exits
@@ -347,6 +348,12 @@ static err_t ota_connected_cb(void *arg, struct altcp_pcb *, err_t err) {
 
 static err_t ota_sent_cb(void *arg, struct altcp_pcb *, u16_t) {
     ota_try_send((OtaCtx *) arg);
+    return ERR_OK;
+}
+
+// Intentionally trivial -- registering it is the point (see the altcp_poll
+// call in ota_fetch).
+static err_t ota_poll_cb(void *, struct altcp_pcb *) {
     return ERR_OK;
 }
 
@@ -484,6 +491,7 @@ static void ota_headers_parsed(OtaCtx *c, uint32_t term_off) {
 
 static err_t ota_recv_cb(void *arg, struct altcp_pcb *pcb, struct pbuf *p, err_t) {
     OtaCtx *c = (OtaCtx *) arg;
+    c->recv_calls++;
 
     if (!p) {
         // Remote FIN. A SMALL response without a Content-Length is
@@ -559,15 +567,34 @@ static void ota_pump() {
 static void ota_stall_probe() {
 #if LWIP_STATS && MEMP_STATS
     const struct stats_mem *pp = lwip_stats.memp[MEMP_PBUF_POOL];
-    printf("[OTA] pool used=%u max=%u err=%u | mem err=%u | link drop=%u",
+    printf("[OTA] pool used=%u max=%u err=%u | link drop=%u",
            (unsigned) pp->used, (unsigned) pp->max, (unsigned) pp->err,
-           (unsigned) lwip_stats.mem.err, (unsigned) lwip_stats.link.drop);
+           (unsigned) lwip_stats.link.drop);
 #endif
+#if LWIP_STATS && TCP_STATS
+    printf(" | tcpstat drop=%u err=%u",
+           (unsigned) lwip_stats.tcp.drop, (unsigned) lwip_stats.tcp.err);
+#endif
+    // Our client's view: did the outer (decrypted) side ever see data, and
+    // where did it stop? Plus the TLS engine's state -- if the handshake is
+    // still in flight (state != HANDSHAKE_OVER) the wedge is below us; if
+    // bytes_avail > 0, decrypted data is sitting unfetched in mbedTLS.
+    printf(" | rx calls=%lu hdrs=%d body=%lu staged=%lu",
+           (unsigned long) ctx->recv_calls, ctx->hdrs_done ? 1 : 0,
+           (unsigned long) ctx->body_rx, (unsigned long) ctx->staged);
+    if (ctx->pcb) {
+        mbedtls_ssl_context *ssl =
+            (mbedtls_ssl_context *) altcp_tls_context(ctx->pcb);
+        if (ssl) {
+            printf(" | ssl st=%d avail=%u", (int) ssl->state,
+                   (unsigned) mbedtls_ssl_get_bytes_avail(ssl));
+        }
+    }
     for (struct tcp_pcb *pcb = tcp_active_pcbs; pcb; pcb = pcb->next) {
-        printf(" | tcp :%u->%u st=%d rcv_wnd=%u ann=%u snd_wnd=%u unacked=%c",
+        printf(" | tcp :%u->%u st=%d rcv_wnd=%u ann=%u unacked=%c",
                pcb->local_port, pcb->remote_port, (int) pcb->state,
                (unsigned) pcb->rcv_wnd, (unsigned) pcb->rcv_ann_wnd,
-               (unsigned) pcb->snd_wnd, pcb->unacked ? 'y' : 'n');
+               pcb->unacked ? 'y' : 'n');
     }
     printf("\n");
 }
@@ -627,6 +654,7 @@ static bool ota_fetch(const char *host, const char *path, FetchKind kind,
         ctx->expect_len = OTA_LEN_INVALID;
         ctx->redirect_seen = false;
         ctx->body_rx = 0;
+        ctx->recv_calls = 0;
         ctx->complete = false;
         ctx->failed = false;
         ctx->done = false;
@@ -663,6 +691,16 @@ static bool ota_fetch(const char *host, const char *path, FetchKind kind,
         altcp_recv(ctx->pcb, ota_recv_cb);
         altcp_sent(ctx->pcb, ota_sent_cb);
         altcp_err(ctx->pcb, ota_err_cb);
+        // CRITICAL, not optional (HW-diagnosed 2026-07-11): the TLS shim's
+        // decrypt loop can fail a pbuf_alloc during a fast burst and parks
+        // the pending ciphertext "to retry from poll" -- but it only ever
+        // registers that retry (lower_poll on the inner conn) when the APP
+        // sets a poll callback on the outer pcb. Without this call the retry
+        // never runs: rx data rots in mbedTLS's buffer, the receive window
+        // never reopens, and a large download wedges at ~4 KB while small
+        // fetches sail through. The callback itself does nothing; ARMING it
+        // is the fix. Interval 2 = one retry per TCP coarse tick (~1 s).
+        altcp_poll(ctx->pcb, ota_poll_cb, 2);
         ctx->req_len = (uint16_t) snprintf(
             ctx->req, sizeof(ctx->req),
             "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: ds5-bridge-ota\r\n"

@@ -231,7 +231,26 @@ if (ENABLE_OTA)
     else ()
         set(OTA_ASSET_NAME "ds5-bridge-ota.bin")
     endif ()
-    target_sources(ds5-bridge PRIVATE src/ota.cpp)
+    # lib/altcp_tls_patched/altcp_tls_mbedtls.c is the SDK's own (mbedTLS-3.x
+    # patched) altcp TLS shim, vendored with one further fix: inner TCP window
+    # credit is returned when ciphertext is CONSUMED, not when a TLS record
+    # COMPLETES -- upstream's deferred credit hard-deadlocks any record larger
+    # than the receive window (GitHub's CDN grows records past 16 KB a few
+    # tens of KB into a download vs our ~4 KB window; HW-captured 2026-07-11).
+    # Grep for PATCH(ds5-bridge in that file. Because of this we intentionally
+    # do NOT link pico_lwip_mbedtls (which would compile the unpatched copy);
+    # its other source + include dir are mirrored here.
+    if (NOT DEFINED PICO_LWIP_PATH)
+        set(PICO_LWIP_PATH ${PICO_SDK_PATH}/lib/lwip)
+    endif ()
+    target_sources(ds5-bridge PRIVATE
+            src/ota.cpp
+            lib/altcp_tls_patched/altcp_tls_mbedtls.c
+            ${PICO_LWIP_PATH}/src/apps/altcp_tls/altcp_tls_mbedtls_mem.c
+    )
+    target_include_directories(ds5-bridge PRIVATE
+            ${PICO_LWIP_PATH}/src/apps/altcp_tls
+    )
     # mbedTLS config: the SDK's pico_mbedtls_headers sets
     # MBEDTLS_CONFIG_FILE="pico_mbedtls_config.h", whose wrapper does
     # #include "mbedtls_config.h" -- resolved to src/mbedtls_config.h via this
@@ -247,8 +266,9 @@ if (ENABLE_OTA)
             # heap -- accounted against the ~27 KB cushion. OTA builds only.
             PICO_STACK_SIZE=0x1000
     )
+    # NOTE: pico_lwip_mbedtls deliberately NOT linked -- see the vendored-shim
+    # comment above.
     target_link_libraries(ds5-bridge
-            pico_lwip_mbedtls
             pico_mbedtls
     )
 endif ()

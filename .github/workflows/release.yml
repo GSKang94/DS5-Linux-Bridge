@@ -97,15 +97,19 @@ jobs:
             -DVERSION="$FIRMWARE_VERSION"
           cmake --build build/standard --target ds5-bridge
           mkdir -p artifacts
-          cp build/standard/ds5-bridge.uf2 "artifacts/ds5-bridge-${{ github.event.release.tag_name }}.uf2"
+          # Asset naming: every artifact carries its board -- pico2w (the
+          # standard build), picow, waveshare -- so the release page sorts by
+          # board.
+          cp build/standard/ds5-bridge.uf2 "artifacts/ds5-bridge-pico2w-${{ github.event.release.tag_name }}.uf2"
           # OTA assets: STABLE names (no tag) -- the dongle downloads
-          # releases/download/<tag>/ds5-bridge-ota.bin{,.sha256} and its
-          # compiled-in asset name must match every future release. The .bin is
-          # the raw image (half the UF2's size; no UF2 framing to parse on
-          # device); the .sha256 is what the dongle verifies the staged flash
-          # against before committing the update (src/ota.cpp).
-          cp build/standard/ds5-bridge.bin artifacts/ds5-bridge-ota.bin
-          (cd artifacts && sha256sum ds5-bridge-ota.bin > ds5-bridge-ota.bin.sha256)
+          # releases/download/<tag>/ds5-bridge-pico2w-ota.bin{,.sha256} and its
+          # compiled-in asset name (OTA_ASSET_NAME in CMakeLists.txt) must
+          # match every future release. The .bin is the raw image (half the
+          # UF2's size; no UF2 framing to parse on device); the .sha256 is
+          # what the dongle verifies the staged flash against before
+          # committing the update (src/ota.cpp).
+          cp build/standard/ds5-bridge.bin artifacts/ds5-bridge-pico2w-ota.bin
+          (cd artifacts && sha256sum ds5-bridge-pico2w-ota.bin > ds5-bridge-pico2w-ota.bin.sha256)
 
       - name: Build verbose-diagnostics firmware
         # Verbose UART logging (GP0 TX, 115200 8N1). No USB serial -- diagnostics
@@ -117,7 +121,7 @@ jobs:
             -DENABLE_VERBOSE=ON \
             -DVERSION="$FIRMWARE_VERSION"
           cmake --build build/debug --target ds5-bridge
-          cp build/debug/ds5-bridge.uf2 "artifacts/ds5-bridge-debug-${{ github.event.release.tag_name }}.uf2"
+          cp build/debug/ds5-bridge.uf2 "artifacts/ds5-bridge-pico2w-debug-${{ github.event.release.tag_name }}.uf2"
 
       - name: Build Waveshare RP2350B-Plus-W firmware
         # USB-C / 16MB-flash Pico 2 W alternative. Different RM2 GPIO wiring +

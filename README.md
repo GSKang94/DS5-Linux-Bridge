@@ -27,12 +27,13 @@ getting it right on Linux / SteamOS (Bazzite).
 - 🎮 **Full wireless controller emulation** — DualSense Bluetooth reports → standard
   USB HID gamepad at up to 1000 Hz. Supports DualSense (DS5) and DualSense Edge
   (DSE), including DSE PS-app profiles.
-- 👥 **Multiple controllers (local co-op, opt-in)** — up to 4 DualSense pads
-  connected at once, each as its own USB gamepad with per-player LEDs. Off by
-  default (a web-page toggle enables it; the default behavior is unchanged
+- 👥 **Multiple controllers (local co-op, opt-in) — BETA** — up to 4 DualSense
+  pads connected at once, each as its own USB gamepad with per-player LEDs. Off
+  by default (a web-page toggle enables it; the default behavior is unchanged
   single-controller). Audio and HD haptics are single-controller features (not
   enough Bluetooth airtime beside a second pad); classic rumble and adaptive
-  triggers work for everyone. See the
+  triggers work for everyone. *Currently only in pre-release builds — grab the
+  latest pre-release from [Releases](../../releases).* See the
   [user guide](docs/USER_GUIDE.md#using-multiple-controllers-at-once).
 - 📳 **Wireless HD haptics** — recreates the cabled audio-based haptic feedback over
   Bluetooth, streaming the dedicated haptic waveforms to the controller's
@@ -50,12 +51,14 @@ getting it right on Linux / SteamOS (Bazzite).
 - 🎮 **Decky Loader companion plugin** — a [Decky Loader plugin](https://github.com/kungaa/DS5-Linux-Decky)
   surfaces controller status and settings in the Quick Access Menu, talking to
   the same on-device API as the web page.
-- ⬆️ **Over-the-air updates** — one click on the config page installs the latest
-  GitHub release over HTTPS (pinned CA roots, SHA-256-verified against the
-  release manifest) with no PC involved. The download is staged in spare flash,
-  so a failed/interrupted download changes nothing. Pico 2 W and Waveshare
-  boards; the Pico W's 2 MB flash is too small. See the
-  [user guide](docs/USER_GUIDE.md#updating-over-wifi-ota).
+- ⬆️ **Over-the-air updates — BETA** — one click on the config page installs the
+  latest GitHub release over HTTPS (pinned CA roots, SHA-256-verified against
+  the release manifest) with no PC involved. The download is staged in spare
+  flash, so a failed/interrupted download changes nothing. Pico 2 W and
+  Waveshare boards; the Pico W's 2 MB flash is too small. *Currently only in
+  pre-release builds — grab the latest pre-release from
+  [Releases](../../releases) and tick "include pre-releases" in the Update
+  tab.* See the [user guide](docs/USER_GUIDE.md#updating-over-wifi-ota).
 - 🖥️ **Wake-on-LAN** — press the controller's PS button to wake a sleeping or
   fully-off PC (even S4/S5) by sending a magic packet over WiFi. Wakes up to two
   targets (e.g. your PC and a TV), with a one-click "Find MAC" helper.

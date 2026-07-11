@@ -229,7 +229,7 @@ if (ENABLE_OTA)
     if (WAVESHARE_RP2350B_PLUS_W_BUILD)
         set(OTA_ASSET_NAME "ds5-bridge-waveshare-ota.bin")
     else ()
-        set(OTA_ASSET_NAME "ds5-bridge-ota.bin")
+        set(OTA_ASSET_NAME "ds5-bridge-pico2w-ota.bin")
     endif ()
     # lib/altcp_tls_patched/altcp_tls_mbedtls.c is the SDK's own (mbedTLS-3.x
     # patched) altcp TLS shim, vendored with one further fix: inner TCP window

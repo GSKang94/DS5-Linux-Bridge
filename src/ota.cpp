@@ -33,8 +33,8 @@
 #include "hardware/sync.h"
 #include "hardware/watchdog.h"
 
+#include "lwip/altcp.h"
 #include "lwip/altcp_tls.h"
-#include "lwip/apps/http_client.h"
 #include "lwip/apps/httpd.h"
 #include "lwip/apps/mdns.h"
 #include "lwip/dns.h"
@@ -178,23 +178,50 @@ enum class FetchKind : uint8_t {
     BIN,   // follow redirects to a 200, stream the body to staging flash
 };
 
+// GitHub's github.com web face sends ~5 KB of response headers (mostly one
+// giant Content-Security-Policy line) on EVERY response -- 200s and 302s
+// alike (measured 4.9-5.1 KB on releases/latest, releases/download and
+// releases.atom, 2026-07-11). The header scan buffer must hold a complete
+// header block; 8 KB leaves growth margin.
+static constexpr size_t OTA_HDRS_MAX = 8192;
+// "no Content-Length header" sentinel.
+static constexpr uint32_t OTA_LEN_INVALID = 0xFFFFFFFFu;
+
 struct OtaCtx {
     struct altcp_tls_config *tls;
-    altcp_allocator_t alloc;
 
-    // Current connection
+    // Current connection (direct altcp client -- see the fetch section for
+    // why lwIP's httpc is NOT used here).
+    struct altcp_pcb *pcb;
     char host[OTA_HOST_MAX];
     char path[OTA_PATH_MAX];
     FetchKind kind;
-    httpc_connection_t settings;
-    httpc_state_t *conn;
 
-    // Response capture
-    volatile bool done;
-    httpc_result_t result;
-    uint32_t srv_status;      // HTTP status code parsed from the status line
+    // DNS resolve (start/poll; the callback fires from cyw43_arch_poll)
+    ip_addr_t ip;
+    volatile bool dns_done;
+    volatile bool dns_failed;
+
+    // Request write (may take several altcp_write calls under SND_BUF)
+    char req[OTA_PATH_MAX + 256];
+    uint16_t req_len;
+    uint16_t req_off;
+
+    // Response header accumulation + parse results
+    char hdrs[OTA_HDRS_MAX];
+    uint32_t hdr_len;
+    bool hdrs_done;
+    uint32_t srv_status;      // HTTP status code from the status line
+    uint32_t expect_len;      // Content-Length (OTA_LEN_INVALID if absent)
     bool redirect_seen;
     char redirect_url[OTA_PATH_MAX];
+
+    // Transfer state
+    uint32_t body_rx;         // body bytes consumed (incl. discarded tail)
+    volatile bool complete;   // this hop reached its success criteria
+    volatile bool failed;
+    volatile bool done;       // complete/failed/FIN/error -- pump loop exits
+    bool got_fin;
     bool oversize;            // BIN body would overflow the staging window
 
     // Redirect-parse scratch. In the ctx (heap), NOT ota_fetch() locals: the
@@ -205,7 +232,7 @@ struct OtaCtx {
     // SMALL-body accumulator. Sized for the beta channel's releases.atom
     // scan: the first <entry> (= newest release, prereleases included) sits
     // within the first few KB of the feed. The .sha256 file (~80 B) uses a
-    // sliver of it.
+    // sliver of it. Bytes beyond the cap are drained and counted, not kept.
     char small_body[4096];
     uint32_t small_len;
 
@@ -223,10 +250,6 @@ struct OtaCtx {
 
 static OtaCtx *ctx;
 
-// http_client.c's "no Content-Length header" sentinel; the macro is private
-// to that .c file, so mirror its value here.
-static constexpr u32_t OTA_HTTPC_CONTENT_LEN_INVALID = 0xFFFFFFFFu;
-
 //--------------------------------------------------------------------+
 // Flash helpers (single-core, core1 never launched: IRQs-off is sufficient,
 // exactly the pre-core1 direct-write case in flash_safety.cpp -- used
@@ -242,7 +265,18 @@ static void stage_flash_sector(uint32_t offset_in_staging, const uint8_t *data) 
 }
 
 //--------------------------------------------------------------------+
-// httpc callbacks
+// Direct altcp HTTP client.
+//
+// lwIP's httpc (http_client.c) is deliberately NOT used: it buffers the
+// ENTIRE response header block in pbufs without acknowledging a single byte
+// until it finds the \r\n\r\n terminator -- and github.com's web face sends
+// ~5 KB of headers on every response, larger than any receive window this
+// firmware can afford. Every fetch deadlocked: window drained to below one
+// MSS mid-headers, the sender stalled, 15 s timeout (HW-diagnosed 2026-07-11
+// via the stall probe: rcv_wnd=138, ann=0, 9 pool pbufs frozen in httpc's
+// rx_hdrs chain). This client acks + frees EVERY pbuf on arrival; header
+// bytes are copied into ctx->hdrs (a scan buffer) instead of held hostage,
+// so neither the window nor the pbuf pool ever depends on header size.
 //--------------------------------------------------------------------+
 
 extern "C" {
@@ -258,15 +292,13 @@ static void ota_mbedtls_dbg(void *, int level, const char *file, int line, const
 }
 #endif
 
-// TLS pcb allocator handed to httpc. httpc creates the pcb internally, which
-// would normally leave no hook to set the SNI/verification hostname before
-// the handshake -- so the allocator itself stamps it on the fresh TLS context
-// (and, with diagnostics on, the debug callback: conf_dbg lives on the shared
-// mbedtls_ssl_config the shim owns; MBEDTLS_ALLOW_PRIVATE_ACCESS is already
-// required by the shim itself, so reaching ssl->conf is sanctioned here).
-static struct altcp_pcb *ota_tls_alloc(void *arg, u8_t ip_type) {
-    OtaCtx *c = (OtaCtx *) arg;
-    struct altcp_pcb *pcb = altcp_tls_alloc(c->tls, ip_type);
+// Allocate the TLS pcb and stamp the SNI/verification hostname on the fresh
+// TLS context before the handshake can start (and, with diagnostics on, the
+// debug callback: conf_dbg lives on the shared mbedtls_ssl_config the shim
+// owns; MBEDTLS_ALLOW_PRIVATE_ACCESS is already required by the shim itself,
+// so reaching ssl->conf is sanctioned here).
+static struct altcp_pcb *ota_tls_alloc(OtaCtx *c) {
+    struct altcp_pcb *pcb = altcp_tls_alloc(c->tls, IPADDR_TYPE_V4);
     if (pcb) {
         mbedtls_ssl_context *ssl = (mbedtls_ssl_context *) altcp_tls_context(pcb);
         mbedtls_ssl_set_hostname(ssl, c->host);
@@ -277,110 +309,233 @@ static struct altcp_pcb *ota_tls_alloc(void *arg, u8_t ip_type) {
     return pcb;
 }
 
-// Parse the status code and any Location: header out of the raw header pbuf.
-static err_t ota_headers_done(httpc_state_t *, void *arg, struct pbuf *hdr,
-                              u16_t hdr_len, u32_t content_len) {
+static void ota_dns_cb(const char *, const ip_addr_t *ipaddr, void *arg) {
     OtaCtx *c = (OtaCtx *) arg;
+    if (ipaddr) c->ip = *ipaddr;
+    else c->dns_failed = true;
+    c->dns_done = true;
+}
 
-    // Status line: "HTTP/1.x NNN ..."
-    char line[16] = {};
-    pbuf_copy_partial(hdr, line, sizeof(line) - 1, 0);
-    const char *sp = strchr(line, ' ');
-    c->srv_status = sp ? (uint32_t) atoi(sp + 1) : 0;
+// Push as much of the request as the send buffer takes; the sent callback
+// continues it. (The whole request is ~200 B-1.3 KB vs TCP_SND_BUF 1.6 KB, so
+// this usually completes in one call.)
+static void ota_try_send(OtaCtx *c) {
+    while (c->pcb && c->req_off < c->req_len) {
+        const u16_t room = altcp_sndbuf(c->pcb);
+        if (room == 0) break;
+        u16_t n = (u16_t) (c->req_len - c->req_off);
+        if (n > room) n = room;
+        if (altcp_write(c->pcb, c->req + c->req_off, n, TCP_WRITE_FLAG_COPY) != ERR_OK) {
+            break; // retry from the sent callback
+        }
+        c->req_off = (uint16_t) (c->req_off + n);
+    }
+    if (c->pcb) altcp_output(c->pcb);
+}
 
-    // Location header (GitHub emits "Location:"; check the lowercase form too).
-    u16_t loc = pbuf_memfind(hdr, "\r\nLocation: ", 12, 0);
-    if (loc == 0xFFFF) loc = pbuf_memfind(hdr, "\r\nlocation: ", 12, 0);
-    if (loc != 0xFFFF && loc < hdr_len) {
-        const u16_t val = loc + 12;
-        u16_t end = pbuf_memfind(hdr, "\r\n", 2, val);
-        if (end != 0xFFFF && end > val) {
-            u16_t n = end - val;
-            if (n >= sizeof(c->redirect_url)) {
-                printf("[OTA] redirect URL too long (%u)\n", n);
-                return ERR_VAL; // abort; treated as fetch failure
+static err_t ota_connected_cb(void *arg, struct altcp_pcb *, err_t err) {
+    OtaCtx *c = (OtaCtx *) arg;
+    if (err != ERR_OK) {
+        c->failed = true;
+        c->done = true;
+        return ERR_OK;
+    }
+    // For the TLS altcp, "connected" fires after the handshake completed.
+    ota_try_send(c);
+    return ERR_OK;
+}
+
+static err_t ota_sent_cb(void *arg, struct altcp_pcb *, u16_t) {
+    ota_try_send((OtaCtx *) arg);
+    return ERR_OK;
+}
+
+static void ota_err_cb(void *arg, err_t err) {
+    OtaCtx *c = (OtaCtx *) arg;
+    // The pcb is already deallocated when this fires.
+    c->pcb = nullptr;
+    if (!c->complete) {
+        printf("[OTA] connection error %d\n", (int) err);
+        c->failed = true;
+    }
+    c->done = true;
+}
+
+// Body sink (raw bytes; called for the post-header remainder of the header
+// buffer and for every subsequent pbuf segment).
+static void ota_body_bytes(OtaCtx *c, const uint8_t *data, uint32_t len) {
+    c->body_rx += len;
+    if (c->srv_status != 200) return; // redirect/error bodies: drain unread
+    if (c->kind == FetchKind::SMALL) {
+        const uint32_t space = sizeof(c->small_body) - 1 - c->small_len;
+        const uint32_t take = len < space ? len : space;
+        memcpy(c->small_body + c->small_len, data, take);
+        c->small_len += take;
+        c->small_body[c->small_len] = '\0';
+    } else if (c->kind == FetchKind::BIN && !c->oversize) {
+        // Accumulate one flash sector, then erase+program. The 45 ms erase
+        // just delays our ACKs; the small window makes the sender pause
+        // rather than overrun us.
+        uint32_t off = 0;
+        while (off < len) {
+            const uint32_t space = FLASH_SECTOR_SIZE - c->sec_fill;
+            const uint32_t remain = len - off;
+            const uint32_t take = remain < space ? remain : space;
+            memcpy(c->secbuf + c->sec_fill, data + off, take);
+            c->sec_fill += take;
+            off += take;
+            if (c->sec_fill == FLASH_SECTOR_SIZE) {
+                if (c->staged + FLASH_SECTOR_SIZE > OTA_STAGING_CAPACITY) {
+                    c->oversize = true; // belt: header check already bounds this
+                    return;
+                }
+                stage_flash_sector(c->staged, c->secbuf);
+                c->staged += FLASH_SECTOR_SIZE;
+                c->sec_fill = 0;
+                status_bytes = c->staged;
             }
-            pbuf_copy_partial(hdr, c->redirect_url, n, val);
-            c->redirect_url[n] = '\0';
-            c->redirect_seen = true;
         }
     }
+}
 
-    // BIN transfers: bound the body BEFORE bytes start flowing. Requires a
-    // definite Content-Length (GitHub serves release assets with one); a
-    // chunked 200 is rejected rather than trusted blind.
+// Find "\r\n<name>" (case variant included) within the header block and copy
+// its value. Returns false if absent/too long.
+static bool ota_header_value(const char *hdrs, const char *name, const char *name_lc,
+                             char *out, size_t out_cap) {
+    const char *h = strstr(hdrs, name);
+    if (!h) h = strstr(hdrs, name_lc);
+    if (!h) return false;
+    h += strlen(name);
+    const char *end = strstr(h, "\r\n");
+    if (!end) return false;
+    const size_t n = (size_t) (end - h);
+    if (n == 0 || n >= out_cap) return false;
+    memcpy(out, h, n);
+    out[n] = '\0';
+    return true;
+}
+
+// Evaluate this hop's completion criteria (see FetchKind).
+static void ota_check_complete(OtaCtx *c) {
+    if (!c->hdrs_done || c->complete || c->failed) return;
+    const bool is_redirect = c->srv_status >= 301 && c->srv_status <= 308 &&
+                             c->redirect_seen;
+    if (c->kind == FetchKind::CHECK) {
+        c->complete = true; // first response IS the answer
+    } else if (is_redirect) {
+        c->complete = true; // caller follows the hop; body is irrelevant
+    } else if (c->srv_status == 200 && c->expect_len != OTA_LEN_INVALID &&
+               c->body_rx >= c->expect_len) {
+        c->complete = true;
+    }
+    if (c->complete) c->done = true;
+}
+
+// Headers complete: parse status/Location/Content-Length, apply the BIN
+// bounds check, and route any body bytes that arrived in the same segments.
+static void ota_headers_parsed(OtaCtx *c, uint32_t term_off) {
+    c->hdrs_done = true;
+    c->hdrs[term_off] = '\0'; // bound all strstr scans to the header block
+
+    c->srv_status = 0;
+    const char *sp = strchr(c->hdrs, ' ');
+    if (sp) c->srv_status = (uint32_t) atoi(sp + 1);
+
+    if (ota_header_value(c->hdrs, "\r\nLocation: ", "\r\nlocation: ",
+                         c->redirect_url, sizeof(c->redirect_url))) {
+        c->redirect_seen = true;
+    }
+    char lenval[16];
+    c->expect_len = OTA_LEN_INVALID;
+    if (ota_header_value(c->hdrs, "\r\nContent-Length: ", "\r\ncontent-length: ",
+                         lenval, sizeof(lenval))) {
+        c->expect_len = (uint32_t) strtoul(lenval, nullptr, 10);
+    }
+
     if (c->kind == FetchKind::BIN && c->srv_status == 200) {
-        if (content_len == OTA_HTTPC_CONTENT_LEN_INVALID) {
+        // Bound the body BEFORE bytes flow. Requires a definite
+        // Content-Length (GitHub serves release assets with one); a chunked
+        // 200 is rejected rather than trusted blind.
+        if (c->expect_len == OTA_LEN_INVALID) {
             printf("[OTA] bin response has no Content-Length; rejecting\n");
-            return ERR_VAL;
+            c->failed = true;
+            c->done = true;
+            return;
         }
-        if (content_len > OTA_STAGING_CAPACITY || content_len < OTA_MIN_IMAGE) {
+        if (c->expect_len > OTA_STAGING_CAPACITY || c->expect_len < OTA_MIN_IMAGE) {
             printf("[OTA] bin size %lu outside [%lu, %lu]\n",
-                   (unsigned long) content_len, (unsigned long) OTA_MIN_IMAGE,
+                   (unsigned long) c->expect_len, (unsigned long) OTA_MIN_IMAGE,
                    (unsigned long) OTA_STAGING_CAPACITY);
             c->oversize = true;
-            return ERR_VAL;
+            c->failed = true;
+            c->done = true;
+            return;
         }
-        status_total = content_len;
+        status_total = c->expect_len;
     }
-    return ERR_OK;
+
+    // Body bytes that shared segments with the header tail.
+    const uint32_t body_in_hdrs = c->hdr_len - (term_off + 4);
+    if (body_in_hdrs) {
+        ota_body_bytes(c, (const uint8_t *) c->hdrs + term_off + 4, body_in_hdrs);
+    }
+    ota_check_complete(c);
 }
 
-// Body sink. Ownership contract (http_client.c): we must altcp_recved() and
-// pbuf_free() every delivered pbuf.
-static err_t ota_body_recv(void *arg, struct altcp_pcb *pcb, struct pbuf *p, err_t) {
+static err_t ota_recv_cb(void *arg, struct altcp_pcb *pcb, struct pbuf *p, err_t) {
     OtaCtx *c = (OtaCtx *) arg;
-    if (!p) return ERR_OK; // close is signalled to httpc separately
 
-    if (c->srv_status == 200) {
-        if (c->kind == FetchKind::SMALL) {
-            const u16_t space = (u16_t) (sizeof(c->small_body) - 1 - c->small_len);
-            const u16_t take = p->tot_len < space ? p->tot_len : space;
-            c->small_len += pbuf_copy_partial(p, c->small_body + c->small_len, take, 0);
-            c->small_body[c->small_len] = '\0';
-        } else if (c->kind == FetchKind::BIN && !c->oversize) {
-            // Append pbuf chain into the sector accumulator; flush each full
-            // sector to staging flash. The 45 ms erase inside stage_flash_sector
-            // simply delays our TCP ACKs -- the tiny receive window (TCP_WND
-            // ~2 KB) means the sender pauses instead of overrunning us.
-            u16_t off = 0;
-            while (off < p->tot_len) {
-                const u16_t space = (u16_t) (FLASH_SECTOR_SIZE - c->sec_fill);
-                const u16_t remain = (u16_t) (p->tot_len - off);
-                const u16_t take = remain < space ? remain : space;
-                pbuf_copy_partial(p, c->secbuf + c->sec_fill, take, off);
-                c->sec_fill += take;
-                off += take;
-                if (c->sec_fill == FLASH_SECTOR_SIZE) {
-                    if (c->staged + FLASH_SECTOR_SIZE > OTA_STAGING_CAPACITY) {
-                        c->oversize = true; // belt: headers_done already bounds this
-                        break;
-                    }
-                    stage_flash_sector(c->staged, c->secbuf);
-                    c->staged += FLASH_SECTOR_SIZE;
-                    c->sec_fill = 0;
-                    status_bytes = c->staged;
+    if (!p) {
+        // Remote FIN. A SMALL response without a Content-Length is
+        // close-delimited: FIN == completion. Anything else that isn't
+        // already complete died early.
+        c->got_fin = true;
+        if (!c->complete && c->hdrs_done && c->kind == FetchKind::SMALL &&
+            c->srv_status == 200 && c->expect_len == OTA_LEN_INVALID) {
+            c->complete = true;
+        }
+        if (!c->complete) c->failed = true;
+        c->done = true;
+        return ERR_OK;
+    }
+
+    // THE core rule of this client: acknowledge + free every pbuf on
+    // arrival. Nothing downstream may hold RX window or pool hostage.
+    altcp_recved(pcb, p->tot_len);
+
+    if (!c->complete && !c->failed) {
+        for (struct pbuf *q = p; q; q = q->next) {
+            const uint8_t *data = (const uint8_t *) q->payload;
+            uint32_t len = q->len;
+            if (!c->hdrs_done) {
+                // Append to the header scan buffer, look for the terminator.
+                const uint32_t space = sizeof(c->hdrs) - 1 - c->hdr_len;
+                const uint32_t take = len < space ? len : space;
+                memcpy(c->hdrs + c->hdr_len, data, take);
+                c->hdr_len += take;
+                c->hdrs[c->hdr_len] = '\0';
+                if (take < len) {
+                    printf("[OTA] response headers exceed %u bytes\n",
+                           (unsigned) sizeof(c->hdrs));
+                    c->failed = true;
+                    c->done = true;
+                    break;
                 }
+                const char *term = strstr(c->hdrs, "\r\n\r\n");
+                if (term) {
+                    ota_headers_parsed(c, (uint32_t) (term - c->hdrs));
+                    if (c->done) break;
+                }
+            } else {
+                ota_body_bytes(c, data, len);
+                ota_check_complete(c);
+                if (c->done) break;
             }
         }
     }
-    // Bodies of non-200 responses (redirect HTML stubs) are drained unread.
-    altcp_recved(pcb, p->tot_len);
+
     pbuf_free(p);
     return ERR_OK;
-}
-
-static void ota_result(void *arg, httpc_result_t httpc_result, u32_t /*rx_len*/,
-                       u32_t srv_res, err_t err) {
-    OtaCtx *c = (OtaCtx *) arg;
-    c->result = httpc_result;
-    if (srv_res) c->srv_status = srv_res;
-    c->conn = nullptr;
-    c->done = true;
-    if (httpc_result != HTTPC_RESULT_OK) {
-        printf("[OTA] http result=%d srv=%lu err=%d\n",
-               (int) httpc_result, (unsigned long) srv_res, (int) err);
-    }
 }
 } // extern "C"
 
@@ -435,6 +590,21 @@ static bool parse_https_url(const char *url, char *host, size_t host_cap,
     return true;
 }
 
+// Tear down the current connection (normal path; on ota_err_cb the pcb is
+// already gone). Clearing the callbacks first makes any straggler events
+// no-ops.
+static void ota_conn_close(OtaCtx *c) {
+    if (!c->pcb) return;
+    altcp_arg(c->pcb, nullptr);
+    altcp_recv(c->pcb, nullptr);
+    altcp_sent(c->pcb, nullptr);
+    altcp_err(c->pcb, nullptr);
+    if (altcp_close(c->pcb) != ERR_OK) {
+        altcp_abort(c->pcb);
+    }
+    c->pcb = nullptr;
+}
+
 // One GET, following up to `max_hops` https redirects (except CHECK, which
 // stops at the first response by design). Returns true when the final
 // response was consumed OK (status in ctx->srv_status, Location -- if any --
@@ -444,33 +614,67 @@ static bool ota_fetch(const char *host, const char *path, FetchKind kind,
     snprintf(ctx->host, sizeof(ctx->host), "%s", host);
     snprintf(ctx->path, sizeof(ctx->path), "%s", path);
     ctx->kind = kind;
+    const absolute_time_t deadline = make_timeout_time_ms(timeout_ms);
 
     for (int hop = 0; ; hop++) {
-        ctx->done = false;
-        ctx->result = HTTPC_RESULT_OK;
+        // Per-hop reset
+        ctx->dns_done = false;
+        ctx->dns_failed = false;
+        ctx->req_off = 0;
+        ctx->hdr_len = 0;
+        ctx->hdrs_done = false;
         ctx->srv_status = 0;
+        ctx->expect_len = OTA_LEN_INVALID;
         ctx->redirect_seen = false;
+        ctx->body_rx = 0;
+        ctx->complete = false;
+        ctx->failed = false;
+        ctx->done = false;
+        ctx->got_fin = false;
         ctx->oversize = false;
         ctx->small_len = 0;
         ctx->sec_fill = 0;
         ctx->staged = 0;
         status_bytes = 0;
 
-        memset(&ctx->settings, 0, sizeof(ctx->settings));
-        ctx->settings.altcp_allocator = &ctx->alloc;
-        ctx->settings.result_fn = ota_result;
-        ctx->settings.headers_done_fn = ota_headers_done;
-
         printf("[OTA] GET https://%s%.100s%s\n", ctx->host, ctx->path,
                strlen(ctx->path) > 100 ? "..." : "");
-        const err_t rc = httpc_get_file_dns(ctx->host, 443, ctx->path, &ctx->settings,
-                                            ota_body_recv, ctx, &ctx->conn);
-        if (rc != ERR_OK) {
-            printf("[OTA] httpc start failed: %d\n", (int) rc);
+
+        // DNS (async; served from cyw43_arch_poll)
+        err_t rc = dns_gethostbyname(ctx->host, &ctx->ip, ota_dns_cb, ctx);
+        if (rc == ERR_INPROGRESS) {
+            while (!ctx->dns_done && !time_reached(deadline)) ota_pump();
+            if (!ctx->dns_done || ctx->dns_failed) {
+                printf("[OTA] DNS failed for %s\n", ctx->host);
+                return false;
+            }
+        } else if (rc != ERR_OK) {
+            printf("[OTA] DNS start failed: %d\n", (int) rc);
             return false;
         }
 
-        const absolute_time_t deadline = make_timeout_time_ms(timeout_ms);
+        // Connect (the TLS handshake runs inside; connected_cb fires after it)
+        ctx->pcb = ota_tls_alloc(ctx);
+        if (!ctx->pcb) {
+            printf("[OTA] TLS pcb alloc failed\n");
+            return false;
+        }
+        altcp_arg(ctx->pcb, ctx);
+        altcp_recv(ctx->pcb, ota_recv_cb);
+        altcp_sent(ctx->pcb, ota_sent_cb);
+        altcp_err(ctx->pcb, ota_err_cb);
+        ctx->req_len = (uint16_t) snprintf(
+            ctx->req, sizeof(ctx->req),
+            "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: ds5-bridge-ota\r\n"
+            "Accept: */*\r\nConnection: close\r\n\r\n",
+            ctx->path, ctx->host);
+        if (altcp_connect(ctx->pcb, &ctx->ip, 443, ota_connected_cb) != ERR_OK) {
+            printf("[OTA] connect start failed\n");
+            ota_conn_close(ctx);
+            return false;
+        }
+
+        // Pump until this hop resolves
         absolute_time_t next_probe = make_timeout_time_ms(2000);
         while (!ctx->done) {
             ota_pump();
@@ -480,13 +684,19 @@ static bool ota_fetch(const char *host, const char *path, FetchKind kind,
             }
             if (time_reached(deadline)) {
                 printf("[OTA] fetch timed out\n");
-                // Aborting under httpc is messy; the whole mode has a hard
-                // reset fallback (watchdog), so just report failure and let
-                // ota_finish() reboot us out from under the stale connection.
+                // No cleanup needed: every failure path ends in ota_finish()'s
+                // reboot, which tears the whole stack down anyway.
                 return false;
             }
         }
+        ota_conn_close(ctx);
 
+        if (ctx->failed) {
+            printf("[OTA] fetch failed (status=%lu rx=%lu%s)\n",
+                   (unsigned long) ctx->srv_status, (unsigned long) ctx->body_rx,
+                   ctx->got_fin ? ", early FIN" : "");
+            return false;
+        }
         const bool is_redirect = ctx->srv_status >= 301 && ctx->srv_status <= 308 &&
                                  ctx->redirect_seen;
         if (kind == FetchKind::CHECK) {
@@ -507,7 +717,7 @@ static bool ota_fetch(const char *host, const char *path, FetchKind kind,
             memcpy(ctx->path, ctx->npath, strlen(ctx->npath) + 1);
             continue;
         }
-        return ctx->result == HTTPC_RESULT_OK && ctx->srv_status == 200 && !ctx->oversize;
+        return ctx->srv_status == 200 && !ctx->oversize;
     }
 }
 
@@ -651,8 +861,6 @@ static bool parse_sha256_hex(const char *s, uint8_t out[32]) {
     ctx = (OtaCtx *) calloc(1, sizeof(OtaCtx));
     if (!ctx) ota_finish(OTA_RESULT_OOM);
     ctx->force = force;
-    ctx->alloc.alloc = ota_tls_alloc;
-    ctx->alloc.arg = ctx;
 #if defined(MBEDTLS_DEBUG_C)
     // mbedTLS's debug callback is registered by the altcp shim, but the global
     // verbosity threshold defaults to 0 == silent even for FATAL handshake

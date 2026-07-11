@@ -107,6 +107,15 @@
 #define TCP_SND_BUF                 (3 * TCP_MSS)   // ~1.6 KB; QUEUELEN ~13, fits SEG=14
 #define TCP_SND_QUEUELEN            ((4 * (TCP_SND_BUF) + (TCP_MSS - 1)) / (TCP_MSS))
 #define LWIP_TCP_KEEPALIVE          1
+// Do NOT queue out-of-order segments (lwIP's recommended low-memory setting,
+// and on this config a hard REQUIREMENT). HW-captured deadlock (2026-07-11,
+// OTA download): one segment lost over WiFi -> the segments behind it sat in
+// the ooseq queue (9 PBUF_POOL buffers held), burning receive window without
+// being deliverable -> rcv_wnd collapsed to 138 < one MSS -> the server's
+// retransmit of the missing segment never fit the window -> permanent stall.
+// With ooseq off, later segments are dropped, the window stays open, and the
+// sender retransmits from the gap (go-back-N): slower under loss, can't wedge.
+#define TCP_QUEUE_OOSEQ             0
 
 #define LWIP_NETIF_STATUS_CALLBACK  1
 #define LWIP_NETIF_LINK_CALLBACK    1

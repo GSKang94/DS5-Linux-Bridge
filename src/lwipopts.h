@@ -128,6 +128,11 @@
 #define LWIP_ALTCP                  1
 #define LWIP_ALTCP_TLS              1
 #define LWIP_ALTCP_TLS_MBEDTLS      1
+// NOTE on diagnostics: do NOT be tempted by LWIP_DEBUG here -- enabling it
+// breaks the build (lwIP 2.2's altcp_proxyconnect.c has a debug-only function
+// table initializer with a mismatched signature). TLS handshake diagnostics
+// come from ota.cpp instead: it registers its own mbedTLS debug callback on
+// the ssl context it gets in the altcp allocator (MBEDTLS_DEBUG_C).
 #endif
 
 #define LWIP_STATS                  0

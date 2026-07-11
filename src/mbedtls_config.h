@@ -116,5 +116,10 @@
 // Readable mbedtls_strerror() on the UART for failed handshakes; a few KB of
 // flash, invaluable when a CA rotation eventually breaks the pinned bundle.
 #define MBEDTLS_ERROR_C
+// mbedTLS debug callback (handshake state/errors -> UART via the altcp shim's
+// registered hook; see ALTCP_MBEDTLS_LIB_DEBUG in lwipopts.h). The verbosity
+// threshold is raised from its silent default in ota.cpp. Only fires in OTA
+// boot mode -- there is no TLS traffic anywhere else.
+#define MBEDTLS_DEBUG_C
 
 #endif // OTA_MBEDTLS_CONFIG_H

@@ -41,8 +41,11 @@
 #include "lwip/netif.h"
 #include "lwip/pbuf.h"
 
+#include "mbedtls/debug.h"
 #include "mbedtls/sha256.h"
 #include "mbedtls/ssl.h"
+
+#include <malloc.h> // mallinfo(): heap telemetry around the TLS bring-up
 
 #include "config.h"
 #include "ota_certs.h"
@@ -240,15 +243,34 @@ static void stage_flash_sector(uint32_t offset_in_staging, const uint8_t *data) 
 // httpc callbacks
 //--------------------------------------------------------------------+
 
+extern "C" {
+#if defined(MBEDTLS_DEBUG_C)
+// mbedTLS handshake diagnostics straight to the UART. The altcp shim's own
+// debug path needs LWIP_DEBUG, which breaks the lwIP 2.2 build (see
+// lwipopts.h) -- so hook mbedTLS directly instead. Level 1 = errors,
+// 2 = state changes; the threshold is set in ota_mode_main().
+static void ota_mbedtls_dbg(void *, int level, const char *file, int line, const char *str) {
+    // Basename only: mbedTLS passes full paths.
+    const char *base = strrchr(file, '/');
+    printf("[TLS%d] %s:%d %s", level, base ? base + 1 : file, line, str);
+}
+#endif
+
 // TLS pcb allocator handed to httpc. httpc creates the pcb internally, which
 // would normally leave no hook to set the SNI/verification hostname before
-// the handshake -- so the allocator itself stamps it on the fresh TLS context.
-extern "C" {
+// the handshake -- so the allocator itself stamps it on the fresh TLS context
+// (and, with diagnostics on, the debug callback: conf_dbg lives on the shared
+// mbedtls_ssl_config the shim owns; MBEDTLS_ALLOW_PRIVATE_ACCESS is already
+// required by the shim itself, so reaching ssl->conf is sanctioned here).
 static struct altcp_pcb *ota_tls_alloc(void *arg, u8_t ip_type) {
     OtaCtx *c = (OtaCtx *) arg;
     struct altcp_pcb *pcb = altcp_tls_alloc(c->tls, ip_type);
     if (pcb) {
-        mbedtls_ssl_set_hostname((mbedtls_ssl_context *) altcp_tls_context(pcb), c->host);
+        mbedtls_ssl_context *ssl = (mbedtls_ssl_context *) altcp_tls_context(pcb);
+        mbedtls_ssl_set_hostname(ssl, c->host);
+#if defined(MBEDTLS_DEBUG_C)
+        mbedtls_ssl_conf_dbg((mbedtls_ssl_config *) ssl->conf, ota_mbedtls_dbg, nullptr);
+#endif
     }
     return pcb;
 }
@@ -601,9 +623,18 @@ static bool parse_sha256_hex(const char *s, uint8_t out[32]) {
     ctx->force = force;
     ctx->alloc.alloc = ota_tls_alloc;
     ctx->alloc.arg = ctx;
+#if defined(MBEDTLS_DEBUG_C)
+    // mbedTLS's debug callback is registered by the altcp shim, but the global
+    // verbosity threshold defaults to 0 == silent even for FATAL handshake
+    // errors. 2 = errors + state changes: enough to see where a handshake
+    // stalls or why it aborts, without the level-3/4 hex-dump flood.
+    mbedtls_debug_set_threshold(2);
+#endif
+    printf("[OTA] heap before TLS config: %d bytes used\n", mallinfo().uordblks);
     ctx->tls = altcp_tls_create_config_client(
         (const u8_t *) OTA_CA_ROOTS, sizeof(OTA_CA_ROOTS)); // len INCLUDES the NUL (PEM contract)
     if (!ctx->tls) ota_finish(OTA_RESULT_TLS_INIT_FAILED);
+    printf("[OTA] heap after TLS config: %d bytes used\n", mallinfo().uordblks);
 
     // --- 1) Latest release tag.
     // Stable channel: the /releases/latest redirect -- GitHub defines it as

@@ -47,7 +47,16 @@
 #define MEMP_NUM_TCP_PCB            5   // active conns + a couple lingering TIME_WAIT
 #define MEMP_NUM_TCP_PCB_LISTEN     1   // single httpd listener
 #define MEMP_NUM_PBUF               5
+#ifdef ENABLE_OTA
+// OTA builds carry a TLS download (~1 MB from GitHub's CDN in ~1.4 KB TLS
+// records): the RX path needs enough pool behind the window that a record
+// spanning several segments can sit buffered while mbedTLS reassembles it
+// (HW-observed stall with the 6-buffer pool + 4xMSS window). ~12 * ~640 B =
+// ~7.7 KB bss, paid in every mode -- accounted against the heap cushion.
+#define PBUF_POOL_SIZE              12
+#else
 #define PBUF_POOL_SIZE              6   // ~6 * ~600 B = ~3.5 KB; enough for the page
+#endif
 #define TCP_MSL                     1000  // ms (default 60000); short TIME_WAIT linger
 
 #define LWIP_ARP                    1
@@ -87,7 +96,14 @@
 // the pool costs little BSS. The ~18.5 KB page streams across many small
 // segments; on the local LAN the extra round-trips are invisible.
 #define TCP_MSS                     536
+#ifdef ENABLE_OTA
+// See the PBUF_POOL_SIZE note: the TLS transfer wants window headroom beyond
+// one in-flight ~1.4 KB TLS record plus ack-credit lag. Window is only an
+// advertised number; the actual buffering is the pool above.
+#define TCP_WND                     (8 * TCP_MSS)   // ~4.3 KB receive window
+#else
 #define TCP_WND                     (4 * TCP_MSS)   // ~2.1 KB receive window
+#endif
 #define TCP_SND_BUF                 (3 * TCP_MSS)   // ~1.6 KB; QUEUELEN ~13, fits SEG=14
 #define TCP_SND_QUEUELEN            ((4 * (TCP_SND_BUF) + (TCP_MSS - 1)) / (TCP_MSS))
 #define LWIP_TCP_KEEPALIVE          1
@@ -135,12 +151,23 @@
 // the ssl context it gets in the altcp allocator (MBEDTLS_DEBUG_C).
 #endif
 
+// Runtime counters (NOT LWIP_DEBUG -- that doesn't even compile, see the OTA
+// note above). OTA builds keep pool/heap counters so the updater can print
+// them while diagnosing a stalled transfer (ota.cpp's fetch probe); they cost
+// a few dozen bytes of bss and no cycles on the audio path.
+#ifdef ENABLE_OTA
+#define LWIP_STATS                  1
+#define MEMP_STATS                  1
+#define MEM_STATS                   1
+#define LINK_STATS                  1
+#else
 #define LWIP_STATS                  0
-#define LWIP_STATS_DISPLAY          0
 #define MEM_STATS                   0
-#define SYS_STATS                   0
 #define MEMP_STATS                  0
 #define LINK_STATS                  0
+#endif
+#define LWIP_STATS_DISPLAY          0
+#define SYS_STATS                   0
 
 #define LWIP_CHKSUM_ALGORITHM       3
 

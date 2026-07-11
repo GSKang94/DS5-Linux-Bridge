@@ -40,6 +40,8 @@
 #include "lwip/dns.h"
 #include "lwip/netif.h"
 #include "lwip/pbuf.h"
+#include "lwip/stats.h"          // stall probe: pool exhaustion counters
+#include "lwip/priv/tcp_priv.h"  // stall probe: walk tcp_active_pcbs windows
 
 #include "mbedtls/debug.h"
 #include "mbedtls/sha256.h"
@@ -392,6 +394,29 @@ static void ota_pump() {
     sleep_us(200);
 }
 
+// Transfer stall probe (HW debugging, 2026-07-11): a fetch died mid-TLS-record
+// with zero further RX for 15 s. Two candidate culprits, distinguishable only
+// at runtime: (a) receive-window credit leaked in the altcp_mbedtls shim ->
+// our advertised window collapses (rcv_ann_wnd ~0) and the server can't send;
+// (b) PBUF_POOL starvation at the cyw43 driver -> frames dropped before TCP
+// (pool err counter climbs, windows look open). Printed ~2 Hz while a fetch
+// is in flight.
+static void ota_stall_probe() {
+#if LWIP_STATS && MEMP_STATS
+    const struct stats_mem *pp = lwip_stats.memp[MEMP_PBUF_POOL];
+    printf("[OTA] pool used=%u max=%u err=%u | mem err=%u | link drop=%u",
+           (unsigned) pp->used, (unsigned) pp->max, (unsigned) pp->err,
+           (unsigned) lwip_stats.mem.err, (unsigned) lwip_stats.link.drop);
+#endif
+    for (struct tcp_pcb *pcb = tcp_active_pcbs; pcb; pcb = pcb->next) {
+        printf(" | tcp :%u->%u st=%d rcv_wnd=%u ann=%u snd_wnd=%u unacked=%c",
+               pcb->local_port, pcb->remote_port, (int) pcb->state,
+               (unsigned) pcb->rcv_wnd, (unsigned) pcb->rcv_ann_wnd,
+               (unsigned) pcb->snd_wnd, pcb->unacked ? 'y' : 'n');
+    }
+    printf("\n");
+}
+
 // Split an absolute https URL into ctx->host/path. Rejects http:// -- a
 // plaintext redirect would be a downgrade attack against the firmware path.
 static bool parse_https_url(const char *url, char *host, size_t host_cap,
@@ -446,8 +471,13 @@ static bool ota_fetch(const char *host, const char *path, FetchKind kind,
         }
 
         const absolute_time_t deadline = make_timeout_time_ms(timeout_ms);
+        absolute_time_t next_probe = make_timeout_time_ms(2000);
         while (!ctx->done) {
             ota_pump();
+            if (time_reached(next_probe)) {
+                ota_stall_probe();
+                next_probe = make_timeout_time_ms(2000);
+            }
             if (time_reached(deadline)) {
                 printf("[OTA] fetch timed out\n");
                 // Aborting under httpc is messy; the whole mode has a hard
@@ -626,9 +656,9 @@ static bool parse_sha256_hex(const char *s, uint8_t out[32]) {
 #if defined(MBEDTLS_DEBUG_C)
     // mbedTLS's debug callback is registered by the altcp shim, but the global
     // verbosity threshold defaults to 0 == silent even for FATAL handshake
-    // errors. 2 = errors + state changes: enough to see where a handshake
-    // stalls or why it aborts, without the level-3/4 hex-dump flood.
-    mbedtls_debug_set_threshold(2);
+    // errors. 1 = errors only (a full state trace at 2 already proved the
+    // handshake itself completes; bump back to 2 when chasing handshake bugs).
+    mbedtls_debug_set_threshold(1);
 #endif
     printf("[OTA] heap before TLS config: %d bytes used\n", mallinfo().uordblks);
     ctx->tls = altcp_tls_create_config_client(

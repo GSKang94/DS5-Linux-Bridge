@@ -273,6 +273,14 @@ section.tab>h2:first-child{margin-top:.3rem}
   <label class="lbl">Installed version</label>
   <span id="ota_cur">&mdash;</span>
 </div>
+<div class="field">
+  <label class="lbl">Latest available</label>
+  <span id="ota_avail">checking&hellip;</span>
+</div>
+<div class="field chk">
+  <input type="checkbox" id="ota_beta">
+  <label for="ota_beta">Include pre-releases (beta channel)</label>
+</div>
 <div class="field chk">
   <input type="checkbox" id="ota_force">
   <label for="ota_force">Reinstall even if already on the latest version</label>
@@ -361,7 +369,7 @@ async function load(){
     if(!c.wol_capable&&!c.wake_kbd_capable){$('tabbtn_wake').style.display='none';}
     // OTA: Pico W (2MB flash) and custom no-OTA builds can't self-update.
     if(!c.ota_capable){$('tabbtn_update').style.display='none';}
-    else{$('ota_cur').textContent=c.version;otaShowLast();}
+    else{$('ota_cur').textContent=c.version;otaShowLast();otaCheckLatest(c.ota_repo);}
     // Re-apply the selected tab now that hidden buttons are known (a deep-link
     // to a now-hidden tab falls back to Controller).
     showTab(location.hash.slice(1)||'main');
@@ -425,6 +433,41 @@ async function otaShowLast(){
   }catch(e){}
 }
 
+// "Update available" check, done by the BROWSER against api.github.com
+// (CORS-open; the browser does the TLS — the adapter never does any in
+// normal mode). Purely informational: the adapter re-resolves and
+// checksum-verifies everything itself at install time. The beta checkbox
+// picks between newest-stable and newest-including-prereleases, mirroring
+// which release the updater will install (persisted in localStorage only —
+// it's a per-browser display preference plus a per-request flag).
+window.otaRel={stable:null,beta:null};
+function otaAvailText(){
+  const beta=$('ota_beta').checked;
+  const r=beta?(window.otaRel.beta||window.otaRel.stable):window.otaRel.stable;
+  const cur=$('ota_cur').textContent;
+  if(!r){$('ota_avail').textContent='unknown (couldn’t reach GitHub from this browser)';return}
+  const label=r.tag+(r.pre?' (pre-release)':'');
+  if(r.tag===cur){$('ota_avail').textContent=label+' — up to date ✓';}
+  else{$('ota_avail').innerHTML='';
+    const b=document.createElement('b');b.textContent=label+' — update available';
+    $('ota_avail').appendChild(b);}
+}
+async function otaCheckLatest(repo){
+  try{
+    const rels=await (await fetch('https://api.github.com/repos/'+repo+'/releases?per_page=15')).json();
+    if(Array.isArray(rels)){
+      for(const r of rels){
+        if(r.draft)continue;
+        if(!window.otaRel.beta)window.otaRel.beta={tag:r.tag_name,pre:r.prerelease};
+        if(!r.prerelease&&!window.otaRel.stable){window.otaRel.stable={tag:r.tag_name,pre:false};break}
+      }
+    }
+  }catch(e){}
+  otaAvailText();
+}
+$('ota_beta').checked=localStorage.getItem('ota_beta')==='1';
+$('ota_beta').onchange=()=>{localStorage.setItem('ota_beta',$('ota_beta').checked?'1':'0');otaAvailText()};
+
 async function otaPoll(){
   try{
     const d=await (await fetch('/api/ota/status',{cache:'no-store'})).json();
@@ -450,8 +493,9 @@ async function otaPoll(){
 }
 
 $('ota_go').onclick=async()=>{
-  if(!confirm('Install the latest release from GitHub?\nThe adapter goes offline for about a minute. Do NOT unplug it while the status shows "installing".'))return;
-  const body='force='+($('ota_force').checked?1:0);
+  const ch=$('ota_beta').checked?'latest release INCLUDING pre-releases':'latest stable release';
+  if(!confirm('Install the '+ch+' from GitHub?\nThe adapter goes offline for about a minute. Do NOT unplug it while the status shows "installing".'))return;
+  const body='force='+($('ota_force').checked?1:0)+'&beta='+($('ota_beta').checked?1:0);
   try{
     const r=await fetch('/api/ota/start',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});
     if(!r.ok){ostatus('failed to start','err');return;}

@@ -64,8 +64,11 @@ enum OtaResult : uint32_t {
 
 // Arm the OTA request flag and schedule a reboot ~1.2 s out (so the HTTP
 // response reaches the browser first). `force` reinstalls even when the
-// latest tag matches the running version.
-void ota_request_and_reboot(bool force);
+// latest tag matches the running version. `beta` switches the release
+// channel: stable resolves via the releases/latest redirect (which GitHub
+// defines as the newest NON-prerelease), beta via the releases.atom feed
+// (whose first entry is the newest release INCLUDING prereleases).
+void ota_request_and_reboot(bool force, bool beta);
 
 // Read + clear the persisted result of the last OTA attempt. Call once early
 // in a NORMAL boot; thereafter ota_last_result()/ota_result_str() serve it.

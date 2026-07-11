@@ -190,8 +190,15 @@ static int json_config(char *out, size_t cap) {
                     "\"wol_capable\":true,"
                     // OTA from GitHub Releases (the page hides the Updates
                     // section when false: Pico W / custom no-OTA builds).
+                    // ota_repo lets the page query api.github.com DIRECTLY
+                    // (CORS-open) for "update available" display -- the
+                    // browser does that TLS, the firmware never does any in
+                    // normal mode. The dongle-side updater independently
+                    // re-resolves the tag at install time; the browser check
+                    // is cosmetic, never trusted.
 #ifdef ENABLE_OTA
                     "\"ota_capable\":true,"
+                    "\"ota_repo\":\"" OTA_REPO "\","
 #else
                     "\"ota_capable\":false,"
 #endif
@@ -965,10 +972,12 @@ extern "C" void httpd_post_finished(void *connection, char *response_uri, u16_t 
 #endif
 #ifdef ENABLE_OTA
         case POST_OTA_START:
-            // body: "force=1" reinstalls even when already on the latest tag.
+            // body: "force=1" reinstalls even when already on the latest tag;
+            // "beta=1" resolves the newest release INCLUDING prereleases.
             // The version check itself happens IN OTA mode (the normal runtime
             // has no heap for TLS) -- this just arms the request + reboots.
-            ota_request_and_reboot(strstr(post_buf, "force=1") != nullptr);
+            ota_request_and_reboot(strstr(post_buf, "force=1") != nullptr,
+                                   strstr(post_buf, "beta=1") != nullptr);
             snprintf(response_uri, response_uri_len, "/api/ota/start_result");
             break;
 #endif

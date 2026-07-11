@@ -85,6 +85,7 @@ static constexpr uint32_t OTA_MIN_IMAGE = 512u * 1024u;
 static constexpr uint32_t OTA_MAGIC_MASK = 0xFFFFFF00u;
 static constexpr uint32_t OTA_BOOT_MAGIC = 0x07A5EB00u;
 static constexpr uint32_t OTA_BOOT_FLAG_FORCE = 0x1u;
+static constexpr uint32_t OTA_BOOT_FLAG_BETA = 0x2u;
 static constexpr uint32_t OTA_RESULT_MAGIC = 0x07A5EC00u;
 
 static uint32_t captured_result = OTA_RESULT_NONE;
@@ -127,12 +128,14 @@ static int64_t ota_reboot_alarm(alarm_id_t, void *) {
     return 0;
 }
 
-void ota_request_and_reboot(bool force) {
-    watchdog_hw->scratch[2] = OTA_BOOT_MAGIC | (force ? OTA_BOOT_FLAG_FORCE : 0);
+void ota_request_and_reboot(bool force, bool beta) {
+    watchdog_hw->scratch[2] = OTA_BOOT_MAGIC | (force ? OTA_BOOT_FLAG_FORCE : 0) |
+                              (beta ? OTA_BOOT_FLAG_BETA : 0);
     // Deferred so the HTTP response flushes to the browser first (same delay
     // wifi_net.cpp uses for its provision/reset reboots).
     add_alarm_in_ms(1200, ota_reboot_alarm, nullptr, true);
-    printf("[OTA] update requested (force=%d), rebooting into OTA mode\n", force ? 1 : 0);
+    printf("[OTA] update requested (force=%d beta=%d), rebooting into OTA mode\n",
+           force ? 1 : 0, beta ? 1 : 0);
 }
 
 //--------------------------------------------------------------------+
@@ -194,8 +197,11 @@ struct OtaCtx {
     char nhost[OTA_HOST_MAX];
     char npath[OTA_PATH_MAX];
 
-    // SMALL-body accumulator (.sha256 file is ~80 bytes)
-    char small_body[256];
+    // SMALL-body accumulator. Sized for the beta channel's releases.atom
+    // scan: the first <entry> (= newest release, prereleases included) sits
+    // within the first few KB of the feed. The .sha256 file (~80 B) uses a
+    // sliver of it.
+    char small_body[4096];
     uint32_t small_len;
 
     // BIN streaming: one flash sector accumulated in RAM, then erase+program.
@@ -506,11 +512,12 @@ static bool parse_sha256_hex(const char *s, uint8_t out[32]) {
 [[noreturn]] void ota_mode_main() {
     mode_active = true;
     const bool force = (watchdog_hw->scratch[2] & OTA_BOOT_FLAG_FORCE) != 0;
+    const bool beta = (watchdog_hw->scratch[2] & OTA_BOOT_FLAG_BETA) != 0;
     watchdog_hw->scratch[2] = 0; // one attempt per request (see scratch notes)
 
-    printf("[OTA] === OTA boot mode (current %s, repo %s, asset %s%s) ===\n",
+    printf("[OTA] === OTA boot mode (current %s, repo %s, asset %s, channel %s%s) ===\n",
            PICO_PROGRAM_VERSION_STRING, OTA_REPO, OTA_ASSET_NAME,
-           force ? ", FORCED" : "");
+           beta ? "beta" : "stable", force ? ", FORCED" : "");
 
     // Hardware watchdog: hang anywhere (TLS stall, DNS blackhole, lwIP wedge)
     // -> reset; scratch[2] is already cleared, so that reset lands in NORMAL
@@ -598,22 +605,46 @@ static bool parse_sha256_hex(const char *s, uint8_t out[32]) {
         (const u8_t *) OTA_CA_ROOTS, sizeof(OTA_CA_ROOTS)); // len INCLUDES the NUL (PEM contract)
     if (!ctx->tls) ota_finish(OTA_RESULT_TLS_INIT_FAILED);
 
-    // --- 1) Latest release tag: Location of the /releases/latest redirect.
+    // --- 1) Latest release tag.
+    // Stable channel: the /releases/latest redirect -- GitHub defines it as
+    // the newest NON-prerelease, so betas are invisible to it by design.
+    // Beta channel: the releases.atom feed -- its first entry is the newest
+    // release INCLUDING prereleases; scan the first buffer-full for the first
+    // "/releases/tag/<tag>" link. (Caveat: lwIP's httpc does not de-chunk
+    // HTTP/1.1 chunked bodies; a chunk boundary could in principle split the
+    // token. The token sits within the first entry near the head of the feed,
+    // so in practice one contiguous window covers it.)
     status_state = "check";
     char path[128];
-    snprintf(path, sizeof(path), "/%s/releases/latest", OTA_REPO);
-    if (!ota_fetch("github.com", path, FetchKind::CHECK, 60000, 0) ||
-        !ctx->redirect_seen) {
-        ota_finish(OTA_RESULT_CHECK_FAILED);
-    }
-    {
+    if (beta) {
+        snprintf(path, sizeof(path), "/%s/releases.atom", OTA_REPO);
+        if (!ota_fetch("github.com", path, FetchKind::SMALL, 60000, 2)) {
+            ota_finish(OTA_RESULT_CHECK_FAILED);
+        }
+        const char *tagseg = strstr(ctx->small_body, "/releases/tag/");
+        if (!tagseg) ota_finish(OTA_RESULT_CHECK_FAILED);
+        tagseg += strlen("/releases/tag/");
+        size_t n = 0;
+        while (n < sizeof(ctx->tag) - 1 && tagseg[n] && tagseg[n] != '"' &&
+               tagseg[n] != '<' && tagseg[n] != '&') {
+            n++;
+        }
+        memcpy(ctx->tag, tagseg, n);
+        ctx->tag[n] = '\0';
+        if (n == 0) ota_finish(OTA_RESULT_CHECK_FAILED);
+    } else {
+        snprintf(path, sizeof(path), "/%s/releases/latest", OTA_REPO);
+        if (!ota_fetch("github.com", path, FetchKind::CHECK, 60000, 0) ||
+            !ctx->redirect_seen) {
+            ota_finish(OTA_RESULT_CHECK_FAILED);
+        }
         // ...releases/tag/<tag>. No /tag/ segment means no release exists yet.
         const char *tagseg = strstr(ctx->redirect_url, "/releases/tag/");
         if (!tagseg) ota_finish(OTA_RESULT_CHECK_FAILED);
         snprintf(ctx->tag, sizeof(ctx->tag), "%s", tagseg + strlen("/releases/tag/"));
-        snprintf(status_tag, sizeof(status_tag), "%s", ctx->tag);
     }
-    printf("[OTA] latest release: %s\n", ctx->tag);
+    snprintf(status_tag, sizeof(status_tag), "%s", ctx->tag);
+    printf("[OTA] latest %s release: %s\n", beta ? "beta-channel" : "stable", ctx->tag);
     if (!ctx->force && strcmp(ctx->tag, PICO_PROGRAM_VERSION_STRING) == 0) {
         ota_finish(OTA_RESULT_ALREADY_CURRENT);
     }

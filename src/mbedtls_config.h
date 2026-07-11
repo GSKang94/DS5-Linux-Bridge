@@ -79,6 +79,13 @@
 #define MBEDTLS_SHA256_C  // TLS 1.2 PRF, cert sigs, and the firmware image hash
 #define MBEDTLS_SHA384_C  // Sectigo E46 chain signs with ECDSA-SHA384
 #define MBEDTLS_SHA512_C  // prerequisite of SHA384 in mbedTLS 3.x
+// PARSE-only need (HW-observed 2026-07-11): DigiCert Global Root CA (2006) is
+// self-signed with SHA-1; without SHA1_C its signature OID doesn't map and
+// mbedtls_x509_crt_parse counts it as a failed cert -- and the SDK's
+// altcp_tls_create_config_client treats ANY failed cert in the bundle as
+// fatal (returns NULL -> "TLS init failed"). Root SELF-signatures are never
+// cryptographically verified, so this buys OID recognition, not SHA-1 trust.
+#define MBEDTLS_SHA1_C
 
 // --- Key exchange / signature crypto ---------------------------------------
 #define MBEDTLS_BIGNUM_C

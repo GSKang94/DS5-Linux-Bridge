@@ -28,6 +28,39 @@ source and debugging, see the [README](../README.md).
 3. Drag and drop the compiled `.uf2` firmware onto that volume. The board
    reboots into the firmware automatically.
 
+Once the adapter is on your WiFi, later releases can be installed without a
+PC at all — see [Updating over WiFi](#updating-over-wifi-ota).
+
+---
+
+## Updating over WiFi (OTA)
+
+After the first flash, the adapter can update itself straight from this
+project's GitHub Releases:
+
+1. Open the config page (`http://ds5.local`) → **Update** tab.
+2. Click **Install latest**. The adapter goes offline, downloads the newest
+   release for its board over HTTPS, verifies its checksum, installs it and
+   reboots — about a minute in total. The page shows live progress
+   (downloading / verifying / installing).
+3. Settings, WiFi credentials and paired controllers are all kept.
+
+Safety properties worth knowing:
+
+* The download goes to a spare region of flash; the running firmware is not
+  touched until the checksum has been verified. A failed download, WiFi
+  hiccup or bad checksum changes **nothing** — the adapter just reboots back
+  and reports why in the Update tab.
+* The only critical moment is the final **installing** step (~15 s). If power
+  is lost exactly then, the adapter won't boot — recover by flashing a `.uf2`
+  over USB (BOOTSEL), which always works. So: don't unplug while the status
+  says *installing*.
+* **Pico W (RP2040) boards cannot use OTA** — their 2 MB flash can't hold the
+  staged second image. Pico 2 W and the Waveshare board are supported, each
+  installing its own board's release asset.
+* The debug/verbose firmware updates onto the *standard* image for the board;
+  reflash the debug `.uf2` manually if you need verbose logs again.
+
 ---
 
 ## First-time WiFi setup

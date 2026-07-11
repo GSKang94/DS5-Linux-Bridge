@@ -19,6 +19,7 @@
 
 #include "config.h"
 #include "dse.h"
+#include "ota.h"
 #include "tier.h"
 #include "weblog.h"
 #include "wifi_net.h"
@@ -577,6 +578,21 @@ int main() {
   // stored WiFi credentials (STA vs AP onboarding) and the mDNS hostname, so
   // the saved values must be in place first.
   config_load();
+
+#ifdef ENABLE_OTA
+  // OTA boot mode: the web UI armed a watchdog-scratch flag and rebooted.
+  // Divert HERE -- after cyw43/config are up but BEFORE BT/audio/USB ever
+  // start -- into the stripped updater (same skip-everything pattern as AP
+  // onboarding below): heap stays free for TLS, core1 is never launched so
+  // flash writes need no lockout, and the radio has no audio to contend
+  // with. Never returns; every path ends in a reset. See ota.h.
+  if (ota_boot_pending()) {
+    ota_mode_main();
+  }
+  // Normal boot: latch the result of any just-finished OTA attempt so the
+  // web UI can report it (/api/ota/status).
+  ota_boot_capture_result();
+#endif
 
   // Attach the /api/log stdio mirror per the persisted toggle. Prints between
   // board_init() and here are not captured when enabling -- acceptable: the

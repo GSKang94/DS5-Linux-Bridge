@@ -70,6 +70,7 @@ section.tab>h2:first-child{margin-top:.3rem}
   <button data-tab="bonds">Paired</button>
   <button data-tab="net" id="tabbtn_net">Network</button>
   <button data-tab="wake" id="tabbtn_wake">Wake / WOL</button>
+  <button data-tab="update" id="tabbtn_update">Update</button>
 </nav>
 
 <section id="tab-main" class="tab active">
@@ -259,6 +260,30 @@ section.tab>h2:first-child{margin-top:.3rem}
 </div>
 </section>
 
+<section id="tab-update" class="tab">
+<h2>Firmware update</h2>
+<div class="hint">Installs the latest release for this board straight from GitHub.
+  The adapter reboots into a small updater, is offline for about a minute, then
+  comes back on the new version. Settings, WiFi and paired controllers are kept.
+  If anything fails (network, download, checksum) nothing is changed and it
+  reboots back unchanged. <b>Do not unplug</b> while the status shows
+  &ldquo;installing&rdquo; &mdash; interrupting that step requires reflashing over
+  USB (hold BOOTSEL while plugging in, copy the release .uf2).</div>
+<div class="field">
+  <label class="lbl">Installed version</label>
+  <span id="ota_cur">&mdash;</span>
+</div>
+<div class="field chk">
+  <input type="checkbox" id="ota_force">
+  <label for="ota_force">Reinstall even if already on the latest version</label>
+</div>
+<div class="btns">
+  <button id="ota_go">Install latest</button>
+  <span id="otstatus"></span>
+</div>
+<div class="hint" id="ota_last" style="display:none"></div>
+</section>
+
 <script>
 const $=id=>document.getElementById(id);
 function setStatus(msg,cls){const s=$('status');s.className=cls||'';s.textContent=msg}
@@ -334,6 +359,9 @@ async function load(){
     // Hide a tab's nav button when the whole tab is empty on this firmware.
     if(!c.wol_capable){$('tabbtn_net').style.display='none';}
     if(!c.wol_capable&&!c.wake_kbd_capable){$('tabbtn_wake').style.display='none';}
+    // OTA: Pico W (2MB flash) and custom no-OTA builds can't self-update.
+    if(!c.ota_capable){$('tabbtn_update').style.display='none';}
+    else{$('ota_cur').textContent=c.version;otaShowLast();}
     // Re-apply the selected tab now that hidden buttons are known (a deep-link
     // to a now-hidden tab falls back to Controller).
     showTab(location.hash.slice(1)||'main');
@@ -377,6 +405,62 @@ async function factoryReset(){
   }catch(e){setStatus('reset failed','err')}
 }
 $('factoryreset').onclick=factoryReset;
+
+// ----- Firmware update (OTA from GitHub Releases) -----
+function ostatus(msg,cls){const s=$('otstatus');s.className=cls||'';s.textContent=msg}
+const OTA_STATES={wifi:'joining WiFi…',check:'checking latest release…',
+  sha:'fetching checksum…',download:'downloading…',verify:'verifying…',
+  apply:'installing — DO NOT unplug!'};
+let otaTimer=null;
+
+// Shown on page load: outcome of the most recent update attempt, if any
+// (persisted across the reboot back; cleared by power-off).
+async function otaShowLast(){
+  try{
+    const d=await (await fetch('/api/ota/status')).json();
+    if(d.mode==='idle'&&d.last_result>0){
+      const el=$('ota_last');el.style.display='';
+      el.textContent='Last update attempt: '+d.last_result_str;
+    }
+  }catch(e){}
+}
+
+async function otaPoll(){
+  try{
+    const d=await (await fetch('/api/ota/status',{cache:'no-store'})).json();
+    if(d.mode==='updating'){
+      let msg=OTA_STATES[d.state]||d.state;
+      if(d.state==='download'&&d.total>0)
+        msg+=' '+Math.round(100*d.bytes/d.total)+'%';
+      if(d.tag)msg+=' ('+d.tag+')';
+      ostatus(msg,'dirty');
+    }else{
+      // Back in normal mode: the attempt finished (either the new firmware
+      // booted, or the old one is reporting why it didn't change).
+      clearInterval(otaTimer);otaTimer=null;
+      $('ota_go').disabled=false;
+      $('ota_cur').textContent=d.version;
+      const ok=(d.last_result===1||d.last_result===2);
+      ostatus(d.last_result_str+' — now on '+d.version,ok?'ok':'err');
+    }
+  }catch(e){
+    // Expected while the adapter reboots (twice) around the update.
+    ostatus('adapter offline (rebooting)…','dirty');
+  }
+}
+
+$('ota_go').onclick=async()=>{
+  if(!confirm('Install the latest release from GitHub?\nThe adapter goes offline for about a minute. Do NOT unplug it while the status shows "installing".'))return;
+  const body='force='+($('ota_force').checked?1:0);
+  try{
+    const r=await fetch('/api/ota/start',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});
+    if(!r.ok){ostatus('failed to start','err');return;}
+    $('ota_go').disabled=true;
+    ostatus('rebooting into updater…','dirty');
+    // First polls will fail while it reboots; the poll handler shows that.
+    otaTimer=setInterval(otaPoll,2000);
+  }catch(e){ostatus('failed to start','err')}
+};
 
 // ----- Paired controllers -----
 function fmtAddr(h){return h.match(/.{2}/g).join(':')}

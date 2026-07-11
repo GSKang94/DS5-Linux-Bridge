@@ -22,6 +22,7 @@
 
 #include "bt.h"
 #include "config.h"
+#include "ota.h" // OTA-mode gating + /api/ota/* routes (ENABLE_OTA)
 #include "usb.h" // usb_request_wake_kbd(): live-apply the wake-kbd toggle
 #include "web_api.h"
 #include "web_page.h"
@@ -187,6 +188,13 @@ static int json_config(char *out, size_t cap) {
                     // The web UI only exists on the WiFi transport now, so a
                     // served page always has WOL + WiFi controls available.
                     "\"wol_capable\":true,"
+                    // OTA from GitHub Releases (the page hides the Updates
+                    // section when false: Pico W / custom no-OTA builds).
+#ifdef ENABLE_OTA
+                    "\"ota_capable\":true,"
+#else
+                    "\"ota_capable\":false,"
+#endif
                     "\"wifi_capable\":true}",
                     PICO_PROGRAM_VERSION_STRING,
                     c.inactive_time,
@@ -349,7 +357,49 @@ static int json_resolve_mac(char *out, size_t cap) {
     return snprintf(out, cap, "{\"pending\":false,\"ok\":false}");
 }
 
+#ifdef ENABLE_OTA
+// GET /api/ota/status -- served in BOTH modes. During an update (OTA boot
+// mode) it is the ONLY live route and carries the phase + byte progress;
+// in normal mode it reports the persisted result of the last attempt so the
+// page can show "updated to vX" / "checksum mismatch" after the reboot.
+static int json_ota_status(char *out, size_t cap) {
+    if (ota_mode_active()) {
+        OtaStatus s;
+        ota_get_status(&s);
+        return snprintf(out, cap,
+                        "{\"mode\":\"updating\",\"state\":\"%s\","
+                        "\"bytes\":%lu,\"total\":%lu,\"tag\":\"%s\"}",
+                        s.state, (unsigned long) s.bytes, (unsigned long) s.total,
+                        s.tag);
+    }
+    return snprintf(out, cap,
+                    "{\"mode\":\"idle\",\"last_result\":%lu,"
+                    "\"last_result_str\":\"%s\",\"version\":\"%s\","
+                    "\"asset\":\"%s\"}",
+                    (unsigned long) ota_last_result(),
+                    ota_result_str(ota_last_result()),
+                    PICO_PROGRAM_VERSION_STRING, OTA_ASSET_NAME);
+}
+#endif
+
 extern "C" int fs_open_custom(struct fs_file *file, const char *name) {
+#ifdef ENABLE_OTA
+    // OTA boot mode: BT/audio/USB state does not exist, so every route that
+    // touches it must be unreachable. Serve ONLY the progress endpoint (the
+    // config page that triggered the update keeps polling it); everything
+    // else -- including "/" -- answers 503 until the device resets out of
+    // OTA mode (~1 min).
+    if (ota_mode_active()) {
+        if (strcmp(name, "/api/ota/status") == 0) {
+            static char obody[192];
+            const int len = json_ota_status(obody, sizeof(obody));
+            return make_file(file, "200 OK", "application/json", obody, len);
+        }
+        static const char busy[] = "firmware update in progress";
+        return make_file(file, "503 Service Unavailable", "text/plain", busy,
+                         sizeof(busy) - 1);
+    }
+#endif
 #ifdef ENABLE_WIFI_WOL
     // Onboarding mode: serve the captive portal for essentially every GET.
     if (wifi_net_in_ap_mode()) {
@@ -434,6 +484,18 @@ extern "C" int fs_open_custom(struct fs_file *file, const char *name) {
         const int len = json_resolve_mac(body, sizeof(body));
         return make_file(file, "200 OK", "application/json", body, len);
     }
+#ifdef ENABLE_OTA
+    if (strcmp(name, "/api/ota/status") == 0) {
+        const int len = json_ota_status(body, sizeof(body));
+        return make_file(file, "200 OK", "application/json", body, len);
+    }
+    // Synthetic reply for POST /api/ota/start: the request was accepted and
+    // the device reboots into OTA mode ~1.2 s after this response flushes.
+    if (strcmp(name, "/api/ota/start_result") == 0) {
+        static const char ok[] = "{\"ok\":true}";
+        return make_file(file, "200 OK", "application/json", ok, sizeof(ok) - 1);
+    }
+#endif
     if (strcmp(name, "/api/log") == 0) {
         // Diagnostic log (RAM-only stdio mirror; see weblog.h). text/plain so
         // it renders directly in a browser tab for copy-paste bug reports.
@@ -525,7 +587,8 @@ enum PostTarget {
     POST_WOL,
     POST_RESOLVE_MAC,
     POST_WIFI_PROVISION,
-    POST_WIFI_RESET
+    POST_WIFI_RESET,
+    POST_OTA_START
 };
 static PostTarget post_target;
 
@@ -809,6 +872,10 @@ extern "C" err_t httpd_post_begin(void *connection, const char *uri, const char 
     (void) response_uri;
     (void) response_uri_len;
     (void) post_auto_wnd;
+#ifdef ENABLE_OTA
+    // OTA boot mode is read-only: /api/ota/status is the only route alive.
+    if (ota_mode_active()) return ERR_VAL;
+#endif
     PostTarget t;
     if (strcmp(uri, "/api/config") == 0)      t = POST_CONFIG;
     else if (strcmp(uri, "/api/bonds") == 0)  t = POST_BONDS;
@@ -817,6 +884,9 @@ extern "C" err_t httpd_post_begin(void *connection, const char *uri, const char 
 #ifdef ENABLE_WIFI_WOL
     else if (strcmp(uri, "/api/wifi_provision") == 0) t = POST_WIFI_PROVISION;
     else if (strcmp(uri, "/api/wifi_reset") == 0) t = POST_WIFI_RESET;
+#endif
+#ifdef ENABLE_OTA
+    else if (strcmp(uri, "/api/ota/start") == 0) t = POST_OTA_START;
 #endif
     else return ERR_VAL;
 #ifdef ENABLE_WIFI_WOL
@@ -832,6 +902,9 @@ extern "C" err_t httpd_post_begin(void *connection, const char *uri, const char 
     if (post_conn) return ERR_USE; // one POST at a time
     post_conn = connection;
     post_pos = 0;
+    // Terminate now: a body-less POST never runs httpd_post_receive_data, and
+    // the finished handler must not strstr() a previous request's leftovers.
+    post_buf[0] = 0;
     post_target = t;
     post_content_len = content_len; // -1 when the client sent no Content-Length
     return ERR_OK;
@@ -888,6 +961,15 @@ extern "C" void httpd_post_finished(void *connection, char *response_uri, u16_t 
         case POST_WIFI_RESET:
             apply_wifi_reset_post();
             snprintf(response_uri, response_uri_len, "/api/wifi_reset_result");
+            break;
+#endif
+#ifdef ENABLE_OTA
+        case POST_OTA_START:
+            // body: "force=1" reinstalls even when already on the latest tag.
+            // The version check itself happens IN OTA mode (the normal runtime
+            // has no heap for TLS) -- this just arms the request + reboots.
+            ota_request_and_reboot(strstr(post_buf, "force=1") != nullptr);
+            snprintf(response_uri, response_uri_len, "/api/ota/start_result");
             break;
 #endif
         case POST_CONFIG:

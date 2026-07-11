@@ -29,7 +29,18 @@
 // full MTU; a small pool means we drop the occasional large inbound frame under
 // load (TCP retransmits) -- an acceptable trade vs OOM. Keep DHCP/mDNS sized
 // via the LAN-client block below.
+#ifdef ENABLE_OTA
+// OTA builds need a slightly larger lwIP arena: the HTTP client (lwIP httpc,
+// used by src/ota.cpp to pull firmware from GitHub) builds each request --
+// headers plus the URI -- in a single PBUF_RAM from this arena, and GitHub's
+// signed redirect URLs to objects.githubusercontent.com run ~600-1000 chars.
+// +2 KB of bss is paid in EVERY mode (the arena is static), but the normal
+// runtime's cushion absorbs it; sized so a ~1.5 KB request pbuf plus the
+// normal httpd traffic can't exhaust the arena mid-download.
+#define MEM_SIZE                    4400
+#else
 #define MEM_SIZE                    2400  // lwIP heap (bss). Small: not a bulk path.
+#endif
 #define MEMP_NUM_TCP_SEG            14  // must be >= TCP_SND_QUEUELEN (see below)
 #define MEMP_NUM_ARP_QUEUE          2
 #define MEMP_NUM_UDP_PCB            3
@@ -106,6 +117,18 @@
 #define LWIP_HTTPD_SSI              0
 #define LWIP_HTTPD_CGI              0
 #define HTTPD_FSDATA_FILE           "pico_fsdata.inc"
+
+// GitHub OTA (src/ota.cpp): TLS client over lwIP's altcp framework. ALTCP
+// wraps every TCP pcb behind an indirection layer (httpd's plain-TCP listener
+// included -- functionally identical, one extra pointer hop per call); the
+// TLS flavor plugs mbedTLS in as an altcp layer, which is what the lwIP HTTP
+// client uses to speak https to github.com / objects.githubusercontent.com.
+// Only ENABLE_OTA builds pay for any of this.
+#ifdef ENABLE_OTA
+#define LWIP_ALTCP                  1
+#define LWIP_ALTCP_TLS              1
+#define LWIP_ALTCP_TLS_MBEDTLS      1
+#endif
 
 #define LWIP_STATS                  0
 #define LWIP_STATS_DISPLAY          0

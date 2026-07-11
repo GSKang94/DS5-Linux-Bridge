@@ -98,6 +98,14 @@ jobs:
           cmake --build build/standard --target ds5-bridge
           mkdir -p artifacts
           cp build/standard/ds5-bridge.uf2 "artifacts/ds5-bridge-${{ github.event.release.tag_name }}.uf2"
+          # OTA assets: STABLE names (no tag) -- the dongle downloads
+          # releases/download/<tag>/ds5-bridge-ota.bin{,.sha256} and its
+          # compiled-in asset name must match every future release. The .bin is
+          # the raw image (half the UF2's size; no UF2 framing to parse on
+          # device); the .sha256 is what the dongle verifies the staged flash
+          # against before committing the update (src/ota.cpp).
+          cp build/standard/ds5-bridge.bin artifacts/ds5-bridge-ota.bin
+          (cd artifacts && sha256sum ds5-bridge-ota.bin > ds5-bridge-ota.bin.sha256)
 
       - name: Build verbose-diagnostics firmware
         # Verbose UART logging (GP0 TX, 115200 8N1). No USB serial -- diagnostics
@@ -122,6 +130,9 @@ jobs:
             -DVERSION="$FIRMWARE_VERSION"
           cmake --build build/waveshare --target ds5-bridge
           cp build/waveshare/ds5-bridge.uf2 "artifacts/ds5-bridge-waveshare-${{ github.event.release.tag_name }}.uf2"
+          # Stable-named OTA assets for the Waveshare board (see standard build).
+          cp build/waveshare/ds5-bridge.bin artifacts/ds5-bridge-waveshare-ota.bin
+          (cd artifacts && sha256sum ds5-bridge-waveshare-ota.bin > ds5-bridge-waveshare-ota.bin.sha256)
 
       - name: Build Pico W firmware
         # Original RP2040 Pico W. Same WiFi/BT feature set on the CYW43 radio; a
@@ -135,8 +146,11 @@ jobs:
           cmake --build build/picow --target ds5-bridge
           cp build/picow/ds5-bridge.uf2 "artifacts/ds5-bridge-picow-${{ github.event.release.tag_name }}.uf2"
 
-      - name: Upload UF2 files to release
+      - name: Upload firmware files to release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" artifacts/*.uf2 --clobber
+          # UF2s for humans (BOOTSEL drag-and-drop), stable-named .bin +
+          # .sha256 for the on-device OTA client.
+          gh release upload "${{ github.event.release.tag_name }}" \
+            artifacts/*.uf2 artifacts/*.bin artifacts/*.sha256 --clobber

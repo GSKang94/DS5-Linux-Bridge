@@ -74,6 +74,26 @@ message(STATUS "DS5-Linux-Bridge build target -- WAVESHARE_RP2350B_PLUS_W_BUILD=
 # audio-contention notes. Turning this OFF leaves NO config UI (settings keep
 # their flash values); it exists for a zero-WiFi minimal build only.
 option(ENABLE_WIFI_WOL "Serve the config page + send Wake-on-LAN over the onboard CYW43 Wi-Fi (STA mode)" ON)
+# Over-the-air updates from GitHub Releases (src/ota.cpp). The dongle reboots
+# into a dedicated OTA mode (BT/audio never initialised -> heap free for TLS,
+# core1 never launched -> flash writes need no lockout), pulls the release
+# .bin over HTTPS (pinned CA roots, ota_certs.h), stages it at +2 MB, verifies
+# the release's SHA-256, then a RAM-resident stub copies staging over the live
+# image and resets. Requires the WiFi transport, and a flash big enough to
+# hold TWO images (staging sits at 2 MB): the 2 MB Pico W is excluded.
+option(ENABLE_OTA "Firmware updates over WiFi from GitHub Releases" ON)
+# Which GitHub repo's Releases feed OTA. Version discovery + downloads use the
+# public web endpoints (releases/latest redirect + releases/download/...), so
+# no API tokens and no rate-limit concerns.
+set(OTA_REPO "kungaa/DS5-Linux-Bridge" CACHE STRING "GitHub owner/repo whose Releases serve OTA firmware")
+if (ENABLE_OTA AND NOT ENABLE_WIFI_WOL)
+    message(STATUS "ENABLE_OTA forced OFF: requires the WiFi transport (ENABLE_WIFI_WOL)")
+    set(ENABLE_OTA OFF)
+endif ()
+if (ENABLE_OTA AND PICO_W_BUILD)
+    message(STATUS "ENABLE_OTA forced OFF: Pico W's 2 MB flash cannot hold a staged second image")
+    set(ENABLE_OTA OFF)
+endif ()
 # Concurrent controller slots. 1 = single-controller firmware (original
 # behavior); 2-4 = the MULTI descriptor variant + per-slot BT connections
 # become available (audio streams only while exactly one pad is connected --
@@ -197,6 +217,39 @@ if (ENABLE_WIFI_WOL)
             pico_lwip_nosys
             pico_lwip_http
             pico_lwip_mdns
+    )
+endif ()
+
+# GitHub OTA client (see the ENABLE_OTA option above for the design summary).
+# Which release asset this board installs -- MUST match the stable-named .bin
+# the release workflow attaches (see .github/workflows/release.yml). The
+# board is the only differentiator: a verbose-debug user OTA-updates onto the
+# standard image for their board.
+if (ENABLE_OTA)
+    if (WAVESHARE_RP2350B_PLUS_W_BUILD)
+        set(OTA_ASSET_NAME "ds5-bridge-waveshare-ota.bin")
+    else ()
+        set(OTA_ASSET_NAME "ds5-bridge-ota.bin")
+    endif ()
+    target_sources(ds5-bridge PRIVATE src/ota.cpp)
+    # mbedTLS config: the SDK's pico_mbedtls_headers sets
+    # MBEDTLS_CONFIG_FILE="pico_mbedtls_config.h", whose wrapper does
+    # #include "mbedtls_config.h" -- resolved to src/mbedtls_config.h via this
+    # target's include path (our minimal TLS-1.2-client config). Do NOT set
+    # MBEDTLS_CONFIG_FILE here: it collides with the SDK's own define.
+    target_compile_definitions(ds5-bridge PRIVATE
+            ENABLE_OTA
+            OTA_REPO=\"${OTA_REPO}\"
+            OTA_ASSET_NAME=\"${OTA_ASSET_NAME}\"
+            # Core0 stack 2 KB -> 4 KB: the mbedTLS 1.2 handshake (ECDSA
+            # P-384 verify of the Sectigo chain in particular) runs deeper
+            # than the SDK default stack. Costs the normal runtime 2 KB of
+            # heap -- accounted against the ~27 KB cushion. OTA builds only.
+            PICO_STACK_SIZE=0x1000
+    )
+    target_link_libraries(ds5-bridge
+            pico_lwip_mbedtls
+            pico_mbedtls
     )
 endif ()
 
@@ -391,6 +444,22 @@ target_link_libraries(ds5-bridge
 )
 
 pico_add_extra_outputs(ds5-bridge)
+
+# OTA image-size guard: the OTA scheme stages the downloaded image at flash
+# offset 2 MB and needs the RUNNING image to end below that (and the staged
+# copy to fit between 2 MB and the config sector at -4 sectors, 2080768 B on
+# the 4 MB boards). Growing past either limit must fail the BUILD, not brick
+# a user: enforce the tighter bound (2080768) on the produced .bin here.
+# Registered after pico_add_extra_outputs so the .bin exists when it runs.
+if (ENABLE_OTA)
+    add_custom_command(TARGET ds5-bridge POST_BUILD
+        COMMAND ${CMAKE_COMMAND}
+            -DBIN=$<TARGET_FILE_DIR:ds5-bridge>/ds5-bridge.bin
+            -DLIMIT=2080768
+            -P ${CMAKE_SOURCE_DIR}/cmake/ota_size_check.cmake
+        COMMENT "OTA size guard: image must fit below the 2 MB staging offset"
+        VERBATIM)
+endif ()
 
 # --- Selective RAM relocation ------------------------------------------------
 # Instead of relocating the whole image into RAM (the old memmap_custom.ld

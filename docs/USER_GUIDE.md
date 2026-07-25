@@ -164,8 +164,10 @@ What to expect:
 - **Getting audio / HD haptics back:** the adapter stays in multi-controller
   mode as long as *any* controller from the group is connected, so nobody's
   game is interrupted when others leave. To return to the full
-  single-controller experience (audio, mic, HD haptics), power **all**
-  controllers off, then reconnect one.
+  single-controller experience (audio, mic, HD haptics), use **Power off all
+  controllers** on the config page's Controller tab, then reconnect one. The
+  red button appears while two or more controllers are connected. It keeps all
+  controller pairings.
 - Turning the toggle back **off** mid-session doesn't disconnect anyone; it
   applies to new connections only (the next second controller is refused).
 

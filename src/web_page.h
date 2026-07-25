@@ -84,6 +84,11 @@ section.tab>h2:first-child{margin-top:.3rem}
   <div id="st_slots" style="display:none;margin-top:.35rem;font-size:.9rem;color:#aaa"></div>
 </div>
 
+<div class="field" id="poweroffall_field" style="display:none">
+  <button id="poweroffall" type="button" class="fg">Power off all controllers</button>
+  <span id="postatus"></span>
+</div>
+
 <div class="field">
   <label class="lbl">Controller mode</label>
   <select id="controller_mode">
@@ -313,9 +318,19 @@ function bindRange(id,out){const el=$(id);const fn=()=>$(out).textContent=el.val
 const upd=[bindRange('audio_buffer_length','ab_val'),bindRange('inactive_time','it_val')];
 
 function markDirty(){$('save').disabled=false;setStatus('unsaved changes','dirty')}
-['controller_mode','polling_rate_mode','disable_inactive_disconnect','disable_pico_led',
- 'multi_allowed']
+['controller_mode','polling_rate_mode','disable_inactive_disconnect','disable_pico_led']
   .forEach(id=>$(id).onchange=markDirty);
+
+window.multiOn=false;
+window.connectedPads=0;
+function updatePowerOffAllVisibility(){
+  $('poweroffall_field').style.display=window.connectedPads>=2?'':'none';
+}
+$('multi_allowed').onchange=()=>{
+  window.multiOn=$('multi_allowed').checked;
+  updatePowerOffAllVisibility();
+  markDirty();
+};
 
 async function load(){
   try{
@@ -362,6 +377,7 @@ async function load(){
       $('multi_max').textContent=c.multi_slots;
       window.multiOn=!!c.multi_allowed;
     }
+    updatePowerOffAllVisibility();
     // Diagnostic log toggle (any firmware serving this page supports it).
     $('weblog_enabled').checked=!!c.weblog_enabled;
     // Hide a tab's nav button when the whole tab is empty on this firmware.
@@ -413,6 +429,21 @@ async function factoryReset(){
   }catch(e){setStatus('reset failed','err')}
 }
 $('factoryreset').onclick=factoryReset;
+
+function poStatus(msg,cls){const s=$('postatus');s.className=cls||'';s.textContent=msg}
+async function powerOffAll(){
+  if(!confirm('Power off all connected controllers? Their pairings will be kept.'))return;
+  const b=$('poweroffall');
+  b.disabled=true;
+  poStatus('sending…','dirty');
+  try{
+    const r=await fetch('/api/controllers',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'action=poweroffall'});
+    if(r.ok){poStatus('Power-off sent ✓','ok');setTimeout(loadStatus,500)}
+    else poStatus('power-off failed','err');
+  }catch(e){poStatus('power-off failed','err')}
+  finally{b.disabled=false}
+}
+$('poweroffall').onclick=powerOffAll;
 
 // ----- Firmware update (OTA from GitHub Releases) -----
 function ostatus(msg,cls){const s=$('otstatus');s.className=cls||'';s.textContent=msg}
@@ -680,6 +711,8 @@ async function loadStatus(){
     const card=$('statuscard');
     card.className=s.connected?'on':'';
     const slots=(s.slots||[]).map((p,i)=>({...p,n:i+1})).filter(p=>p.connected);
+    window.connectedPads=slots.length;
+    updatePowerOffAllVisibility();
     if(slots.length>1){
       // Multi-pad: the ONE status card carries everything -- headline with the
       // count, then a per-player line each (battery inline; the single-pad

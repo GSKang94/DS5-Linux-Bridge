@@ -574,7 +574,7 @@ extern "C" int fs_read_custom(struct fs_file *file, char *buffer, int count) {
 }
 
 //--------------------------------------------------------------------+
-// POST handling: /api/config, /api/bonds, /api/wol
+// POST handling: /api/config, /api/bonds, /api/controllers, /api/wol
 //--------------------------------------------------------------------+
 
 #define POST_BUFSIZE 512
@@ -591,6 +591,7 @@ static bool last_save_ok = true; // result of the most recent config_save()
 enum PostTarget {
     POST_CONFIG,
     POST_BONDS,
+    POST_CONTROLLERS,
     POST_WOL,
     POST_RESOLVE_MAC,
     POST_WIFI_PROVISION,
@@ -771,6 +772,20 @@ static void apply_bonds_post(char *body) {
     }
 }
 
+// POST /api/controllers -- action=poweroffall. Sends the existing DualSense
+// power-off feature report to every live slot. Bonds are kept, so each pad can
+// reconnect normally with its PS button.
+static bool apply_controllers_post(char *body) {
+    if (strcmp(body, "action=poweroffall") != 0) {
+        printf("[WEB] controllers POST: unknown action\n");
+        return false;
+    }
+
+    bt_dualsense_power_off();
+    printf("[WEB] power off all connected controllers via web UI\n");
+    return true;
+}
+
 // POST /api/wol -- action=wake[&mac=AABBCCDDEEFF]. With an explicit mac, wakes
 // exactly that target. With no mac (the page's "Wake now" button), fires EVERY
 // stored target (wol_target_mac + wol_target_mac2) via web_api_wol_send_all().
@@ -886,6 +901,7 @@ extern "C" err_t httpd_post_begin(void *connection, const char *uri, const char 
     PostTarget t;
     if (strcmp(uri, "/api/config") == 0)      t = POST_CONFIG;
     else if (strcmp(uri, "/api/bonds") == 0)  t = POST_BONDS;
+    else if (strcmp(uri, "/api/controllers") == 0) t = POST_CONTROLLERS;
     else if (strcmp(uri, "/api/wol") == 0)    t = POST_WOL;
     else if (strcmp(uri, "/api/resolve_mac") == 0) t = POST_RESOLVE_MAC;
 #ifdef ENABLE_WIFI_WOL
@@ -948,6 +964,10 @@ extern "C" void httpd_post_finished(void *connection, char *response_uri, u16_t 
             apply_bonds_post(post_buf);
             snprintf(response_uri, response_uri_len,
                      last_save_ok ? "/api/bonds" : "/api/save-failed");
+            break;
+        case POST_CONTROLLERS:
+            snprintf(response_uri, response_uri_len,
+                     apply_controllers_post(post_buf) ? "/api/status" : "/404.html");
             break;
         case POST_WOL:
             apply_wol_post(post_buf);

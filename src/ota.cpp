@@ -442,7 +442,9 @@ static void ota_check_complete(OtaCtx *c) {
 // bounds check, and route any body bytes that arrived in the same segments.
 static void ota_headers_parsed(OtaCtx *c, uint32_t term_off) {
     c->hdrs_done = true;
-    c->hdrs[term_off] = '\0'; // bound all strstr scans to the header block
+    // Keep the first CRLF: it terminates the final header value. Bound scans
+    // at the blank line's CR so they still cannot reach coalesced body bytes.
+    c->hdrs[term_off + 2] = '\0';
 
     c->srv_status = 0;
     const char *sp = strchr(c->hdrs, ' ');

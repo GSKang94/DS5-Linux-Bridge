@@ -6,3 +6,7 @@ build_*
 .idea
 example
 code review/
+docs/claude memory/
+docs/claude_memory.md
+AGENTS.md
+CLAUDE.md

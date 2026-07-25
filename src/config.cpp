@@ -24,7 +24,9 @@ constexpr uint32_t CONFIG_MAGIC = 0x66ccff00;
 // hostname; v7 wol static-IP (now reserved); v6 wol_target_mac; v5
 // webconfig_custom_ip; v4 bond_names. v6-v9 shipped only on the wifi-wol
 // experiment branch. Append-only, so an older v10 blob migrates cleanly (its
-// tail zeroes -> multi off, weblog off).
+// tail zeroes -> multi off, weblog off, WiFi auth WPA2). The later
+// wifi_auth_mode tail field is additive and keeps version 11 because older
+// readers/writers already migrate by stored body size.
 constexpr uint16_t CONFIG_VERSION = 11;
 // Config lives just BELOW BTstack's link-key bank, NOT in the last flash sector.
 // The RP2350 BOOTSEL/picotool UF2 loader erases the top of flash (the last
@@ -90,6 +92,7 @@ static_assert(offsetof(Config_body, wake_kbd_enabled) == 228);
 static_assert(offsetof(Config_body, wol_target_mac2) == 229);
 static_assert(offsetof(Config_body, multi_enabled) == 235);
 static_assert(offsetof(Config_body, weblog_enabled) == 236);
+static_assert(offsetof(Config_body, wifi_auth_mode) == 237);
 
 // CRC over the first `len` bytes of the body. `len` is the stored size, so an
 // older/shorter blob still validates against the bytes it actually wrote.
@@ -200,6 +203,11 @@ void config_valid() {
   if (body->multi_enabled > 1) body->multi_enabled = 0;
   // Diagnostic web log: boolean; default 0 (off).
   if (body->weblog_enabled > 1) body->weblog_enabled = 0;
+  // Home-WLAN auth: migrated configs zero-fill to WPA2, preserving legacy
+  // behavior. Open networks ignore this selector.
+  if (body->wifi_auth_mode > CONFIG_WIFI_AUTH_WPA3) {
+    body->wifi_auth_mode = CONFIG_WIFI_AUTH_WPA2;
+  }
 }
 
 // Reset the in-RAM config to all defaults (does NOT touch flash). Most fields
@@ -422,13 +430,18 @@ bool config_set_bond_name(const uint8_t *addr, const char *name) {
   return true;
 }
 
-void config_set_wifi_creds(const char *ssid, const char *psk) {
+void config_set_wifi_creds(const char *ssid, const char *psk,
+                           uint8_t auth_mode) {
   if (!ssid) ssid = "";
   if (!psk) psk = "";
   strncpy(config.body.wifi_ssid, ssid, CONFIG_WIFI_SSID_LEN - 1);
   config.body.wifi_ssid[CONFIG_WIFI_SSID_LEN - 1] = '\0';
   strncpy(config.body.wifi_psk, psk, CONFIG_WIFI_PSK_LEN - 1);
   config.body.wifi_psk[CONFIG_WIFI_PSK_LEN - 1] = '\0';
+  config.body.wifi_auth_mode =
+      (auth_mode == CONFIG_WIFI_AUTH_WPA3 && config.body.wifi_psk[0] != '\0')
+          ? CONFIG_WIFI_AUTH_WPA3
+          : CONFIG_WIFI_AUTH_WPA2;
   // Provisioned only if there's actually an SSID to join. config_valid() (run by
   // the save path) re-checks this, but set it here so the in-RAM view is
   // immediately consistent for any code that reads it before the save.

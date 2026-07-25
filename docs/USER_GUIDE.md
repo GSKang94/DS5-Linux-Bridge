@@ -71,16 +71,39 @@ the first time you run it you tell it which network to join.
 1. On first boot (with no WiFi saved) the adapter starts its own open setup
    network named **`DS5-Setup-XXXX`** (the `XXXX` is unique per adapter).
 2. Join it from a phone or laptop and browse to **http://10.55.55.105/**.
-3. Pick your home WiFi from the list, enter its password, and save. The adapter
-   reboots and joins your network.
+3. Pick your home WiFi from the list, choose its security mode, enter its
+   password, and save. Leave the default WPA2 choice for WPA2 and WPA2/WPA3
+   transition networks. Select **WPA3-only (SAE)** when your router or phone
+   hotspot requires WPA3. The adapter reboots and joins your network.
 
 Once it's on your WiFi, the setup network disappears and the config page moves to
 **http://ds5.local/** (see [The configuration page](#the-configuration-page)).
 
-> **If it can't join** (wrong password, or the network went away), the adapter
-> gives up after a short wait and re-opens the `DS5-Setup-XXXX` network so you can
-> try again. You never get locked out. To wipe saved WiFi on purpose, use
-> **Reset saved WiFi** on the config page's Network tab.
+> **If it can't join** (the network is away, for example), the adapter keeps its
+> saved credentials and retries in the background. The DualSense remains fully
+> usable over Bluetooth while WiFi is unavailable. It retries quickly at first
+> (after 5, 15, and 30 seconds), then once per minute; while a controller is
+> connected, attempts are limited to once per minute to protect the shared
+> radio. Authentication failures (usually a wrong password or incompatible
+> security settings) use a separate policy: after three consecutive failures,
+> with five seconds between attempts, the adapter clears those unusable
+> credentials and reopens `DS5-Setup-XXXX` automatically. For any other failure,
+> enter setup again by first powering off every connected controller, then
+> press and release the Pico's **BOOTSEL** button three times within four
+> seconds. The adapter reboots after the third release and enters
+> `DS5-Setup-XXXX` for that boot without erasing the old credentials; saving a
+> network replaces them. This gesture is the same on Pico W and Pico 2 W. If the
+> config page is still reachable, **Reset saved WiFi** on its Network tab also
+> deliberately clears the credentials and opens setup mode.
+
+While the setup network is active, the onboard LED blinks continuously at 2 Hz.
+This recovery indicator is shown even if the onboard LED was disabled in the
+configuration.
+
+Phone hotspots must expose a compatible 2.4 GHz network. If one cannot be
+joined, enable its 2.4 GHz or maximum-compatibility mode. Use the onboarding
+page's **WPA3-only (SAE)** choice for a WPA3-only hotspot; otherwise leave WPA2
+selected. The adapter cannot infer WPA2 versus WPA3 from the SDK's scan result.
 
 The controller itself does **not** need WiFi — pairing and gameplay work over
 Bluetooth regardless. WiFi is only for the config page and Wake-on-LAN.
@@ -241,6 +264,15 @@ The **Network** tab has two things:
   you then reach it at `http://<name>.local/`.
 - **Reset saved WiFi** — forgets the saved network and reboots into the
   `DS5-Setup-XXXX` onboarding mode so you can join a different WiFi.
+
+If the saved network is unavailable and this page cannot be reached, power off
+all controllers and press and release the Pico's **BOOTSEL** button three times
+within four seconds. The adapter reboots after the third release and enters the
+setup network for one boot. Its old WiFi credentials remain saved unless you
+submit replacements, and the onboard LED blinks continuously at 2 Hz while
+setup mode is active. If the network instead rejects authentication three times,
+the adapter automatically clears the rejected credentials and enters this setup
+mode; those authentication retries are five seconds apart.
 
 ---
 

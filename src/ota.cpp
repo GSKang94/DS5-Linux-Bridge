@@ -844,9 +844,14 @@ static bool parse_sha256_hex(const char *s, uint8_t out[32]) {
     // joined fine seconds later in normal mode.
     status_state = "wifi";
     cyw43_arch_enable_sta_mode();
-    const uint32_t auth = (c.wifi_psk[0] == '\0') ? CYW43_AUTH_OPEN
-                                                  : CYW43_AUTH_WPA2_MIXED_PSK;
-    printf("[OTA] joining SSID \"%s\"...\n", c.wifi_ssid);
+    const bool open = c.wifi_psk[0] == '\0';
+    const bool wpa3 = !open &&
+                      c.wifi_auth_mode == CONFIG_WIFI_AUTH_WPA3;
+    const uint32_t auth = open ? CYW43_AUTH_OPEN
+                              : wpa3 ? CYW43_AUTH_WPA3_SAE_AES_PSK
+                                     : CYW43_AUTH_WPA2_MIXED_PSK;
+    printf("[OTA] joining SSID \"%s\" using %s...\n",
+           c.wifi_ssid, open ? "OPEN" : wpa3 ? "WPA3-SAE" : "WPA2");
     {
         int rc = cyw43_arch_wifi_connect_async(
             c.wifi_ssid, c.wifi_psk[0] ? c.wifi_psk : NULL, auth);

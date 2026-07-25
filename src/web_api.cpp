@@ -844,14 +844,16 @@ static void apply_resolve_mac_post(char *body) {
 }
 
 #ifdef ENABLE_WIFI_WOL
-// POST /api/wifi_provision -- ssid=...&psk=... from the onboarding portal. Saves
-// the home-WLAN credentials and schedules a reboot into STA mode (wifi_net.cpp
-// owns the persist + deferred reset). The JSON reply is sent before the reboot
-// fires so the phone sees success. Only meaningful while in AP mode; harmless
-// otherwise (it would just store creds + reboot). Returns ok=true if accepted.
+// POST /api/wifi_provision -- ssid=...&psk=...&auth=wpa2|wpa3 from the
+// onboarding portal. Saves the home-WLAN credentials/security choice and
+// schedules a reboot into STA mode (wifi_net.cpp owns the persist + deferred
+// reset). Omitting auth remains WPA2 for compatibility with older clients.
+// The JSON reply is sent before the reboot fires so the phone sees success.
 static void apply_wifi_provision_post(char *body) {
     char ssid[CONFIG_WIFI_SSID_LEN] = "";
     char psk[CONFIG_WIFI_PSK_LEN] = "";
+    uint8_t auth_mode = CONFIG_WIFI_AUTH_WPA2;
+    bool auth_valid = true;
     bool too_long = false;
     for (char *tok = strtok(body, "&"); tok; tok = strtok(nullptr, "&")) {
         char *eq = strchr(tok, '=');
@@ -871,9 +873,19 @@ static void apply_wifi_provision_post(char *body) {
             } else {
                 strcpy(psk, eq);
             }
+        } else if (strcmp(tok, "auth") == 0) {
+            url_decode(eq);
+            if (strcmp(eq, "wpa2") == 0) {
+                auth_mode = CONFIG_WIFI_AUTH_WPA2;
+            } else if (strcmp(eq, "wpa3") == 0) {
+                auth_mode = CONFIG_WIFI_AUTH_WPA3;
+            } else {
+                auth_valid = false;
+            }
         }
     }
-    provision_ok = !too_long && wifi_provision_apply(ssid, psk);
+    provision_ok = !too_long && auth_valid &&
+                   wifi_provision_apply(ssid, psk, auth_mode);
     printf("[WEB] wifi provision %s\n", provision_ok ? "accepted" : "rejected");
 }
 

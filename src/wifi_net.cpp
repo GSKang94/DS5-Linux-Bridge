@@ -29,6 +29,7 @@
 #include "pico/time.h"
 #include "pico/unique_id.h"
 
+#include "hardware/structs/watchdog.h"
 #include "hardware/watchdog.h"
 
 #include "lwip/netif.h"
@@ -41,6 +42,8 @@
 #include "dhcpserver.h"
 #include "dnsserver.h"
 
+#include "bootsel_button.h"
+#include "bt.h"
 #include "config.h"
 #include "web_api.h"
 
@@ -201,6 +204,124 @@ static bool in_ap_mode = false;
 static bool force_ap = false;          // set by wifi_net_request_ap_onboarding()
 static bool wifi_mdns_added = false;   // STA: mDNS netif registered once
 
+// STA retry state. The first join is kicked off immediately by wifi_sta_init();
+// each completed failure advances through this table, capped at one minute.
+static constexpr uint32_t STA_RETRY_DELAYS_MS[] = {
+    5'000, 15'000, 30'000, 60'000
+};
+static constexpr uint32_t STA_CONTROLLER_RETRY_MIN_MS = 60'000;
+static constexpr uint32_t STA_JOIN_STATUS_GRACE_MS = 30'000;
+static constexpr uint32_t STA_BADAUTH_RETRY_MS = 5'000;
+static constexpr unsigned STA_BADAUTH_LIMIT = 3;
+static unsigned sta_retry_stage = 0;
+static unsigned sta_badauth_failures = 0;
+static bool sta_retry_scheduled = false;
+static bool sta_retry_for_badauth = false;
+static bool sta_failure_latched = false;
+static bool sta_join_kickoff_pending = false;
+static absolute_time_t sta_retry_at = {0};
+static absolute_time_t sta_last_attempt = {0};
+static absolute_time_t sta_join_status_deadline = {0};
+static bool sta_attempt_recorded = false;
+
+//--------------------------------------------------------------------+
+// Explicit BOOTSEL -> one-shot AP boot
+//--------------------------------------------------------------------+
+// scratch[0] carries the request across watchdog_reboot(). OTA owns scratch
+// [2..3], while scratch[4..7] belong to the SDK reboot-vector protocol.
+// Consuming and clearing the magic before AP startup makes this a one-shot:
+// if the user does not save new credentials, a later reboot retries the old
+// STA network rather than becoming permanently stuck in onboarding.
+static constexpr uint32_t WIFI_AP_BOOT_MAGIC = 0x44533541u; // ASCII "DS5A"
+static constexpr uint32_t BOOTSEL_POLL_MS = 50;
+static constexpr int BOOTSEL_DEBOUNCE_SAMPLES = 2;          // 2 x 50 ms = 100 ms
+static constexpr int BOOTSEL_REQUIRED_CLICKS = 3;
+static constexpr uint32_t BOOTSEL_SEQUENCE_TIMEOUT_MS = 4'000;
+
+static void wifi_capture_ap_boot_request() {
+    if (watchdog_hw->scratch[0] != WIFI_AP_BOOT_MAGIC) return;
+    watchdog_hw->scratch[0] = 0;
+    wifi_net_request_ap_onboarding();
+    printf("[wifi] BOOTSEL request consumed -> AP onboarding for this boot\n");
+}
+
+// Polling QSPI CS can disturb XIP on the other core, so the safe reader parks
+// core 1 and this gesture is disabled whenever any controller has an ACL link.
+// Thus normal gameplay/audio never pays for a BOOTSEL sample. To re-onboard,
+// power every controller off and click BOOTSEL three times. Each edge must be
+// stable for 100 ms and all three completed clicks must fit within four seconds.
+// Rebooting only after the third debounced RELEASE avoids the ROM USB flashing
+// mode on both RP2040 and RP2350.
+static void wifi_bootsel_onboarding_task() {
+    static absolute_time_t next_poll = {0};
+    static bool stable_pressed = false;
+    static bool candidate_pressed = false;
+    static int candidate_samples = 0;
+    static int completed_clicks = 0;
+    static absolute_time_t sequence_deadline = {0};
+    if (!time_reached(next_poll)) return;
+    next_poll = make_timeout_time_ms(BOOTSEL_POLL_MS);
+
+    if (bt_connected_count() != 0) {
+        stable_pressed = false;
+        candidate_pressed = false;
+        candidate_samples = 0;
+        completed_clicks = 0;
+        return;
+    }
+
+    const bool pressed = bootsel_button_pressed();
+    if (completed_clicks != 0 && time_reached(sequence_deadline)) {
+        completed_clicks = 0;
+        printf("[wifi] BOOTSEL click sequence timed out\n");
+    }
+
+    if (pressed == stable_pressed) {
+        candidate_samples = 0;
+        return;
+    }
+
+    if (pressed != candidate_pressed) {
+        candidate_pressed = pressed;
+        candidate_samples = 1;
+        return;
+    }
+    if (++candidate_samples < BOOTSEL_DEBOUNCE_SAMPLES) return;
+
+    stable_pressed = pressed;
+    candidate_samples = 0;
+    if (stable_pressed) return; // count only complete press-release cycles
+
+    if (completed_clicks == 0) {
+        sequence_deadline = make_timeout_time_ms(BOOTSEL_SEQUENCE_TIMEOUT_MS);
+    }
+    completed_clicks++;
+    printf("[wifi] BOOTSEL click %d/%d\n",
+           completed_clicks, BOOTSEL_REQUIRED_CLICKS);
+    if (completed_clicks < BOOTSEL_REQUIRED_CLICKS) return;
+
+    watchdog_hw->scratch[0] = WIFI_AP_BOOT_MAGIC;
+    printf("[wifi] BOOTSEL triple-click -> rebooting to one-shot AP onboarding\n");
+    watchdog_update();
+    sleep_ms(20); // allow the UART message to drain
+    watchdog_reboot(0, 0, 0);
+}
+
+//--------------------------------------------------------------------+
+// SoftAP status LED -- continuous 2 Hz, 50% duty
+//--------------------------------------------------------------------+
+
+static constexpr uint32_t AP_LED_TOGGLE_MS = 250;
+static absolute_time_t ap_led_next_toggle = {0};
+static bool ap_led_state = false;
+
+static void wifi_ap_led_task() {
+    if (!time_reached(ap_led_next_toggle)) return;
+    ap_led_state = !ap_led_state;
+    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, ap_led_state);
+    ap_led_next_toggle = make_timeout_time_ms(AP_LED_TOGGLE_MS);
+}
+
 // AP-mode IP plan: network 10.55.55.104/29, dongle (gateway) at 10.55.55.105,
 // DHCP hands clients .106-.110 (see dhcpserver.h DHCPS_BASE_IP/DHCPS_MAX_IP,
 // tuned to this /29). The /29 caps the pool at 5 client slots so nobody can
@@ -230,17 +351,27 @@ void wifi_net_request_ap_onboarding() { force_ap = true; }
 // progresses in the cyw43 poll context (pumped by cyw43_arch_poll() in the main
 // loop) and wifi_net_task() watches cyw43_tcpip_link_status to detect success,
 // failure, and when to retry. So WiFi can never block the audio/USB path.
-static void wifi_start_join(void) {
+static int wifi_start_join(void) {
     const Config_body &c = get_config();
-    // WPA2_MIXED accepts WPA2-AES and WPA/WPA2-mixed routers; the driver treats
-    // it like WPA2_AES for pure-WPA2 networks. An empty PSK means an open
-    // network -> pass auth OPEN so the join isn't gated on a key.
-    const uint32_t auth = (c.wifi_psk[0] == '\0') ? CYW43_AUTH_OPEN
-                                                   : CYW43_AUTH_WPA2_MIXED_PSK;
-    printf("[wifi] connecting to SSID \"%s\" (async)...\n", c.wifi_ssid);
+    // The SDK scanner only distinguishes open from RSN-secured networks; it
+    // cannot tell WPA2 from WPA3. Onboarding therefore persists the user's
+    // explicit choice. Keep WPA2_MIXED for legacy WPA2-AES/WPA2-mixed routers
+    // and use SAE only when WPA3 was selected. An empty PSK is an open network.
+    const bool open = c.wifi_psk[0] == '\0';
+    const bool wpa3 = !open && c.wifi_auth_mode == CONFIG_WIFI_AUTH_WPA3;
+    const uint32_t auth = open ? CYW43_AUTH_OPEN
+                              : wpa3 ? CYW43_AUTH_WPA3_SAE_AES_PSK
+                                     : CYW43_AUTH_WPA2_MIXED_PSK;
+    printf("[wifi] connecting to SSID \"%s\" using %s (async)...\n",
+           c.wifi_ssid, open ? "OPEN" : wpa3 ? "WPA3-SAE" : "WPA2");
+    sta_last_attempt = get_absolute_time();
+    sta_attempt_recorded = true;
     const int rc = cyw43_arch_wifi_connect_async(
         c.wifi_ssid, c.wifi_psk[0] ? c.wifi_psk : NULL, auth);
     if (rc) printf("[wifi] connect kickoff failed (rc=%d); will retry\n", rc);
+    sta_join_kickoff_pending = rc == 0;
+    sta_join_status_deadline = make_timeout_time_ms(STA_JOIN_STATUS_GRACE_MS);
+    return rc;
 }
 
 static void wifi_sta_init(void) {
@@ -290,6 +421,8 @@ static void build_ap_ssid(void) {
 
 static void wifi_ap_init(void) {
     in_ap_mode = true;
+    ap_led_state = false;
+    ap_led_next_toggle = get_absolute_time();
     build_ap_ssid();
 
     // Open AP (no password): a captive-portal setup network is conventionally
@@ -442,22 +575,29 @@ static void wifi_schedule_reboot(uint32_t delay_ms) {
     reboot_pending = true;
 }
 
-bool wifi_provision_apply(const char *ssid, const char *psk) {
+bool wifi_provision_apply(const char *ssid, const char *psk,
+                          uint8_t auth_mode) {
     if (!ssid) ssid = "";
     if (!psk) psk = "";
     const size_t ssid_len = strlen(ssid);
     const size_t psk_len = strlen(psk);
     if (ssid_len == 0 || ssid_len >= CONFIG_WIFI_SSID_LEN ||
         psk_len >= CONFIG_WIFI_PSK_LEN ||
-        (psk_len > 0 && psk_len < 8)) {
-        printf("[wifi] provisioning rejected (ssid=%u bytes, psk=%u bytes)\n",
-               (unsigned) ssid_len, (unsigned) psk_len);
+        (psk_len > 0 && psk_len < 8) ||
+        auth_mode > CONFIG_WIFI_AUTH_WPA3) {
+        printf("[wifi] provisioning rejected "
+               "(ssid=%u bytes, psk=%u bytes, auth=%u)\n",
+               (unsigned) ssid_len, (unsigned) psk_len, auth_mode);
         return false;
     }
-    config_set_wifi_creds(ssid, psk);
+    config_set_wifi_creds(ssid, psk, auth_mode);
     watchdog_update();        // sector erase blocks with interrupts off
     if (!config_save()) return false;
-    printf("[wifi] provisioned SSID \"%s\"; rebooting into STA mode\n", ssid);
+    printf("[wifi] provisioned SSID \"%s\" using %s; "
+           "rebooting into STA mode\n",
+           ssid, psk_len == 0 ? "OPEN"
+                             : auth_mode == CONFIG_WIFI_AUTH_WPA3
+                                   ? "WPA3-SAE" : "WPA2");
     // Defer the reboot a beat so the HTTP "saved" response can flush to the
     // phone before the watchdog resets us. wifi_net_task() fires it.
     wifi_schedule_reboot(1200);
@@ -465,7 +605,7 @@ bool wifi_provision_apply(const char *ssid, const char *psk) {
 }
 
 bool wifi_reset_provisioning_apply() {
-    config_set_wifi_creds("", "");
+    config_set_wifi_creds("", "", CONFIG_WIFI_AUTH_WPA2);
     watchdog_update();
     if (!config_save()) return false;
     printf("[wifi] WiFi credentials cleared; rebooting to AP onboarding\n");
@@ -478,6 +618,7 @@ bool wifi_reset_provisioning_apply() {
 //--------------------------------------------------------------------+
 
 void wifi_net_init() {
+    wifi_capture_ap_boot_request();
     const bool provisioned = get_config().wifi_provisioned;
     if (force_ap || !provisioned) {
         wifi_ap_init();       // onboarding
@@ -501,6 +642,10 @@ void wifi_net_task() {
     }
 
     if (in_ap_mode) {
+        // Dedicated onboarding mode has no BT/battery LED owner. This pattern
+        // intentionally overrides the normal "disable onboard LED" setting.
+        wifi_ap_led_task();
+
         // Track scan completion so the portal can stop polling.
         if (scan_in_progress && !cyw43_wifi_scan_active(&cyw43_state)) {
             scan_in_progress = false;
@@ -510,6 +655,7 @@ void wifi_net_task() {
     }
 
     wifi_resolve_poll();
+    wifi_bootsel_onboarding_task();
 
     // ~1s status poll: log link state transitions + the DHCP lease once it
     // lands, and retry the join if we never associated (or dropped).
@@ -530,43 +676,25 @@ void wifi_net_task() {
         prev_link = link;
     }
 
-    // STA join supervision. The CYW43 commonly fails the first join or two
-    // (transient FAIL/NONET), so we must retry patiently -- but we must ALSO not
-    // strand the user on a permanently-failing STA (wrong password, or a network
-    // that's gone), or they'd have no way back without BOOTSEL. Strategy:
-    //   - Once we connect successfully even ONCE, mark ever_connected and retry
-    //     forever on any later drop (a real network blip should self-heal).
-    //   - Until the FIRST successful connect, run a verification budget: keep
-    //     retrying for ~45s; if BADAUTH (wrong key) is seen twice, or the budget
-    //     expires with no connection, the credentials are bad -> clear
-    //     wifi_provisioned in flash and reboot back into AP onboarding so the user
-    //     can re-enter them. (BT/audio are up in STA mode, so we can't just flip to
-    //     AP live -- a reboot is the clean path, and it lands in AP because the
-    //     provisioned flag is now clear.)
-    static bool ever_connected = false;
-    static bool verify_started = false;
-    static absolute_time_t verify_deadline;
-    static int badauth_seen = 0;
-    static bool badauth_latched = false;
-    if (!verify_started) {
-        verify_started = true;
-        verify_deadline = make_timeout_time_ms(45000); // first-join budget
-    }
-
-    // Count BADAUTH episodes, not 1 Hz samples. The latch must reset on JOINING
-    // or NO-IP between failed attempts; otherwise repeated wrong-key failures
-    // look like one long BADAUTH and only the 45s timeout can recover.
-    if (link == CYW43_LINK_BADAUTH) {
-        if (!badauth_latched) badauth_seen++;
-        badauth_latched = true;
-    } else {
-        badauth_latched = false;
-    }
+    // STA join supervision. Ordinary failures NEVER clear stored credentials
+    // or switch to AP automatically: the home network may simply be absent
+    // after moving the host or during an outage, and AP mode intentionally
+    // disables Bluetooth/audio. The exception is three consecutive completed
+    // authentication failures. Those credentials cannot currently join, so
+    // clear them and return to onboarding rather than retrying forever.
 
     static bool reported_ip = false;
+    if (link == CYW43_LINK_UP) {
+        sta_retry_stage = 0;
+        sta_badauth_failures = 0;
+        sta_retry_scheduled = false;
+        sta_retry_for_badauth = false;
+        sta_failure_latched = false;
+        sta_join_kickoff_pending = false;
+    }
+
     if (link == CYW43_LINK_UP && netif_default &&
         !ip4_addr_isany_val(*netif_ip4_addr(netif_default))) {
-        ever_connected = true;
 #if LWIP_MDNS_RESPONDER
         // Advertise "<hostname>.local" now that we have a link + IP. Done once.
         if (!wifi_mdns_added) {
@@ -581,35 +709,109 @@ void wifi_net_task() {
                    get_config().hostname);
             reported_ip = true;
         }
+    } else if (link == CYW43_LINK_JOIN || link == CYW43_LINK_NOIP) {
+        // Association/DHCP is progressing; discard a stale failure deadline.
+        sta_retry_scheduled = false;
+        sta_retry_for_badauth = false;
+        sta_failure_latched = false;
+        sta_join_kickoff_pending = false;
     } else if (link == CYW43_LINK_DOWN || link == CYW43_LINK_FAIL ||
                link == CYW43_LINK_NONET || link == CYW43_LINK_BADAUTH) {
         reported_ip = false;
 
-        // Give up -> re-onboard ONLY if we've never connected this boot AND
-        // either the password is clearly wrong (BADAUTH twice) or the budget ran
-        // out. A device that connected before keeps retrying forever instead.
-        if (!ever_connected &&
-            (badauth_seen >= 2 || time_reached(verify_deadline))) {
-            printf("[wifi] join failed (%s) -- clearing creds, rebooting to AP onboarding\n",
-                   badauth_seen >= 2 ? "bad password" : "timeout");
-            // Clear provisioning so the next boot comes up in AP + portal.
-            config_set_wifi_creds("", "");
-            watchdog_update();
-            config_save();
-            sleep_ms(150); // let UART flush
-            watchdog_reboot(0, 0, 0);
-            return;
+        // A successful async kickoff can take several polls before link status
+        // moves away from its previous failure value. Do not launch duplicate
+        // joins during that opaque window; recover if the driver never advances.
+        // BADAUTH is itself proof that authentication completed, even if the
+        // one-second poll missed an intermediate JOIN state.
+        if (link == CYW43_LINK_BADAUTH && !sta_failure_latched) {
+            sta_join_kickoff_pending = false;
+        }
+        if (sta_join_kickoff_pending) {
+            if (!time_reached(sta_join_status_deadline)) return;
+            sta_join_kickoff_pending = false;
+            sta_failure_latched = false;
+            printf("[wifi] join status did not advance; applying retry backoff\n");
         }
 
-        // Otherwise retry the join (async, non-blocking) on a slow cadence so a
-        // flaky router eventually associates without ever stalling the main loop.
-        // NOT retried while CYW43_LINK_JOIN/NOIP (mid-join). The ~5s spacing
-        // avoids hammering the radio (shared with BT/audio) every tick.
-        static absolute_time_t next_retry = {0};
-        if (time_reached(next_retry)) {
-            next_retry = make_timeout_time_ms(5000);
-            wifi_start_join();
+        if (!sta_failure_latched) {
+            sta_failure_latched = true;
+            if (link == CYW43_LINK_BADAUTH) {
+                sta_badauth_failures++;
+                printf("[wifi] authentication failed %u/%u\n",
+                       sta_badauth_failures, STA_BADAUTH_LIMIT);
+                if (sta_badauth_failures >= STA_BADAUTH_LIMIT) {
+                    printf("[wifi] repeated authentication failure; "
+                           "returning to AP onboarding\n");
+                    if (!wifi_reset_provisioning_apply()) {
+                        // config_set_wifi_creds() changed the RAM copy before
+                        // the failed save. Reboot to reload the persisted copy
+                        // and allow another recovery attempt.
+                        printf("[wifi] credential clear failed; rebooting to "
+                               "reload saved credentials\n");
+                        wifi_schedule_reboot(1200);
+                    }
+                    return;
+                }
+
+                sta_retry_at = make_timeout_time_ms(STA_BADAUTH_RETRY_MS);
+                sta_retry_scheduled = true;
+                sta_retry_for_badauth = true;
+                printf("[wifi] authentication retry scheduled in %u s\n",
+                       STA_BADAUTH_RETRY_MS / 1000);
+            } else {
+                // Only consecutive completed authentication failures count.
+                // JOIN/NOIP are intermediate states and intentionally do not
+                // reset this counter.
+                sta_badauth_failures = 0;
+                sta_retry_for_badauth = false;
+                const unsigned max_stage =
+                    sizeof(STA_RETRY_DELAYS_MS) /
+                    sizeof(STA_RETRY_DELAYS_MS[0]) - 1;
+                const unsigned delay_stage =
+                    sta_retry_stage < max_stage ? sta_retry_stage : max_stage;
+                uint32_t delay_ms = STA_RETRY_DELAYS_MS[delay_stage];
+                const bool controller_limited =
+                    bt_connected_count() != 0 &&
+                    delay_ms < STA_CONTROLLER_RETRY_MIN_MS;
+                if (controller_limited) delay_ms = STA_CONTROLLER_RETRY_MIN_MS;
+
+                sta_retry_at = make_timeout_time_ms(delay_ms);
+                sta_retry_scheduled = true;
+                printf("[wifi] retry scheduled in %u s%s\n",
+                       delay_ms / 1000,
+                       controller_limited
+                           ? " (controller active: 60 s minimum)" : "");
+            }
         }
+
+        if (!sta_retry_scheduled || !time_reached(sta_retry_at)) return;
+
+        // A controller may have connected after a shorter retry was scheduled.
+        // Enforce the one-minute radio-contention limit at launch time too.
+        // Authentication recovery is deliberately exempt: it performs at most
+        // two five-second retries before leaving STA mode.
+        if (!sta_retry_for_badauth &&
+            bt_connected_count() != 0 && sta_attempt_recorded) {
+            const absolute_time_t controller_gate =
+                delayed_by_ms(sta_last_attempt, STA_CONTROLLER_RETRY_MIN_MS);
+            if (!time_reached(controller_gate)) {
+                sta_retry_at = controller_gate;
+                printf("[wifi] retry postponed (controller active: 60 s minimum)\n");
+                return;
+            }
+        }
+
+        const bool badauth_retry = sta_retry_for_badauth;
+        sta_retry_scheduled = false;
+        sta_retry_for_badauth = false;
+        const unsigned max_stage =
+            sizeof(STA_RETRY_DELAYS_MS) / sizeof(STA_RETRY_DELAYS_MS[0]) - 1;
+        if (!badauth_retry && sta_retry_stage < max_stage) sta_retry_stage++;
+        // Keep this failure episode latched after a successful kickoff until
+        // the driver reports JOIN/NOIP or a 30-second status grace expires.
+        sta_failure_latched = true;
+        if (wifi_start_join() != 0) sta_failure_latched = false;
     }
 }
 

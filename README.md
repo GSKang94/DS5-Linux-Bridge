@@ -46,10 +46,15 @@ getting it right on Linux / SteamOS (Bazzite).
   button and host sound-panel mute remain independent, so releasing either
   cannot override the other. The orange LED follows the effective mute state,
   while active host drivers (e.g. Linux `hid-playstation`) retain ownership.
-- 🌐 **Web config over WiFi + bond management** — the adapter joins your home WiFi
-  and hosts its own configuration page at **http://ds5.local/** (no app, no
-  WebHID, any browser). First-run setup is a phone-friendly captive portal.
-  Adjust settings and manage remembered controllers, connected or not.
+- 🌐 **Web config over WPA2 or WPA3 WiFi + bond management** — the adapter joins
+  your home WiFi and hosts its own configuration page at **http://ds5.local/**
+  (no app, no WebHID, any browser). First-run setup is a phone-friendly captive
+  portal with explicit WPA3-only hotspot/network support.
+  Adjust settings and manage remembered controllers, connected or not. If the
+  saved network is unavailable, gameplay continues offline while WiFi retries.
+  Three consecutive authentication failures reopen onboarding automatically;
+  for other failures, power controllers off and click BOOTSEL three times to
+  reopen it without erasing the old network.
 - 🎮 **Decky Loader companion plugin** — a [Decky Loader plugin](https://github.com/kungaa/DS5-Linux-Decky)
   surfaces controller status and settings in the Quick Access Menu, talking to
   the same on-device API as the web page.
@@ -73,8 +78,9 @@ getting it right on Linux / SteamOS (Bazzite).
   and pipelines to minimize latency and eliminate audio stutter.
 - 📡 **USB 3.0 RF-noise watchdog** — auto-retries Bluetooth connections stalled by
   2.4 GHz interference from USB 3.0 ports (USB 2.0 ports recommended).
-- 🚨 **Visual notifications** — POST LED pattern, solid LED on a live link, and a
-  once-per-second low-battery blink (≤10%).
+- 🚨 **Visual notifications** — POST LED pattern, solid LED on a live link, a
+  once-per-second low-battery blink (≤10%), and a continuous 2 Hz blink during
+  WiFi onboarding.
 
 📖 **See the [User Guide](docs/USER_GUIDE.md)** for flashing, pairing, the config
 page, and OS-specific (Linux / Windows) behavior and troubleshooting.
@@ -87,13 +93,19 @@ page, and OS-specific (Linux / Windows) behavior and troubleshooting.
    `.uf2` onto the mounted `RP2350` volume.
 2. **Onboard WiFi** — the first time, the adapter opens a setup network named
    **`DS5-Setup-XXXX`**. Join it from your phone or laptop, browse to
-   **http://10.55.55.105/**, pick your home WiFi and enter its password. The
-   adapter reboots and joins your network.
+   **http://10.55.55.105/**, pick your home WiFi, choose WPA3-only if the
+   router/hotspot requires it, and enter its password. The adapter reboots and
+   joins your network.
 3. **Pair** — put the DualSense in pairing mode (hold **Share + PS** until the
    lightbar double-blinks). The adapter detects, pairs, and connects; the onboard
    LED goes solid.
 4. **Configure** *(optional)* — once on your WiFi, browse to **http://ds5.local/**
    to change settings, set up Wake by USB or Wake-on-LAN, and manage paired controllers.
+
+If the saved WiFi is unavailable later, controller operation continues normally.
+To change networks, power off every controller and press and release the Pico's
+**BOOTSEL** button three times within four seconds; the setup network reopens
+for one boot.
 
 Full details, including onboarding, Wake-on-LAN, adding a second controller, and
 per-OS audio notes, are in the **[User Guide](docs/USER_GUIDE.md)**.

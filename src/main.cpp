@@ -24,10 +24,6 @@
 #include "weblog.h"
 #include "wifi_net.h"
 
-#if defined(ENABLE_WIFI_WOL)
-#include "bootsel_button.h" // BOOTSEL-held-at-boot -> force WiFi onboarding (AP)
-#endif
-
 #if ENABLE_BATT_LED
 #include "battery_led.h"
 #endif
@@ -537,29 +533,6 @@ int main() {
   sleep_ms(150);
   tud_disconnect();
   board_init_after_tusb();
-
-#if defined(ENABLE_WIFI_WOL) && defined(WIFI_BOOTSEL_REONBOARD)
-  // OPTIONAL WiFi re-onboard trigger: hold BOOTSEL during the first ~2s of boot
-  // to force AP + captive portal even when creds are saved. DISABLED BY DEFAULT
-  // (WIFI_BOOTSEL_REONBOARD undefined) because the RP2350 BOOTSEL read in
-  // bootsel_button.h was observed to FALSE-TRIGGER on every boot -- it reported
-  // "held" with nothing pressed, stranding the device in AP mode forever. The
-  // logic-based fallback below (provisioned -> STA; if the join fails within the
-  // budget, wifi_net_task() clears creds + reboots to AP) makes this unnecessary.
-  // DO NOT re-enable until bootsel_button_pressed() is fixed + verified on HW.
-  // Sampled before cyw43_arch_init/BT/audio.
-  {
-    bool held = true;
-    for (int i = 0; i < 20 && held; i++) { // ~2s @ 100ms
-      held = bootsel_button_pressed();
-      sleep_ms(100);
-    }
-    if (held) {
-      printf("[BOOT] BOOTSEL held -> forcing WiFi onboarding (AP mode)\n");
-      wifi_net_request_ap_onboarding();
-    }
-  }
-#endif
 
   // Bracket cyw43_arch_init() with TLV bank-header dumps: it runs BTstack's
   // setup_tlv(), which formats the link-key bank on a unit that never had one

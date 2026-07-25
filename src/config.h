@@ -40,14 +40,17 @@
 
 // Home-WLAN credentials for the WiFi-WOL transport's STA join (ENABLE_WIFI_WOL).
 // Filled by the onboarding captive portal and persisted to flash, replacing the
-// old gitignored wifi_secrets.h. SSID is 32 octets max (802.11) + NUL; a WPA2
-// PSK passphrase is 8..63 chars + NUL. wifi_provisioned gates STA vs AP mode:
+// old gitignored wifi_secrets.h. SSID is 32 octets max (802.11) + NUL; a
+// WPA2/WPA3 Personal passphrase is stored as 8..63 chars + NUL.
+// wifi_provisioned gates STA vs AP mode:
 // 0 == no usable creds yet -> come up in AP + captive portal so the user can
 // onboard; 1 == creds present -> join the home WLAN. Present in EVERY build so
 // the flash layout/Config_body size is identical across transports (only the
 // WiFi build reads them), same convention as the WOL fields above.
 #define CONFIG_WIFI_SSID_LEN    33  // 32 chars + NUL
-#define CONFIG_WIFI_PSK_LEN     64  // 63 chars + NUL (WPA2 passphrase max)
+#define CONFIG_WIFI_PSK_LEN     64  // 63 chars + NUL
+#define CONFIG_WIFI_AUTH_WPA2   0
+#define CONFIG_WIFI_AUTH_WPA3   1
 
 struct __attribute__((packed)) BondName {
     uint8_t addr[CONFIG_BOND_ADDR_LEN]; // all-zero == empty slot
@@ -124,6 +127,11 @@ struct __attribute__((packed)) Config_body {
     // user can enable it, reproduce an issue across reboots (boot logs
     // captured), and copy the log from the browser.
     uint8_t weblog_enabled;              // bool
+    // Home-WLAN authentication selected during onboarding. This lives at the
+    // append-only tail rather than beside wifi_psk. Zero is deliberately WPA2
+    // so migrated configs preserve the pre-WPA3 connection behavior. WPA3
+    // means Personal/SAE; open networks ignore this field.
+    uint8_t wifi_auth_mode;               // CONFIG_WIFI_AUTH_WPA2/WPA3
 };
 
 struct __attribute__((packed)) Config {
@@ -162,9 +170,11 @@ void config_clear_bond_name(const uint8_t *addr);
 // Store home-WLAN credentials from the onboarding portal and mark the device
 // provisioned (wifi_provisioned=1) so the next boot joins as STA instead of
 // opening the captive portal. `ssid`/`psk` are copied length-bounded and
-// NUL-terminated. An empty `ssid` clears provisioning instead. Mutates the
-// in-RAM config only; the caller persists with config_save().
-void config_set_wifi_creds(const char *ssid, const char *psk);
+// NUL-terminated; `auth_mode` selects WPA2 or WPA3 Personal. An empty `ssid`
+// clears provisioning instead. Mutates the in-RAM config only; the caller
+// persists with config_save().
+void config_set_wifi_creds(const char *ssid, const char *psk,
+                           uint8_t auth_mode);
 
 extern bool is_dse;
 

@@ -42,6 +42,15 @@ button:disabled{background:#333;color:#777}
   <input id="ssidManual" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="32">
 </div>
 
+<div class="field" id="authWrap">
+  <label for="auth">Security</label>
+  <select id="auth">
+    <option value="wpa2">WPA2 or WPA2/WPA3 transition network</option>
+    <option value="wpa3">WPA3-only (SAE)</option>
+  </select>
+  <div class="hint">Choose WPA3-only when required by your router or phone hotspot. WiFi scans cannot detect this automatically.</div>
+</div>
+
 <div class="field" id="pwWrap">
   <label for="pw">Password</label>
   <div class="row">
@@ -56,7 +65,8 @@ button:disabled{background:#333;color:#777}
 
 <script>
 var sel=document.getElementById('net'),manual=document.getElementById('ssidManual'),
-    manualWrap=document.getElementById('ssidManualWrap'),pwWrap=document.getElementById('pwWrap'),
+    manualWrap=document.getElementById('ssidManualWrap'),authWrap=document.getElementById('authWrap'),
+    auth=document.getElementById('auth'),pwWrap=document.getElementById('pwWrap'),
     pw=document.getElementById('pw'),msg=document.getElementById('msg'),
     save=document.getElementById('save'),rescan=document.getElementById('rescan');
 
@@ -69,6 +79,7 @@ function onSel(){
   var opt=sel.options[sel.selectedIndex];
   var open=opt&&opt.dataset.secure==='0'&&v!=='__other__'&&v!=='';
   pwWrap.style.display=open?'none':'block';
+  authWrap.style.display=open?'none':'block';
   if(open) pw.value='';
 }
 sel.addEventListener('change',onSel);
@@ -132,7 +143,8 @@ save.addEventListener('click',function(){
   if(pskLen>63){setMsg('Password is too long.','err');return;}
   if(pskLen>0&&pskLen<8){setMsg('Password must be at least 8 characters, or blank for open WiFi.','err');return;}
   save.disabled=true;setMsg('Saving…','busy');
-  var body='ssid='+encodeURIComponent(ssid)+'&psk='+encodeURIComponent(pw.value);
+  var body='ssid='+encodeURIComponent(ssid)+'&psk='+encodeURIComponent(pw.value)+
+           '&auth='+encodeURIComponent(auth.value);
   fetch('/api/wifi_provision',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
     .then(function(r){return r.json();}).then(function(d){
       if(d.ok){setMsg('Saved! The dongle is restarting and joining “'+ssid+'”. You can close this page.','ok');}

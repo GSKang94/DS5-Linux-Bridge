@@ -17,9 +17,9 @@
 
 #ifdef ENABLE_WIFI_WOL
 // Force the next wifi_net_init() into AP + captive-portal onboarding regardless
-// of whether credentials are stored. Call BEFORE wifi_net_init() (main.cpp sets
-// it when BOOTSEL was held at boot). With no stored creds, AP mode is entered
-// automatically and this is not needed.
+// of whether credentials are stored. The runtime BOOTSEL gesture carries its
+// one-shot request across a reboot and calls this before mode selection. With
+// no stored credentials, AP mode is entered automatically.
 void wifi_net_request_ap_onboarding();
 
 // Bring up the WiFi transport. Picks the mode automatically:
@@ -37,7 +37,10 @@ void wifi_net_init();
 bool wifi_net_in_ap_mode();
 
 // Call every main-loop iteration: pumps lwIP timers + the ARP-resolve poll +
-// status logging. (RX and the netif are pumped by cyw43_arch_poll() already.)
+// status logging. In STA mode it also samples the BOOTSEL triple-click onboarding
+// gesture at 20 Hz, but only while no controller is connected. In AP mode it
+// owns the continuous 2 Hz status LED. (RX and the netif are pumped by
+// cyw43_arch_poll() already.)
 void wifi_net_task();
 
 // Send a Wake-on-LAN magic packet to `mac` (6 bytes) as a broadcast UDP datagram
@@ -62,9 +65,11 @@ void wifi_scan_start();
 // Write up to `max` scan results as a JSON array of {"ssid","rssi","secure"}
 // into `out` (cap bytes). Returns bytes written. De-duplicated, RSSI-sorted.
 int wifi_scan_json(char *out, int cap);
-// Apply onboarding credentials from the portal: persist ssid/psk to flash and
-// schedule a reboot into STA mode. Returns true if accepted (non-empty ssid).
-bool wifi_provision_apply(const char *ssid, const char *psk);
+// Apply onboarding credentials from the portal: persist ssid/psk plus the
+// CONFIG_WIFI_AUTH_WPA2/WPA3 selector to flash and schedule a reboot into STA
+// mode. Returns true if accepted (non-empty ssid).
+bool wifi_provision_apply(const char *ssid, const char *psk,
+                          uint8_t auth_mode);
 
 // Clear saved WiFi credentials, persist the unprovisioned state, and schedule a
 // reboot. The next boot lands in AP + captive-portal onboarding.
@@ -79,7 +84,9 @@ static inline void wifi_resolve_mac_start(const uint8_t *) {}
 static inline int wifi_resolve_mac_poll_result(uint8_t *) { return -1; }
 static inline void wifi_scan_start() {}
 static inline int wifi_scan_json(char *, int) { return 0; }
-static inline bool wifi_provision_apply(const char *, const char *) { return false; }
+static inline bool wifi_provision_apply(const char *, const char *, uint8_t) {
+    return false;
+}
 static inline bool wifi_reset_provisioning_apply() { return false; }
 #endif // ENABLE_WIFI_WOL
 

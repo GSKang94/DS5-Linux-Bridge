@@ -40,10 +40,12 @@ getting it right on Linux / SteamOS (Bazzite).
   voice-coil actuators. Compatibility mirrors the wired experience.
 - 🔊 **Wireless audio (speaker + mic)** — speaker/headphone playback and microphone
   upload over standard USB Audio Class — full quality, no Bluetooth headset-profile
-  (HSP) downgrade.
-- 🔇 **Hybrid hardware mic mute** — driverless local mute via the physical Mute
-  button, synced with the host sound panel, yielding to active host drivers
-  (e.g. Linux `hid-playstation`) to avoid conflicts.
+  (HSP) downgrade. Controller microphone upload is disabled while no host
+  application has the microphone stream open.
+- 🔇 **Layered hardware mic mute** — driverless local mute via the physical Mute
+  button and host sound-panel mute remain independent, so releasing either
+  cannot override the other. The orange LED follows the effective mute state,
+  while active host drivers (e.g. Linux `hid-playstation`) retain ownership.
 - 🌐 **Web config over WiFi + bond management** — the adapter joins your home WiFi
   and hosts its own configuration page at **http://ds5.local/** (no app, no
   WebHID, any browser). First-run setup is a phone-friendly captive portal.

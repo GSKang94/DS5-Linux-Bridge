@@ -44,7 +44,6 @@
 
 int reportSeqCounter[BT_MAX_SLOTS] = {};
 bool spk_active = false;
-bool mic_active = false;
 
 namespace {
 constexpr uint8_t HID_INPUT_REPORT_LEN = 63;
@@ -299,8 +298,7 @@ void __not_in_flash_func(on_bt_data)(uint8_t slot, CHANNEL_TYPE channel, uint8_t
       static bool prev_mute_pressed = false;
       bool mute_pressed = (data[12] & 0x04) != 0;
       if (mute_pressed && !prev_mute_pressed) {
-        g_firmware_mic_muted = !g_firmware_mic_muted;
-        state_set_local_mute(g_firmware_mic_muted);
+        state_toggle_local_mute();
         state_push_to_bt();
       }
       prev_mute_pressed = mute_pressed;
@@ -447,7 +445,7 @@ bool tud_audio_set_itf_cb(uint8_t rhport,
     spk_active = alt;
   } else if (itf == 2) {
     printf("[AUDIO] Set interface Mic to alternate setting %d\n", alt);
-    mic_active = alt;
+    audio_set_mic_active(alt != 0);
   }
 
   return true;

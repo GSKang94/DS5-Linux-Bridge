@@ -319,10 +319,15 @@ without any extra firmware. See that repository for installation and usage.
 
 ### Windows 11
 
-- **Audio & mute sync.** Runs driverless. The physical Mute button operates at the
-  hardware level, muting the mic stream in firmware and lighting the controller's
-  orange LED. Muting/unmuting via the Windows Sound panel also syncs the
-  controller LED. (Because it is driverless, toggling the physical button won't
-  move the Windows checkmark; the mic stream is muted directly on the adapter.)
+- **Audio & layered mute.** Runs driverless. The physical Mute button and the
+  Windows Sound-panel mute are independent layers: if both are active, clearing
+  either one leaves the microphone muted until the other is also cleared. The
+  controller's orange LED and the actual microphone stream always follow that
+  combined state. Because the physical button is driverless, it does not move
+  the Windows checkmark; that checkmark represents only the Windows layer.
+- **Idle microphone transport.** When no application has the microphone stream
+  open, the adapter asks the controller to stop uploading Bluetooth microphone
+  frames. Opening a recorder or voice-chat application enables upload
+  automatically; ordinary muting keeps the open stream alive but silent.
 - **HD haptics.** Work out of the box in titles that support them on a wired
   DualSense (e.g. Death Stranding Director's Cut).

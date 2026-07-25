@@ -25,6 +25,7 @@
 
 #include "bsp/board_api.h"
 #include "tusb.h"
+#include "audio.h"
 #include "config.h"
 #include "slots.h"
 
@@ -866,9 +867,9 @@ void usb_variant_task(void) {
             // audio frame that never flows). The host re-opens the streams
             // after enumerating an audio-bearing variant.
             {
-                extern bool spk_active, mic_active; // defined in main.cpp
+                extern bool spk_active; // defined in main.cpp
                 spk_active = false;
-                mic_active = false;
+                audio_set_mic_active(false);
             }
             tud_connect();
             swap_state = SWAP_CONNECTING;

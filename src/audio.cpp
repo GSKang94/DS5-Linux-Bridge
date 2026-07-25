@@ -28,6 +28,7 @@
 #define MIC_CHANNELS      2
 #define MIC_FRAMES        480
 #define MIC_OPUS_SIZE     71
+#define MIC_CONFIG_REPORT_SIZE 142
 
 using std::clamp;
 using std::max;
@@ -35,6 +36,7 @@ using std::max;
 static uint8_t reportSeqCounter = 0;
 static uint8_t packetCounter = 0;
 static bool plug_headset = false;
+static bool mic_active = false;
 alignas(8) static uint32_t audio_core1_stack[8192];
 queue_t audio_fifo;
 static uint8_t opus_buf[200];
@@ -57,12 +59,31 @@ void set_headset(bool state) {
     plug_headset = state;
 }
 
+static void send_mic_transport_status() {
+    uint8_t pkt[MIC_CONFIG_REPORT_SIZE]{};
+    pkt[0] = 0x32;
+    pkt[1] = reportSeqCounter << 4;
+    reportSeqCounter = (reportSeqCounter + 1) & 0x0F;
+    pkt[2] = 0x11 | 0 << 6 | 1 << 7;
+    pkt[3] = 7;
+    pkt[4] = mic_active ? 0xFF : 0xFE;
+    const auto buf_len = get_config().audio_buffer_length;
+    pkt[5] = pkt[6] = pkt[7] = pkt[8] = pkt[9] = buf_len;
+    pkt[10] = packetCounter++;
+    bt_write(tier_audio_slot(), pkt, sizeof(pkt));
+}
+
+void audio_set_mic_active(bool active) {
+    if (mic_active == active) return;
+    mic_active = active;
+    send_mic_transport_status();
+}
+
 void audio_loop() {
     // Sync UAC mute status to local state if host changes it
     if (mute[1] != g_last_uac_mute) {
         g_last_uac_mute = mute[1];
-        g_firmware_mic_muted = (mute[1] != 0);
-        state_set_local_mute(g_firmware_mic_muted);
+        state_set_uac_mute(mute[1] != 0);
         state_push_to_bt();
     }
 
@@ -187,8 +208,6 @@ void audio_loop() {
             pkt[0] = REPORT_ID;
             pkt[2] = 0x11 | 0 << 6 | 1 << 7;
             pkt[3] = 7;
-            // bit 0 of pkt[4] enables the controller's mic upload.
-            pkt[4] = 0b11111111;
             pkt[11] = 0x10 | 0 << 6 | 1 << 7; // SetStateData type
             pkt[12] = 63;
             pkt[76] = 0x12 | 0 << 6 | 1 << 7; // Haptics Audio Data type
@@ -217,6 +236,9 @@ void audio_loop() {
         // Per-packet variable fields.
         pkt[1] = reportSeqCounter << 4;
         reportSeqCounter = (reportSeqCounter + 1) & 0x0F;
+        // Config bit 0 enables microphone upload. It follows the host opening
+        // the USB mic interface, independently of mute state.
+        pkt[4] = mic_active ? 0xFF : 0xFE;
         pkt[10] = packetCounter++;
         // Audio frames carry the designated audio slot's output state.
         state_get(tier_audio_slot(), pkt + 13, 63);
@@ -351,8 +373,6 @@ void core1_entry() {
         }
     }
 }
-
-extern bool mic_active; // set by tud_audio_set_itf_cb in main.cpp
 
 void mic_add_queue(uint8_t *data) {
 #if DISABLE_SPEAKER_PROC

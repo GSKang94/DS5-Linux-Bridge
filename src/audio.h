@@ -11,6 +11,7 @@ void audio_init();
 void audio_loop();
 void core1_entry();
 void set_headset(bool state);
+void audio_set_mic_active(bool active);
 void mic_add_queue(uint8_t *data);
 
 #endif //DS5_BRIDGE_AUDIO_H

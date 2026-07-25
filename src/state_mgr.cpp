@@ -11,7 +11,6 @@
 #include "utils.h"
 
 namespace {
-    constexpr size_t kMuteControlOffset = offsetof(SetStateData, RightTriggerFFB) - sizeof(uint8_t);
     constexpr size_t kPlayerIndicatorsOffset = offsetof(SetStateData, LedRed) - sizeof(uint8_t);
 }
 
@@ -46,25 +45,48 @@ volatile bool g_firmware_mic_muted = false;
 volatile bool g_host_hid_manages_mute = false;
 volatile uint8_t g_last_uac_mute = 0xFF;
 
+static bool local_mic_muted = false;
+static bool uac_mic_muted = false;
+static bool hid_mic_muted = false;
 static uint8_t state[BT_MAX_SLOTS][63]{};
 
+static void apply_effective_mute() {
+    const bool effective =
+        uac_mic_muted ||
+        (g_host_hid_manages_mute ? hid_mic_muted : local_mic_muted);
+    g_firmware_mic_muted = effective;
+
+    uint8_t *st = state[tier_audio_slot()];
+    st[8] = effective ? MuteLight::On : MuteLight::Off;
+    if (effective) {
+        st[9] |= (1 << 4); // MicMute bit
+    } else {
+        st[9] &= ~(1 << 4);
+    }
+}
+
 void state_reset_mute() {
-    g_firmware_mic_muted = false;
+    local_mic_muted = false;
+    uac_mic_muted = false;
+    hid_mic_muted = false;
     g_host_hid_manages_mute = false;
     g_last_uac_mute = 0xFF;
-    state[tier_audio_slot()][8] = 0; // MuteLight::Off
-    state[tier_audio_slot()][9] &= ~(1 << 4); // Clear MicMute bit (bit 4 of byte 9)
+    apply_effective_mute();
 }
 
 void state_set_local_mute(bool muted) {
-    uint8_t *st = state[tier_audio_slot()];
-    if (muted) {
-        st[8] = 1; // MuteLight::On (solid orange)
-        st[9] |= (1 << 4); // MicMute bit
-    } else {
-        st[8] = 0; // MuteLight::Off
-        st[9] &= ~(1 << 4); // Clear MicMute bit
-    }
+    local_mic_muted = muted;
+    apply_effective_mute();
+}
+
+void state_toggle_local_mute() {
+    if (g_host_hid_manages_mute) return;
+    state_set_local_mute(!local_mic_muted);
+}
+
+void state_set_uac_mute(bool muted) {
+    uac_mic_muted = muted;
+    apply_effective_mute();
 }
 
 void state_slot_reset(uint8_t slot) {
@@ -147,29 +169,22 @@ void state_update(uint8_t slot, const uint8_t *data, const uint8_t size) {
     // Hybrid mute bookkeeping is an audio-path concern; only the audio slot's
     // reports may flip the global mute-ownership flags.
     const bool is_audio_slot = (slot == tier_audio_slot());
-    if (is_audio_slot &&
+    const bool host_claims_mute =
+        is_audio_slot &&
         ((update.AllowMuteLight && update.MuteLightMode == MuteLight::On) ||
-         (update.AllowAudioMute && update.MicMute))) {
+         (update.AllowAudioMute && update.MicMute));
+    if (host_claims_mute && !g_host_hid_manages_mute) {
         g_host_hid_manages_mute = true;
+        local_mic_muted = false;
     }
 
     if (is_audio_slot && g_host_hid_manages_mute) {
-        copy_if_allowed(
-            update.AllowMuteLight,
-            offsetof(SetStateData, MuteLightMode),
-            sizeof(update.MuteLightMode)
-        );
-
-        copy_if_allowed(
-            update.AllowAudioMute,
-            kMuteControlOffset,
-            sizeof(uint8_t)
-        );
-
-        if (update.AllowMuteLight) {
-            g_firmware_mic_muted = (update.MuteLightMode == MuteLight::On);
-        } else if (update.AllowAudioMute) {
-            g_firmware_mic_muted = (update.MicMute != 0);
+        if (update.AllowAudioMute) {
+            hid_mic_muted = (update.MicMute != 0);
+            apply_effective_mute();
+        } else if (update.AllowMuteLight) {
+            hid_mic_muted = (update.MuteLightMode == MuteLight::On);
+            apply_effective_mute();
         }
     }
 

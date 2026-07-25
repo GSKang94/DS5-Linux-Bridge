@@ -24,6 +24,13 @@ getting it right on Linux / SteamOS (Bazzite).
 
 ## Core Features
 
+> **v2.3 beta availability:** Features labeled **v2.3 beta** below are currently
+> available only in the latest pre-release. Download it from
+> [Releases](../../releases), or enable **Include pre-releases** on the config
+> page's Update tab before installing over WiFi. The **BETA** label on the
+> existing multi-controller and OTA features describes their maturity; both
+> are also included in the stable v2.2.1 release.
+
 - 🎮 **Full wireless controller emulation** — DualSense Bluetooth reports → standard
   USB HID gamepad at up to 1000 Hz. Supports DualSense (DS5) and DualSense Edge
   (DSE), including DSE PS-app profiles.
@@ -32,29 +39,31 @@ getting it right on Linux / SteamOS (Bazzite).
   by default (a web-page toggle enables it; the default behavior is unchanged
   single-controller). Audio and HD haptics are single-controller features (not
   enough Bluetooth airtime beside a second pad); classic rumble and adaptive
-  triggers work for everyone. *Currently only in pre-release builds — grab the
-  latest pre-release from [Releases](../../releases).* See the
+  triggers work for everyone. **v2.3 beta:** a config-page action can power off
+  all connected pads without forgetting their pairings. See the
   [user guide](docs/USER_GUIDE.md#using-multiple-controllers-at-once).
 - 📳 **Wireless HD haptics** — recreates the cabled audio-based haptic feedback over
   Bluetooth, streaming the dedicated haptic waveforms to the controller's
   voice-coil actuators. Compatibility mirrors the wired experience.
 - 🔊 **Wireless audio (speaker + mic)** — speaker/headphone playback and microphone
   upload over standard USB Audio Class — full quality, no Bluetooth headset-profile
-  (HSP) downgrade. Controller microphone upload is disabled while no host
-  application has the microphone stream open.
-- 🔇 **Layered hardware mic mute** — driverless local mute via the physical Mute
-  button and host sound-panel mute remain independent, so releasing either
-  cannot override the other. The orange LED follows the effective mute state,
-  while active host drivers (e.g. Linux `hid-playstation`) retain ownership.
-- 🌐 **Web config over WPA2 or WPA3 WiFi + bond management** — the adapter joins
+  (HSP) downgrade. **v2.3 beta:** controller microphone upload is disabled while
+  no host application has the microphone stream open.
+- 🔇 **Layered hardware mic mute — v2.3 BETA** — driverless local mute via the
+  physical Mute button and host sound-panel mute remain independent, so
+  releasing either cannot override the other. The orange LED follows the
+  effective mute state, while active host drivers (e.g. Linux
+  `hid-playstation`) retain ownership.
+- 🌐 **Web config over WiFi + bond management** — the adapter joins
   your home WiFi and hosts its own configuration page at **http://ds5.local/**
   (no app, no WebHID, any browser). First-run setup is a phone-friendly captive
-  portal with explicit WPA3-only hotspot/network support.
-  Adjust settings and manage remembered controllers, connected or not. If the
-  saved network is unavailable, gameplay continues offline while WiFi retries.
-  Three consecutive authentication failures reopen onboarding automatically;
-  for other failures, power controllers off and click BOOTSEL three times to
-  reopen it without erasing the old network.
+  portal. Adjust settings and manage remembered controllers, connected or not.
+- 📶 **WPA3 and resilient WiFi recovery — v2.3 BETA** — onboarding supports an
+  explicit WPA3-only choice. If the saved network is unavailable, gameplay
+  continues offline while WiFi retries. Three consecutive authentication
+  failures reopen onboarding automatically; for other failures, power
+  controllers off and click BOOTSEL three times to reopen it without erasing
+  the old network.
 - 🎮 **Decky Loader companion plugin** — a [Decky Loader plugin](https://github.com/kungaa/DS5-Linux-Decky)
   surfaces controller status and settings in the Quick Access Menu, talking to
   the same on-device API as the web page.
@@ -62,10 +71,8 @@ getting it right on Linux / SteamOS (Bazzite).
   latest GitHub release over HTTPS (pinned CA roots, SHA-256-verified against
   the release manifest) with no PC involved. The download is staged in spare
   flash, so a failed/interrupted download changes nothing. Pico 2 W and
-  Waveshare boards; the Pico W's 2 MB flash is too small. *Currently only in
-  pre-release builds — grab the latest pre-release from
-  [Releases](../../releases) and tick "include pre-releases" in the Update
-  tab.* See the [user guide](docs/USER_GUIDE.md#updating-over-wifi-ota).
+  Waveshare boards; the Pico W's 2 MB flash is too small. See the
+  [user guide](docs/USER_GUIDE.md#updating-over-wifi-ota).
 - 🖥️ **Wake-on-LAN** — press the controller's PS button to wake a sleeping or
   fully-off PC (even S4/S5) by sending a magic packet over WiFi. Wakes up to two
   targets (e.g. your PC and a TV), with a one-click "Find MAC" helper.
@@ -79,8 +86,8 @@ getting it right on Linux / SteamOS (Bazzite).
 - 📡 **USB 3.0 RF-noise watchdog** — auto-retries Bluetooth connections stalled by
   2.4 GHz interference from USB 3.0 ports (USB 2.0 ports recommended).
 - 🚨 **Visual notifications** — POST LED pattern, solid LED on a live link, a
-  once-per-second low-battery blink (≤10%), and a continuous 2 Hz blink during
-  WiFi onboarding.
+  once-per-second low-battery blink (≤10%), and, in **v2.3 beta**, a continuous
+  2 Hz blink during WiFi onboarding.
 
 📖 **See the [User Guide](docs/USER_GUIDE.md)** for flashing, pairing, the config
 page, and OS-specific (Linux / Windows) behavior and troubleshooting.
@@ -93,19 +100,19 @@ page, and OS-specific (Linux / Windows) behavior and troubleshooting.
    `.uf2` onto the mounted `RP2350` volume.
 2. **Onboard WiFi** — the first time, the adapter opens a setup network named
    **`DS5-Setup-XXXX`**. Join it from your phone or laptop, browse to
-   **http://10.55.55.105/**, pick your home WiFi, choose WPA3-only if the
-   router/hotspot requires it, and enter its password. The adapter reboots and
-   joins your network.
+   **http://10.55.55.105/**, pick your home WiFi, and enter its password.
+   **v2.3 beta** also offers a WPA3-only choice for networks that require it.
+   The adapter reboots and joins your network.
 3. **Pair** — put the DualSense in pairing mode (hold **Share + PS** until the
    lightbar double-blinks). The adapter detects, pairs, and connects; the onboard
    LED goes solid.
 4. **Configure** *(optional)* — once on your WiFi, browse to **http://ds5.local/**
    to change settings, set up Wake by USB or Wake-on-LAN, and manage paired controllers.
 
-If the saved WiFi is unavailable later, controller operation continues normally.
-To change networks, power off every controller and press and release the Pico's
-**BOOTSEL** button three times within four seconds; the setup network reopens
-for one boot.
+**v2.3 beta:** if the saved WiFi is unavailable later, controller operation
+continues normally while WiFi retries. To change networks, power off every
+controller and press and release the Pico's **BOOTSEL** button three times
+within four seconds; the setup network reopens for one boot.
 
 Full details, including onboarding, Wake-on-LAN, adding a second controller, and
 per-OS audio notes, are in the **[User Guide](docs/USER_GUIDE.md)**.

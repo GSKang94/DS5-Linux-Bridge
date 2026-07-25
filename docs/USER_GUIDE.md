@@ -4,6 +4,12 @@ Operational manual for the firmware: flashing, WiFi setup, pairing, the config
 page, Wake-on-LAN, and OS-specific (Linux / Windows) behavior. For building from
 source and debugging, see the [README](../README.md).
 
+> **v2.3 beta availability:** Callouts marked **v2.3 beta** describe features
+> currently available only in the latest pre-release. Download it from
+> [Releases](https://github.com/kungaa/DS5-Linux-Bridge/releases), or enable
+> **Include pre-releases** on the config page's Update tab before installing
+> over WiFi.
+
 - [Flashing the firmware](#flashing-the-firmware)
 - [First-time WiFi setup](#first-time-wifi-setup)
 - [Pairing a controller](#pairing-a-controller)
@@ -45,6 +51,9 @@ project's GitHub Releases:
    (downloading / verifying / installing).
 3. Settings, WiFi credentials and paired controllers are all kept.
 
+To install the v2.3 beta rather than the latest stable release, enable
+**Include pre-releases** before clicking **Install latest**.
+
 Safety properties worth knowing:
 
 * The download goes to a spare region of flash; the running firmware is not
@@ -67,6 +76,10 @@ Safety properties worth knowing:
 
 The adapter serves its config page and sends Wake-on-LAN over your home WiFi, so
 the first time you run it you tell it which network to join.
+
+> **v2.3 beta:** The WPA3 selection, background retry policy, automatic
+> authentication-failure recovery, BOOTSEL recovery gesture, and 2 Hz
+> onboarding indicator described below require the latest v2.3 pre-release.
 
 1. On first boot (with no WiFi saved) the adapter starts its own open setup
    network named **`DS5-Setup-XXXX`** (the `XXXX` is unique per adapter).
@@ -187,10 +200,10 @@ What to expect:
 - **Getting audio / HD haptics back:** the adapter stays in multi-controller
   mode as long as *any* controller from the group is connected, so nobody's
   game is interrupted when others leave. To return to the full
-  single-controller experience (audio, mic, HD haptics), use **Power off all
-  controllers** on the config page's Controller tab, then reconnect one. The
-  red button appears while two or more controllers are connected. It keeps all
-  controller pairings.
+  single-controller experience (audio, mic, HD haptics), power all controllers
+  off, then reconnect one. **v2.3 beta:** the config page's Controller tab
+  provides a red **Power off all controllers** button while two or more are
+  connected. It keeps all controller pairings.
 - Turning the toggle back **off** mid-session doesn't disconnect anyone; it
   applies to new connections only (the next second controller is refused).
 
@@ -265,14 +278,15 @@ The **Network** tab has two things:
 - **Reset saved WiFi** — forgets the saved network and reboots into the
   `DS5-Setup-XXXX` onboarding mode so you can join a different WiFi.
 
-If the saved network is unavailable and this page cannot be reached, power off
-all controllers and press and release the Pico's **BOOTSEL** button three times
-within four seconds. The adapter reboots after the third release and enters the
-setup network for one boot. Its old WiFi credentials remain saved unless you
-submit replacements, and the onboard LED blinks continuously at 2 Hz while
-setup mode is active. If the network instead rejects authentication three times,
-the adapter automatically clears the rejected credentials and enters this setup
-mode; those authentication retries are five seconds apart.
+**v2.3 beta:** If the saved network is unavailable and this page cannot be
+reached, power off all controllers and press and release the Pico's **BOOTSEL**
+button three times within four seconds. The adapter reboots after the third
+release and enters the setup network for one boot. Its old WiFi credentials
+remain saved unless you submit replacements, and the onboard LED blinks
+continuously at 2 Hz while setup mode is active. If the network instead rejects
+authentication three times, the adapter automatically clears the rejected
+credentials and enters this setup mode; those authentication retries are five
+seconds apart.
 
 ---
 
@@ -353,15 +367,17 @@ without any extra firmware. See that repository for installation and usage.
 
 ### Windows 11
 
-- **Audio & layered mute.** Runs driverless. The physical Mute button and the
-  Windows Sound-panel mute are independent layers: if both are active, clearing
-  either one leaves the microphone muted until the other is also cleared. The
-  controller's orange LED and the actual microphone stream always follow that
-  combined state. Because the physical button is driverless, it does not move
-  the Windows checkmark; that checkmark represents only the Windows layer.
-- **Idle microphone transport.** When no application has the microphone stream
-  open, the adapter asks the controller to stop uploading Bluetooth microphone
-  frames. Opening a recorder or voice-chat application enables upload
-  automatically; ordinary muting keeps the open stream alive but silent.
+- **v2.3 beta — Audio & layered mute.** Runs driverless. The physical Mute
+  button and the Windows Sound-panel mute are independent layers: if both are
+  active, clearing either one leaves the microphone muted until the other is
+  also cleared. The controller's orange LED and the actual microphone stream
+  always follow that combined state. Because the physical button is
+  driverless, it does not move the Windows checkmark; that checkmark represents
+  only the Windows layer.
+- **v2.3 beta — Idle microphone transport.** When no application has the
+  microphone stream open, the adapter asks the controller to stop uploading
+  Bluetooth microphone frames. Opening a recorder or voice-chat application
+  enables upload automatically; ordinary muting keeps the open stream alive
+  but silent.
 - **HD haptics.** Work out of the box in titles that support them on a wired
   DualSense (e.g. Death Stranding Director's Cut).

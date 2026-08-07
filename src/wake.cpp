@@ -15,6 +15,7 @@
 #include "bt.h"
 #include "usb.h"
 #include "wake_link.h"
+#include "tv_control.h"
 
 // The boot keyboard is HID instance 1 in BOTH descriptor variants (a dummy
 // placeholder HID holds instance 0 in minimal — see usb_descriptors.cpp), so
@@ -263,7 +264,11 @@ extern "C" void tud_resume_cb(void) {
     // Only the FSM-arming flag is suppressed during a swap: this is the
     // resume our own tud_connect generated, not a real wake event, and
     // letting the FSM act on it caused the "fic" key spam.
-    if (!swap) host_resumed_event = true;
+    if (!swap) {
+        host_resumed_event = true;
+        // TV control: switch TV input on genuine host wake
+        tv_on_host_wake();
+    }
 }
 
 extern "C" void tud_mount_cb(void) {
@@ -378,6 +383,7 @@ void wake_task(void) {
     if (armed_now && (now - armed_at_now) >= POWER_OFF_DEBOUNCE_US) {
         power_off_armed = false;
         bt_dualsense_power_off();
+        tv_on_host_suspend();  // PC confirmed asleep -> sleep TV
         WAKE_DBG("dispatched DualSense power-off (debounce %llu ms elapsed)",
                  (unsigned long long)(POWER_OFF_DEBOUNCE_US / 1000));
     }

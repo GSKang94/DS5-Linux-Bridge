@@ -85,7 +85,7 @@ option(ENABLE_OTA "Firmware updates over WiFi from GitHub Releases" ON)
 # Which GitHub repo's Releases feed OTA. Version discovery + downloads use the
 # public web endpoints (releases/latest redirect + releases/download/...), so
 # no API tokens and no rate-limit concerns.
-set(OTA_REPO "kungaa/DS5-Linux-Bridge" CACHE STRING "GitHub owner/repo whose Releases serve OTA firmware")
+set(OTA_REPO "GSKang94/DS5-Linux-Bridge" CACHE STRING "GitHub owner/repo whose Releases serve OTA firmware")
 if (ENABLE_OTA AND NOT ENABLE_WIFI_WOL)
     message(STATUS "ENABLE_OTA forced OFF: requires the WiFi transport (ENABLE_WIFI_WOL)")
     set(ENABLE_OTA OFF)
@@ -189,6 +189,7 @@ if (ENABLE_WIFI_WOL)
             src/web_api.cpp
             src/weblog.cpp
             src/wifi_net.cpp
+            src/tv_control.cpp
             # Onboarding captive portal (AP mode): tiny DHCP + DNS servers so an
             # unprovisioned dongle can hand a phone a lease and redirect every
             # lookup to its own page. Vendored from pico-examples; only compiled

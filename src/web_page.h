@@ -70,6 +70,7 @@ section.tab>h2:first-child{margin-top:.3rem}
   <button data-tab="bonds">Paired</button>
   <button data-tab="net" id="tabbtn_net">Network</button>
   <button data-tab="wake" id="tabbtn_wake">Wake / WOL</button>
+  <button data-tab="tv" id="tabbtn_tv">TV Control</button>
   <button data-tab="update" id="tabbtn_update">Update</button>
 </nav>
 
@@ -265,6 +266,34 @@ section.tab>h2:first-child{margin-top:.3rem}
 </div>
 </section>
 
+<section id="tab-tv" class="tab">
+<h2>TV Control</h2>
+<div class="hint">Control your Android TV over the network. Requires tv_server.py
+  running on an always-on machine that has ADB access to the TV.</div>
+<div class="field chk">
+  <input type="checkbox" id="tv_adb_enabled">
+  <label for="tv_adb_enabled">Enable TV control</label>
+</div>
+<div class="field">
+  <label class="lbl">Server IP (machine running tv_server.py)</label>
+  <input id="tv_server_ip" type="text" inputmode="decimal" placeholder="192.168.2.xxx" pattern="\d{1,3}(\.\d{1,3}){3}">
+</div>
+<div class="field chk">
+  <input type="checkbox" id="tv_sleep_on_suspend">
+  <label for="tv_sleep_on_suspend">Put TV to sleep when PC sleeps</label>
+</div>
+<div class="field chk">
+  <input type="checkbox" id="tv_input_on_wake">
+  <label for="tv_input_on_wake">Switch TV input when PC wakes</label>
+</div>
+<div class="btns">
+  <button id="tv_save">Save</button>
+  <button id="tv_test_sleep" type="button">Test Sleep</button>
+  <button id="tv_test_input" type="button">Test Input</button>
+  <span id="tvstatus"></span>
+</div>
+</section>
+
 <section id="tab-update" class="tab">
 <h2>Firmware update</h2>
 <div class="hint">Installs the latest release for this board straight from GitHub.
@@ -388,6 +417,13 @@ async function load(){
     else{$('ota_cur').textContent=c.version;otaShowLast();otaCheckLatest(c.ota_repo);}
     // Re-apply the selected tab now that hidden buttons are known (a deep-link
     // to a now-hidden tab falls back to Controller).
+    // TV Control fields
+    if(c.tv_adb_enabled!==undefined){
+      $('tv_adb_enabled').checked=!!c.tv_adb_enabled;
+      if(c.tv_server_ip&&c.tv_server_ip!=='0.0.0.0') $('tv_server_ip').value=c.tv_server_ip;
+      $('tv_sleep_on_suspend').checked=!!c.tv_sleep_on_suspend;
+      $('tv_input_on_wake').checked=!!c.tv_input_on_wake;
+    }
     showTab(location.hash.slice(1)||'main');
     upd.forEach(f=>f());
     $('save').disabled=true;setStatus('');
@@ -702,6 +738,39 @@ $('wol_resolve').onclick=async()=>{
     else wstatus('no reply from that IP (is it online?)','err');
   }catch(e){wstatus('lookup failed','err')}
   finally{$('wol_resolve').disabled=false}
+};
+
+// ----- TV Control -----
+function tvstatus(msg,cls){const s=$('tvstatus');s.className=cls||'';s.textContent=msg}
+$('tv_save').onclick=async()=>{
+  const fields=[
+    'tv_adb_enabled='+($('tv_adb_enabled').checked?1:0),
+    'tv_server_ip='+encodeURIComponent($('tv_server_ip').value.trim()),
+    'tv_sleep_on_suspend='+($('tv_sleep_on_suspend').checked?1:0),
+    'tv_input_on_wake='+($('tv_input_on_wake').checked?1:0)
+  ];
+  tvstatus('saving…','dirty');
+  try{
+    const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:fields.join('&')});
+    if(r.ok){tvstatus('Saved ✓','ok');load();}
+    else tvstatus('save failed','err');
+  }catch(e){tvstatus('save failed','err')}
+};
+$('tv_test_sleep').onclick=async()=>{
+  tvstatus('sending sleep…','dirty');
+  try{
+    const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'tv_test=sleep'});
+    if(r.ok) tvstatus('Sleep command sent ✓','ok');
+    else tvstatus('failed','err');
+  }catch(e){tvstatus('failed','err')}
+};
+$('tv_test_input').onclick=async()=>{
+  tvstatus('sending input switch…','dirty');
+  try{
+    const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'tv_test=input'});
+    if(r.ok) tvstatus('Input switch sent ✓','ok');
+    else tvstatus('failed','err');
+  }catch(e){tvstatus('failed','err')}
 };
 
 // ----- Live status (GET /api/status) -----

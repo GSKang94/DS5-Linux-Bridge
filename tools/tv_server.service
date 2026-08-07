@@ -1,0 +1,13 @@
+[Unit]
+Description=DS5 TV Control Server (ADB bridge for Pico)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/singh/workspace/pico-bridge/tools/tv_server.py
+Restart=always
+RestartSec=3
+User=singh
+
+[Install]
+WantedBy=multi-user.target

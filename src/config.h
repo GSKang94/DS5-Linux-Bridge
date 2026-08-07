@@ -132,6 +132,15 @@ struct __attribute__((packed)) Config_body {
     // so migrated configs preserve the pre-WPA3 connection behavior. WPA3
     // means Personal/SAE; open networks ignore this field.
     uint8_t wifi_auth_mode;               // CONFIG_WIFI_AUTH_WPA2/WPA3
+    // --- TV control via HTTP to a local server (ENABLE_WIFI_WOL builds) ---
+    // IP of the always-on machine running tv_server.py. all-zero == unset.
+    uint8_t tv_server_ip[4];
+    // Master enable for TV control. 0 (default) = disabled.
+    uint8_t tv_adb_enabled;              // bool
+    // Power off TV when host USB suspends. 0 (default) = disabled.
+    uint8_t tv_sleep_on_suspend;         // bool
+    // Switch TV input on wake/controller-connect. 0 = disabled.
+    uint8_t tv_input_on_wake;            // bool
 };
 
 struct __attribute__((packed)) Config {

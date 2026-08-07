@@ -23,6 +23,7 @@
 #include "tier.h"
 #include "weblog.h"
 #include "wifi_net.h"
+#include "tv_control.h"
 
 #if ENABLE_BATT_LED
 #include "battery_led.h"
@@ -626,6 +627,7 @@ int main() {
   }
 
   wake_init();
+  tv_control_init();
 
   // WiFi onboarding (AP + captive portal) is a dedicated setup mode: no
   // controller, no audio. Crucially, BT classic page-scan/inquiry contends with
@@ -689,6 +691,8 @@ int main() {
     // is built). Cheap; not in the audio hot path. wifi_net_task pumps the
     // WiFi link state + lwIP timers.
     wifi_net_task();
+    // TV control ADB state machine (non-blocking, ENABLE_WIFI_WOL only).
+    tv_control_task();
     // Emit the HID input report BEFORE servicing audio. audio_loop() drains the
     // mic-decode FIFO and does a tud_audio_write() that can be large; running it
     // first delayed the input report within each iteration. Prioritizing the

@@ -27,6 +27,7 @@
 #include "web_api.h"
 #include "web_page.h"
 #include "weblog.h" // /api/log diagnostic ring + runtime toggle
+#include "tv_control.h" // tv_is_connected(), tv_test_command()
 #ifdef ENABLE_WIFI_WOL
 #include "wifi_net.h"   // AP-mode detection + scan/provision hooks
 #include "web_portal.h" // onboarding captive-portal page
@@ -202,7 +203,13 @@ static int json_config(char *out, size_t cap) {
 #else
                     "\"ota_capable\":false,"
 #endif
-                    "\"wifi_capable\":true}",
+                    "\"wifi_capable\":true,"
+                    // TV control
+                    "\"tv_adb_enabled\":%u,"
+                    "\"tv_server_ip\":\"%u.%u.%u.%u\","
+                    "\"tv_sleep_on_suspend\":%u,"
+                    "\"tv_input_on_wake\":%u,"
+                    "\"tv_connected\":%s}",
                     PICO_PROGRAM_VERSION_STRING,
                     c.inactive_time,
                     c.disable_inactive_disconnect,
@@ -216,7 +223,14 @@ static int json_config(char *out, size_t cap) {
                     c.wake_kbd_enabled,
                     (unsigned) (c.multi_enabled ? 1 : 0),
                     (unsigned) MULTI_SLOT_COUNT,
-                    c.weblog_enabled);
+                    c.weblog_enabled,
+                    // TV fields
+                    (unsigned) c.tv_adb_enabled,
+                    c.tv_server_ip[0], c.tv_server_ip[1],
+                    c.tv_server_ip[2], c.tv_server_ip[3],
+                    (unsigned) c.tv_sleep_on_suspend,
+                    (unsigned) c.tv_input_on_wake,
+                    tv_is_connected() ? "true" : "false");
 }
 
 //--------------------------------------------------------------------+
@@ -448,6 +462,7 @@ extern "C" int fs_open_custom(struct fs_file *file, const char *name) {
     // single static buffer is safe for all JSON routes (saves BSS -> heap).
     // 1024: /api/status now carries a per-slot array (~120 B x 4 slots on top
     // of the legacy fields), and /api/config grew the multi/weblog flags.
+    // TV control adds a few extra fields.
     static char body[1024];
 #ifdef ENABLE_WIFI_WOL
     if (strcmp(name, "/api/wifi_scan") == 0) {
@@ -683,6 +698,22 @@ static void apply_post(char *body) {
             url_decode(eq);
             strncpy(c.hostname, eq, CONFIG_HOSTNAME_LEN - 1);
             c.hostname[CONFIG_HOSTNAME_LEN - 1] = '\0';
+        } else if (strcmp(tok, "tv_adb_enabled") == 0) {
+            c.tv_adb_enabled = val ? 1 : 0;
+        } else if (strcmp(tok, "tv_sleep_on_suspend") == 0) {
+            c.tv_sleep_on_suspend = val ? 1 : 0;
+        } else if (strcmp(tok, "tv_input_on_wake") == 0) {
+            c.tv_input_on_wake = val ? 1 : 0;
+        } else if (strcmp(tok, "tv_server_ip") == 0) {
+            url_decode(eq);
+            unsigned a, b, d, e;
+            if (sscanf(eq, "%u.%u.%u.%u", &a, &b, &d, &e) == 4) {
+                c.tv_server_ip[0] = a; c.tv_server_ip[1] = b;
+                c.tv_server_ip[2] = d; c.tv_server_ip[3] = e;
+            }
+        } else if (strcmp(tok, "tv_test") == 0) {
+            url_decode(eq);
+            tv_test_command(eq);
         }
     }
 

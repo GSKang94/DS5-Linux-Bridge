@@ -43,8 +43,7 @@ constexpr uint32_t CONFIG_FLASH_OFFSET =
 // Bytes of the reserved sector that config actually occupies. Must be a
 // multiple of FLASH_PAGE_SIZE (the save programs it page-by-page) and fit in
 // one erase sector. 512 leaves comfortable headroom for future append-only
-// growth (the whole struct is well under this today) without ballooning the
-// on-stack save buffer.
+// growth.
 constexpr size_t CONFIG_STORE_SIZE = 512;
 // flash_safe_execute() timeout per attempt, and how many times we retry when
 // core1 (audio) fails to park in time. Total worst-case block ~= product of the
@@ -93,6 +92,10 @@ static_assert(offsetof(Config_body, wol_target_mac2) == 229);
 static_assert(offsetof(Config_body, multi_enabled) == 235);
 static_assert(offsetof(Config_body, weblog_enabled) == 236);
 static_assert(offsetof(Config_body, wifi_auth_mode) == 237);
+static_assert(offsetof(Config_body, tv_server_ip) == 238);
+static_assert(offsetof(Config_body, tv_adb_enabled) == 242);
+static_assert(offsetof(Config_body, tv_sleep_on_suspend) == 243);
+static_assert(offsetof(Config_body, tv_input_on_wake) == 244);
 
 // CRC over the first `len` bytes of the body. `len` is the stored size, so an
 // older/shorter blob still validates against the bytes it actually wrote.
@@ -208,6 +211,10 @@ void config_valid() {
   if (body->wifi_auth_mode > CONFIG_WIFI_AUTH_WPA3) {
     body->wifi_auth_mode = CONFIG_WIFI_AUTH_WPA2;
   }
+  // TV control: booleans default 0 (disabled).
+  if (body->tv_adb_enabled > 1) body->tv_adb_enabled = 0;
+  if (body->tv_sleep_on_suspend > 1) body->tv_sleep_on_suspend = 0;
+  if (body->tv_input_on_wake > 1) body->tv_input_on_wake = 0;
 }
 
 // Reset the in-RAM config to all defaults (does NOT touch flash). Most fields

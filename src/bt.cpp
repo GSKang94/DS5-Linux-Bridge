@@ -1284,22 +1284,39 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
                     tud_connect();
 #endif
                 } else if (packet[0] == 0x02) {
-                    printf("Connected DS5 Controller (slot %d)\n", slot);
-                    s->check_dse = false;
-                    s->is_dse = false;
-                    s->connect_attempt_started = 0; // fully up — disarm watchdog
-                    if (slot == BT_USB_SLOT) {
-                        is_dse = false;
-                    }
-                    // Wake the host if it's suspended (turn-on-to-wake). No-op
-                    // when the host is awake; the variant swap stays deferred
-                    // until the wake lands.
-                    wake_on_bt_connect();
+                    // HANDSHAKE ERR_INVALID_REPORT_ID — device doesn't have
+                    // report 0x70. This could be a standard DS5 (expected) OR
+                    // a non-DS5 device that errors on all our feature requests.
+                    // Differentiate: a real DS5 will have cached feature report
+                    // 0x05 (calibration) by now; a non-DS5 won't.
+                    if (s->feature_data.count(0x05) && s->feature_data[0x05].size() > 5) {
+                        printf("Connected DS5 Controller (slot %d)\n", slot_index(s));
+                        s->check_dse = false;
+                        s->is_dse = false;
+                        s->connect_attempt_started = 0;
+                        if (slot == BT_USB_SLOT) {
+                            is_dse = false;
+                        }
+                        wake_on_bt_connect();
 #ifdef ENABLE_WAKE_HID
-                    bt_apply_usb_variant_policy();
+                        bt_apply_usb_variant_policy();
 #else
-                    tud_connect();
+                        tud_connect();
 #endif
+                    } else {
+                        // No valid DS5 feature data — this is a generic controller
+                        printf("Connected GENERIC Controller (slot %d)\n", slot_index(s));
+                        s->check_dse = false;
+                        s->is_dse = false;
+                        s->device_type = bt_slot::DEV_GENERIC;
+                        s->connect_attempt_started = 0;
+                        wake_on_bt_connect();
+#ifdef ENABLE_WAKE_HID
+                        bt_apply_usb_variant_policy();
+#else
+                        tud_connect();
+#endif
+                    }
                 }
             }
             if (size >= 2 && packet[0] == 0xA3) {

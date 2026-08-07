@@ -78,6 +78,11 @@ struct bt_slot {
     bool new_pair = false;
     bool check_dse = false;
     bool is_dse = false;
+    // Device type: DS5 (default) or GENERIC (8BitDo, etc). Set during
+    // the identification phase; GENERIC skips DS5-specific feature exchange.
+    enum DevType { DEV_DS5, DEV_GENERIC } device_type = DEV_DS5;
+    // Generic HID report length (learned from first interrupt report)
+    uint16_t generic_report_len = 0;
     // Per-slot setup watchdog timestamp. 0 == not armed; armed == ACL is up
     // but the controller hasn't identified yet.
     absolute_time_t connect_attempt_started = 0;
@@ -187,6 +192,8 @@ static void slot_clear(bt_slot *s) {
     s->new_pair = false;
     s->check_dse = false;
     s->is_dse = false;
+    s->device_type = bt_slot::DEV_DS5;
+    s->generic_report_len = 0;
     s->connect_attempt_started = 0;
     s->feature_data.clear();
     while (queue_try_remove(&s->send_fifo, NULL)) {}
@@ -442,9 +449,25 @@ void bt_connection_watchdog_tick() {
     for (auto &s : slots) {
         if (s.connect_attempt_started == 0) continue;
         if (absolute_time_diff_us(s.connect_attempt_started, now) < CONNECT_WATCHDOG_TIMEOUT_US) continue;
-        printf("[BT] Connection watchdog: slot %d setup stalled, disconnecting\n", slot_index(&s));
-        s.connect_attempt_started = 0; // disarm; teardown re-triggers recovery
-        bt_disconnect_slot(&s);
+        // DS5 identification timed out. Instead of disconnecting, mark this
+        // device as a generic HID gamepad (e.g. 8BitDo in D-input mode).
+        if (s.device_type == bt_slot::DEV_DS5 && s.interrupt_cid != 0) {
+            printf("[BT] Slot %d: DS5 init timed out, marking as GENERIC\n", slot_index(&s));
+            s.device_type = bt_slot::DEV_GENERIC;
+            s.check_dse = false;
+            s.connect_attempt_started = 0;
+            // Trigger USB enumeration for this generic device
+            wake_on_bt_connect();
+#ifdef ENABLE_WAKE_HID
+            bt_apply_usb_variant_policy();
+#else
+            tud_connect();
+#endif
+        } else {
+            printf("[BT] Connection watchdog: slot %d setup stalled, disconnecting\n", slot_index(&s));
+            s.connect_attempt_started = 0;
+            bt_disconnect_slot(&s);
+        }
     }
 }
 
@@ -1745,4 +1768,9 @@ void bt_dualsense_power_off() {
     for (uint8_t slot = 0; slot < BT_MAX_SLOTS; slot++) {
         bt_slot_power_off(slot);
     }
+}
+
+bool bt_slot_is_generic(uint8_t slot) {
+    if (slot >= BT_MAX_SLOTS) return false;
+    return slots[slot].device_type == bt_slot::DEV_GENERIC;
 }

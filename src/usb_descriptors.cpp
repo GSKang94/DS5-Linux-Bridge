@@ -28,6 +28,7 @@
 #include "audio.h"
 #include "config.h"
 #include "slots.h"
+#include "bt.h"
 
 bool ds_mode() {
     if (get_config().controller_mode == 2) {
@@ -952,7 +953,14 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
                                  + kbd_off;
             desc_full[end - 1] = bInterval;
             desc_full[end - 8] = bInterval;
-            desc_full[end - 16] = report_len_lo;
+            // wDescriptorLength is 2 bytes LE at end-16 (lo) and end-15 (hi)
+            if (bt_slot_is_generic((uint8_t)k)) {
+                desc_full[end - 16] = 0x96; // 150 & 0xFF
+                desc_full[end - 15] = 0x00; // 150 >> 8
+            } else {
+                desc_full[end - 16] = report_len_lo;
+                desc_full[end - 15] = 0x01; // DS=0x0111, DSE=0x0185
+            }
         }
         return desc_full;
     }
@@ -1376,6 +1384,29 @@ uint8_t const desc_hid_report_dummy[] = {
 _Static_assert(sizeof(desc_hid_report_dummy) == 21, "dummy report descriptor length must match wDescriptorLength in minimal config descriptor");
 #endif
 
+// 8BitDo Pro 2 D-input mode HID report descriptor (150 bytes).
+// Captured from a live BT connection (VID 2DC8, PID 6006).
+// Reports: ID 3 (input, 10 bytes), ID 4 (input/gyro, 31 bytes),
+//          ID 5 (output/rumble, 4 bytes), ID 6 (feature, 63 bytes).
+uint8_t const desc_hid_report_8bitdo[] = {
+    0x05, 0x01, 0x09, 0x05, 0xa1, 0x01, 0x85, 0x03, 0x05, 0x01,
+    0x15, 0x00, 0x25, 0x07, 0x46, 0x3b, 0x01, 0x95, 0x01, 0x75,
+    0x04, 0x65, 0x14, 0x09, 0x39, 0x81, 0x42, 0x75, 0x01, 0x95,
+    0x04, 0x81, 0x01, 0x15, 0x00, 0x26, 0xff, 0x00, 0x09, 0x30,
+    0x09, 0x31, 0x09, 0x32, 0x09, 0x35, 0x95, 0x04, 0x75, 0x08,
+    0x81, 0x02, 0x05, 0x02, 0x15, 0x00, 0x26, 0xff, 0x00, 0x09,
+    0xc4, 0x09, 0xc5, 0x95, 0x02, 0x75, 0x08, 0x81, 0x02, 0x05,
+    0x09, 0x19, 0x01, 0x29, 0x10, 0x15, 0x00, 0x25, 0x01, 0x75,
+    0x01, 0x95, 0x10, 0x81, 0x02, 0x06, 0x00, 0xff, 0x85, 0x04,
+    0x09, 0x23, 0x75, 0x08, 0x95, 0x1f, 0x81, 0x03, 0x06, 0x00,
+    0xff, 0x85, 0x06, 0x09, 0x23, 0x95, 0x3f, 0xb1, 0x02, 0x05,
+    0x06, 0x09, 0x20, 0x15, 0x00, 0x25, 0x64, 0x75, 0x08, 0x95,
+    0x01, 0x81, 0x02, 0x05, 0x0f, 0x09, 0x70, 0x85, 0x05, 0x15,
+    0x00, 0x25, 0x64, 0x75, 0x08, 0x95, 0x04, 0x91, 0x02, 0xc0,
+    0x09, 0x02, 0x07, 0x35, 0x08, 0x35, 0x06, 0x09, 0x04, 0x00
+};
+static_assert(sizeof(desc_hid_report_8bitdo) == 150);
+
 // Invoked when received GET HID REPORT DESCRIPTOR
 // Application return pointer to descriptor
 // Descriptor contents must exist long enough for transfer to complete
@@ -1391,6 +1422,11 @@ uint8_t const *tud_hid_descriptor_report_cb(uint8_t itf) {
         return desc_hid_report_kbd;
     // Instance 0 in MINIMAL is the dummy placeholder; serve its descriptor.
     if (active_target.variant == DESC_VARIANT_MINIMAL) return desc_hid_report_dummy;
+    // Check if this HID instance belongs to a generic (non-DS5) slot.
+    int slot = usb_hid_instance_slot(itf);
+    if (slot >= 0 && bt_slot_is_generic((uint8_t)slot)) {
+        return desc_hid_report_8bitdo;
+    }
 #endif
     (void) itf;
     if (ds_mode()) {

@@ -91,6 +91,9 @@ bool bt_feature_snapshot_get(uint8_t reportId, std::vector<uint8_t> &out);
 // don't sit awake until their idle timers fire.
 void bt_dualsense_power_off();
 
+// Returns true if the given slot is occupied by a generic (non-DS5) controller.
+bool bt_slot_is_generic(uint8_t slot);
+
 // Power off a single slot's controller (bond kept; it reconnects on the next
 // PS press). No-op for empty slots.
 void bt_slot_power_off(uint8_t slot);

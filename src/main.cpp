@@ -219,8 +219,15 @@ void interrupt_loop(bool drain_only = false) {
       const uint8_t inst = usb_slot_hid_instance(slot);
       if (!tud_hid_n_ready(inst))
         continue;
-      if (!tud_hid_n_report(inst, 0x01, interrupt_in_data[slot], HID_INPUT_REPORT_LEN)) {
-        handle_hid_report_failure(slot);
+      if (bt_slot_is_generic(slot)) {
+        // Generic: data[0] is report_id, followed by payload. Send with id=0
+        // so TinyUSB doesn't prepend another report ID byte.
+        const uint8_t rid = interrupt_in_data[slot][0];
+        tud_hid_n_report(inst, rid, interrupt_in_data[slot] + 1, HID_INPUT_REPORT_LEN - 1);
+      } else {
+        if (!tud_hid_n_report(inst, 0x01, interrupt_in_data[slot], HID_INPUT_REPORT_LEN)) {
+          handle_hid_report_failure(slot);
+        }
       }
     }
     return;
@@ -239,9 +246,16 @@ void interrupt_loop(bool drain_only = false) {
       realtime_hid_queue_requeue_front(slot, safe_report);
       return;
     }
-    if (!tud_hid_n_report(inst, 0x01, safe_report, HID_INPUT_REPORT_LEN)) {
-      handle_hid_report_failure(slot);
-      realtime_hid_queue_requeue_front(slot, safe_report);
+    if (bt_slot_is_generic(slot)) {
+      const uint8_t rid = safe_report[0];
+      if (!tud_hid_n_report(inst, rid, safe_report + 1, HID_INPUT_REPORT_LEN - 1)) {
+        realtime_hid_queue_requeue_front(slot, safe_report);
+      }
+    } else {
+      if (!tud_hid_n_report(inst, 0x01, safe_report, HID_INPUT_REPORT_LEN)) {
+        handle_hid_report_failure(slot);
+        realtime_hid_queue_requeue_front(slot, safe_report);
+      }
     }
   }
 }
@@ -275,6 +289,25 @@ void __not_in_flash_func(state_push_to_bt)() {
 // can't stall the next incoming report's processing (the outlier-tail mechanism).
 void __not_in_flash_func(on_bt_data)(uint8_t slot, CHANNEL_TYPE channel, uint8_t *data, uint16_t len) {
   // printf("[Main] BT data callback: slot=%u channel=%u len=%u\n", slot, channel, len);
+
+  // Generic (non-DS5) controller: forward BT HID interrupt reports raw.
+  // BT HID format: data[0]=0xA1 (DATA|INPUT), data[1]=report_id, data[2..]=payload
+  if (channel == INTERRUPT && len > 2 && bt_slot_is_generic(slot)) {
+    // Forward the report (skip the 0xA1 transaction header, keep report ID).
+    // The USB HID layer expects: report_id + payload.
+    const uint16_t usb_len = len - 1; // skip A1 header
+    if (usb_len <= HID_INPUT_REPORT_LEN) {
+      // Pad to HID_INPUT_REPORT_LEN for the fixed-size queue
+      uint8_t report[HID_INPUT_REPORT_LEN];
+      memset(report, 0, sizeof(report));
+      memcpy(report, data + 1, usb_len); // data+1 = report_id + payload
+      realtime_hid_queue_push(slot, report);
+    }
+    // Also trigger wake on any button press from generic controllers
+    wake_on_bt_input(data + 1, len - 1);
+    return;
+  }
+
   if (channel == INTERRUPT && len > 2 && data[1] == 0x31) {
     // Audio-path concerns (mic frames, mute button, headset jack) belong to
     // the audio slot only; other pads' reports skip straight to the input

@@ -321,6 +321,7 @@ section.tab>h2:first-child{margin-top:.3rem}
 </div>
 <div class="btns">
   <button id="ota_go">Install latest</button>
+  <button id="switch_8bitdo" class="fg">Switch to 8BitDo</button>
   <span id="otstatus"></span>
 </div>
 <div class="hint" id="ota_last" style="display:none"></div>
@@ -571,6 +572,15 @@ $('ota_go').onclick=async()=>{
     // First polls will fail while it reboots; the poll handler shows that.
     otaTimer=setInterval(otaPoll,2000);
   }catch(e){ostatus('failed to start','err')}
+};
+
+$('switch_8bitdo').onclick=async()=>{
+  if(!confirm('Switch to 8BitDo firmware? The adapter will download and flash the 8BitDo bridge. Do NOT unplug.'))return;
+  try{
+    const r=await fetch('/api/ota/start',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'alt=1'});
+    if(r.ok)ostatus('Switching to 8BitDo… do not unplug','dirty');
+    else ostatus('failed','err');
+  }catch(e){ostatus('failed','err')}
 };
 
 // ----- Paired controllers -----

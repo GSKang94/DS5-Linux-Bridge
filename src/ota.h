@@ -69,6 +69,7 @@ enum OtaResult : uint32_t {
 // defines as the newest NON-prerelease), beta via the releases.atom feed
 // (whose first entry is the newest release INCLUDING prereleases).
 void ota_request_and_reboot(bool force, bool beta);
+void ota_request_alt_firmware(void);
 
 // Read + clear the persisted result of the last OTA attempt. Call once early
 // in a NORMAL boot; thereafter ota_last_result()/ota_result_str() serve it.

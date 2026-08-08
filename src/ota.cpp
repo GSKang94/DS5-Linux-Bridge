@@ -91,6 +91,7 @@ static constexpr uint32_t OTA_MAGIC_MASK = 0xFFFFFF00u;
 static constexpr uint32_t OTA_BOOT_MAGIC = 0x07A5EB00u;
 static constexpr uint32_t OTA_BOOT_FLAG_FORCE = 0x1u;
 static constexpr uint32_t OTA_BOOT_FLAG_BETA = 0x2u;
+static constexpr uint32_t OTA_BOOT_FLAG_ALT_ASSET = 0x4u; // use alternate firmware
 static constexpr uint32_t OTA_RESULT_MAGIC = 0x07A5EC00u;
 
 static uint32_t captured_result = OTA_RESULT_NONE;
@@ -141,6 +142,12 @@ void ota_request_and_reboot(bool force, bool beta) {
     add_alarm_in_ms(1200, ota_reboot_alarm, nullptr, true);
     printf("[OTA] update requested (force=%d beta=%d), rebooting into OTA mode\n",
            force ? 1 : 0, beta ? 1 : 0);
+}
+
+void ota_request_alt_firmware(void) {
+    watchdog_hw->scratch[2] = OTA_BOOT_MAGIC | OTA_BOOT_FLAG_FORCE | OTA_BOOT_FLAG_ALT_ASSET;
+    add_alarm_in_ms(1200, ota_reboot_alarm, nullptr, true);
+    printf("[OTA] alt firmware (8BitDo) requested, rebooting into OTA mode\n");
 }
 
 //--------------------------------------------------------------------+
@@ -815,10 +822,14 @@ static bool parse_sha256_hex(const char *s, uint8_t out[32]) {
     mode_active = true;
     const bool force = (watchdog_hw->scratch[2] & OTA_BOOT_FLAG_FORCE) != 0;
     const bool beta = (watchdog_hw->scratch[2] & OTA_BOOT_FLAG_BETA) != 0;
+    const bool alt_asset = (watchdog_hw->scratch[2] & OTA_BOOT_FLAG_ALT_ASSET) != 0;
     watchdog_hw->scratch[2] = 0; // one attempt per request (see scratch notes)
 
+    // Select asset name: default or alternate (8BitDo firmware)
+    const char *asset_name = alt_asset ? "8bitdo-bridge-pico2w-ota.bin" : OTA_ASSET_NAME;
+
     printf("[OTA] === OTA boot mode (current %s, repo %s, asset %s, channel %s%s) ===\n",
-           PICO_PROGRAM_VERSION_STRING, OTA_REPO, OTA_ASSET_NAME,
+           PICO_PROGRAM_VERSION_STRING, OTA_REPO, asset_name,
            beta ? "beta" : "stable", force ? ", FORCED" : "");
 
     // Hardware watchdog: hang anywhere (TLS stall, DNS blackhole, lwIP wedge)
@@ -967,7 +978,7 @@ static bool parse_sha256_hex(const char *s, uint8_t out[32]) {
     status_state = "sha";
     char dlpath[192];
     snprintf(dlpath, sizeof(dlpath), "/%s/releases/download/%s/%s.sha256",
-             OTA_REPO, ctx->tag, OTA_ASSET_NAME);
+             OTA_REPO, ctx->tag, asset_name);
     if (!ota_fetch("github.com", dlpath, FetchKind::SMALL, 60000, 3) ||
         !parse_sha256_hex(ctx->small_body, ctx->expect_sha)) {
         ota_finish(OTA_RESULT_SHA_FETCH_FAILED);
@@ -976,7 +987,7 @@ static bool parse_sha256_hex(const char *s, uint8_t out[32]) {
     // --- 3) The image itself, streamed to staging flash.
     status_state = "download";
     snprintf(dlpath, sizeof(dlpath), "/%s/releases/download/%s/%s",
-             OTA_REPO, ctx->tag, OTA_ASSET_NAME);
+             OTA_REPO, ctx->tag, asset_name);
     if (!ota_fetch("github.com", dlpath, FetchKind::BIN, 300000, 3)) {
         ota_finish(ctx->oversize ? OTA_RESULT_TOO_BIG : OTA_RESULT_DOWNLOAD_FAILED);
     }

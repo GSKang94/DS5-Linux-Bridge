@@ -1039,8 +1039,12 @@ extern "C" void httpd_post_finished(void *connection, char *response_uri, u16_t 
             // "beta=1" resolves the newest release INCLUDING prereleases.
             // The version check itself happens IN OTA mode (the normal runtime
             // has no heap for TLS) -- this just arms the request + reboots.
-            ota_request_and_reboot(strstr(post_buf, "force=1") != nullptr,
-                                   strstr(post_buf, "beta=1") != nullptr);
+            if (strstr(post_buf, "alt=1") != nullptr) {
+                ota_request_alt_firmware();
+            } else {
+                ota_request_and_reboot(strstr(post_buf, "force=1") != nullptr,
+                                       strstr(post_buf, "beta=1") != nullptr);
+            }
             snprintf(response_uri, response_uri_len, "/api/ota/start_result");
             break;
 #endif

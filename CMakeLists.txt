@@ -482,6 +482,81 @@ if (ENABLE_OTA)
         VERBATIM)
 endif ()
 
+# =============================================================================
+# 8BitDo Pro 2 bridge target (BUILD_8BITDO=ON)
+# =============================================================================
+option(BUILD_8BITDO "Build the 8BitDo Pro 2 bridge target" OFF)
+if (BUILD_8BITDO)
+
+add_executable(8bitdo-bridge
+        src/8bitdo/main.cpp
+        src/8bitdo/usb_descriptors.c
+        src/bt.cpp
+        src/config.cpp
+        src/flash_safety.cpp
+        src/web_api_8bitdo.cpp
+        src/weblog.cpp
+)
+
+# The 8BitDo tusb_config.h lives in src/8bitdo/ -- it MUST appear BEFORE src/
+# on the include path so TinyUSB picks it up instead of the DS5 one.
+target_include_directories(8bitdo-bridge PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/8bitdo
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_compile_definitions(8bitdo-bridge PRIVATE
+        EIGHTBITDO_BUILD
+        MULTI_SLOT_COUNT=1
+        CYW43_LWIP=1
+        PICO_FLASH_ASSUME_CORE1_SAFE=0
+        CYW43_PIO_CLOCK_DIV_INT=${CYW43_PIO_CLOCK_DIV_VALUE}
+        SYS_CLOCK_KHZ=${SYS_CLOCK_KHZ_VALUE}
+        ENABLE_WIFI_WOL
+        ENABLE_WEBUI
+        PICO_CYW43_ARCH_DEFAULT_COUNTRY_CODE=CYW43_COUNTRY\('U','S',0\)
+)
+
+target_compile_options(8bitdo-bridge PRIVATE -fsigned-char)
+
+# WiFi + web transport sources (shared with ds5-bridge)
+target_sources(8bitdo-bridge PRIVATE
+        src/wifi_net.cpp
+        src/tv_control.cpp
+        lib/portal/dhcpserver.c
+        lib/portal/dnsserver.c
+)
+target_include_directories(8bitdo-bridge PRIVATE
+        lib/portal
+)
+
+target_link_libraries(8bitdo-bridge
+        pico_stdlib
+        pico_multicore
+        hardware_watchdog
+        hardware_timer
+        hardware_flash
+        pico_btstack_classic
+        pico_cyw43_arch_poll
+        pico_btstack_cyw43
+        tinyusb_device
+        tinyusb_board
+        pico_unique_id
+        pico_lwip_nosys
+        pico_lwip_http
+        pico_lwip_mdns
+)
+
+pico_set_program_name(8bitdo-bridge "8bitdo-bridge")
+pico_set_program_version(8bitdo-bridge "${VERSION}")
+
+pico_enable_stdio_uart(8bitdo-bridge 1)
+pico_enable_stdio_usb(8bitdo-bridge 0)
+
+pico_add_extra_outputs(8bitdo-bridge)
+
+endif () # BUILD_8BITDO
+
 # --- Selective RAM relocation ------------------------------------------------
 # Instead of relocating the whole image into RAM (the old memmap_custom.ld
 # approach, which needed the overclock to absorb the resulting pressure), keep

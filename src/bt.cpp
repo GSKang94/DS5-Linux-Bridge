@@ -5,7 +5,11 @@
 #include <cstdio>
 #include <cstring>
 #include "bt.h"
+#ifndef EIGHTBITDO_BUILD
 #include "usb.h"
+#else
+#include "tusb.h"
+#endif
 #include <queue>
 #include <unordered_map>
 #include <vector>
@@ -20,9 +24,21 @@
 #include "bsp/board_api.h"
 #include "classic/sdp_server.h"
 #include "config.h"
+#ifndef EIGHTBITDO_BUILD
 #include "state_mgr.h"
 #include "tier.h"
 #include "dse.h"
+#else
+// Stubs for modules not compiled in the 8BitDo build
+static inline void state_get(uint8_t, uint8_t *, uint8_t) {}
+static inline void state_slot_reset(uint8_t) {}
+static inline void state_reset_mute() {}
+static inline uint8_t tier_audio_slot() { return 0; }
+static inline void dse_on_connect() {}
+static inline void dse_on_control_packet(const uint8_t *, uint16_t) {}
+static inline void dse_on_profile_write(uint8_t) {}
+static inline bool dse_is_profile_report(uint8_t) { return false; }
+#endif
 #include "wake.h"
 #include "pico/util/queue.h"
 #if ENABLE_BATT_LED
@@ -1340,7 +1356,13 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
                     }
                     s->inactive_time = get_absolute_time();
 
-                    if (get_config().controller_type == CONTROLLER_TYPE_8BITDO) {
+                    if (
+#ifdef EIGHTBITDO_BUILD
+                        true
+#else
+                        get_config().controller_type == CONTROLLER_TYPE_8BITDO
+#endif
+                    ) {
                         // 8BitDo mode: skip DS5 feature probing, mark connected immediately
                         printf("8BitDo mode: controller connected (slot %d)\n", slot_index(s));
                         s->check_dse = false;

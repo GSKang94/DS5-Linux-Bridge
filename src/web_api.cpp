@@ -209,7 +209,8 @@ static int json_config(char *out, size_t cap) {
                     "\"tv_server_ip\":\"%u.%u.%u.%u\","
                     "\"tv_sleep_on_suspend\":%u,"
                     "\"tv_input_on_wake\":%u,"
-                    "\"tv_connected\":%s}",
+                    "\"tv_connected\":%s,"
+                    "\"controller_type\":%u}",
                     PICO_PROGRAM_VERSION_STRING,
                     c.inactive_time,
                     c.disable_inactive_disconnect,
@@ -230,7 +231,8 @@ static int json_config(char *out, size_t cap) {
                     c.tv_server_ip[2], c.tv_server_ip[3],
                     (unsigned) c.tv_sleep_on_suspend,
                     (unsigned) c.tv_input_on_wake,
-                    tv_is_connected() ? "true" : "false");
+                    tv_is_connected() ? "true" : "false",
+                    (unsigned) c.controller_type);
 }
 
 //--------------------------------------------------------------------+
@@ -714,6 +716,8 @@ static void apply_post(char *body) {
         } else if (strcmp(tok, "tv_test") == 0) {
             url_decode(eq);
             tv_test_command(eq);
+        } else if (strcmp(tok, "controller_type") == 0) {
+            c.controller_type = (uint8_t) clampi(val, 0, 1);
         }
     }
 

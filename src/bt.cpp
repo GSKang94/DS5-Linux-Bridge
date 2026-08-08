@@ -1340,9 +1340,22 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
                     }
                     s->inactive_time = get_absolute_time();
 
-                    printf("Init DualSense (slot %d)\n", slot_index(s));
-
-                    init_feature((uint8_t) slot_index(s));
+                    if (get_config().controller_type == CONTROLLER_TYPE_8BITDO) {
+                        // 8BitDo mode: skip DS5 feature probing, mark connected immediately
+                        printf("8BitDo mode: controller connected (slot %d)\n", slot_index(s));
+                        s->check_dse = false;
+                        s->is_dse = false;
+                        s->connect_attempt_started = 0;
+                        wake_on_bt_connect();
+#ifdef ENABLE_WAKE_HID
+                        bt_apply_usb_variant_policy();
+#else
+                        tud_connect();
+#endif
+                    } else {
+                        printf("Init DualSense (slot %d)\n", slot_index(s));
+                        init_feature((uint8_t) slot_index(s));
+                    }
                     // 初始化手柄状态 (per-slot state carries the slot's player
                     // indicators on multi-slot builds)
                     bt_send_full_state((uint8_t) slot_index(s));

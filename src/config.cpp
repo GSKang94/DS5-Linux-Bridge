@@ -215,6 +215,8 @@ void config_valid() {
   if (body->tv_adb_enabled > 1) body->tv_adb_enabled = 0;
   if (body->tv_sleep_on_suspend > 1) body->tv_sleep_on_suspend = 0;
   if (body->tv_input_on_wake > 1) body->tv_input_on_wake = 0;
+  // Controller type: 0=DS5 (default), 1=8BitDo.
+  if (body->controller_type > CONTROLLER_TYPE_8BITDO) body->controller_type = 0;
 }
 
 // Reset the in-RAM config to all defaults (does NOT touch flash). Most fields

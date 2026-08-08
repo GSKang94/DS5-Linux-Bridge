@@ -219,8 +219,14 @@ void interrupt_loop(bool drain_only = false) {
       const uint8_t inst = usb_slot_hid_instance(slot);
       if (!tud_hid_n_ready(inst))
         continue;
-      if (!tud_hid_n_report(inst, 0x01, interrupt_in_data[slot], HID_INPUT_REPORT_LEN)) {
-        handle_hid_report_failure(slot);
+      if (get_config().controller_type == CONTROLLER_TYPE_8BITDO) {
+        uint8_t rid = interrupt_in_data[slot][0];
+        if (rid == 0) continue; // no data yet
+        tud_hid_n_report(inst, rid, interrupt_in_data[slot] + 1, HID_INPUT_REPORT_LEN - 1);
+      } else {
+        if (!tud_hid_n_report(inst, 0x01, interrupt_in_data[slot], HID_INPUT_REPORT_LEN)) {
+          handle_hid_report_failure(slot);
+        }
       }
     }
     return;
@@ -239,9 +245,16 @@ void interrupt_loop(bool drain_only = false) {
       realtime_hid_queue_requeue_front(slot, safe_report);
       return;
     }
-    if (!tud_hid_n_report(inst, 0x01, safe_report, HID_INPUT_REPORT_LEN)) {
-      handle_hid_report_failure(slot);
-      realtime_hid_queue_requeue_front(slot, safe_report);
+    if (get_config().controller_type == CONTROLLER_TYPE_8BITDO) {
+      uint8_t rid = safe_report[0];
+      if (!tud_hid_n_report(inst, rid, safe_report + 1, HID_INPUT_REPORT_LEN - 1)) {
+        realtime_hid_queue_requeue_front(slot, safe_report);
+      }
+    } else {
+      if (!tud_hid_n_report(inst, 0x01, safe_report, HID_INPUT_REPORT_LEN)) {
+        handle_hid_report_failure(slot);
+        realtime_hid_queue_requeue_front(slot, safe_report);
+      }
     }
   }
 }
@@ -275,6 +288,22 @@ void __not_in_flash_func(state_push_to_bt)() {
 // can't stall the next incoming report's processing (the outlier-tail mechanism).
 void __not_in_flash_func(on_bt_data)(uint8_t slot, CHANNEL_TYPE channel, uint8_t *data, uint16_t len) {
   // printf("[Main] BT data callback: slot=%u channel=%u len=%u\n", slot, channel, len);
+
+  // 8BitDo mode: forward any HID interrupt report as-is
+  if (channel == INTERRUPT && len > 2 &&
+      get_config().controller_type == CONTROLLER_TYPE_8BITDO) {
+    // BT HID: data[0]=0xA1, data[1]=report_id, data[2..]=payload
+    // Forward report_id + payload (skip 0xA1 header)
+    uint16_t usb_len = len - 1;
+    if (usb_len > HID_INPUT_REPORT_LEN) usb_len = HID_INPUT_REPORT_LEN;
+    uint8_t report[HID_INPUT_REPORT_LEN];
+    memset(report, 0, sizeof(report));
+    memcpy(report, data + 1, usb_len);
+    realtime_hid_queue_push(slot, report);
+    wake_on_bt_input(data + 1, len - 1);
+    return;
+  }
+
   if (channel == INTERRUPT && len > 2 && data[1] == 0x31) {
     // Audio-path concerns (mic frames, mute button, headset jack) belong to
     // the audio slot only; other pads' reports skip straight to the input
@@ -640,20 +669,17 @@ int main() {
     bt_init();
     bt_register_data_callback(on_bt_data);
 
-    audio_init();
+    if (get_config().controller_type != CONTROLLER_TYPE_8BITDO) {
+      audio_init();
+    }
     state_init();
   } else {
     printf("[BOOT] AP onboarding mode: skipping BT + audio (radio handed to SoftAP)\n");
   }
 
 #ifdef ENABLE_WAKE_HID
-  // Enumerate immediately as the MINIMAL variant (inert HID placeholder, plus
-  // the boot keyboard if the runtime toggle is on), even before any controller
-  // connects. tusb_init() left us tud_disconnect()'d; without this the dongle
-  // would stay invisible to the host on a cold plug-in until the first
-  // controller connection flipped it to FULL -- and the device must be
-  // enumerated before the host suspends for USB remote-wakeup to work.
-  // active_variant/desired_variant are already MINIMAL.
+  // In 8BitDo mode: connect USB immediately (simple HID, no variant swapping)
+  // In DS5 mode: enumerate as MINIMAL variant, waiting for controller
   tud_connect();
 #endif
 
@@ -685,7 +711,9 @@ int main() {
     interrupt_loop(true); // early: drain the realtime HID queue only
     wake_task();
 #ifdef ENABLE_WAKE_HID
-    usb_variant_task();
+    if (get_config().controller_type != CONTROLLER_TYPE_8BITDO) {
+      usb_variant_task();
+    }
 #endif
     // Service lwIP for the config web server (no-op unless the WiFi transport
     // is built). Cheap; not in the audio hot path. wifi_net_task pumps the
@@ -699,9 +727,10 @@ int main() {
     // report here trims the per-iteration jitter on the 1 kHz polling path (the
     // early interrupt_loop(true) above only drains the realtime queue for mode 2).
     interrupt_loop();
-    audio_loop();
-    // DSE Edge profile snapshot prefetch/unlock state machine.
-    dse_task();
+    if (get_config().controller_type != CONTROLLER_TYPE_8BITDO) {
+      audio_loop();
+      dse_task();
+    }
 #if ENABLE_BATT_LED
     battery_led_tick();
 #endif

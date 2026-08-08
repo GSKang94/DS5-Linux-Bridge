@@ -52,6 +52,9 @@
 #define CONFIG_WIFI_AUTH_WPA2   0
 #define CONFIG_WIFI_AUTH_WPA3   1
 
+#define CONTROLLER_TYPE_DS5     0
+#define CONTROLLER_TYPE_8BITDO  1
+
 struct __attribute__((packed)) BondName {
     uint8_t addr[CONFIG_BOND_ADDR_LEN]; // all-zero == empty slot
     char    name[CONFIG_BOND_NAME_LEN]; // NUL-terminated; "" == unnamed
@@ -141,6 +144,9 @@ struct __attribute__((packed)) Config_body {
     uint8_t tv_sleep_on_suspend;         // bool
     // Switch TV input on wake/controller-connect. 0 = disabled.
     uint8_t tv_input_on_wake;            // bool
+    // Controller type: 0=DualSense (default), 1=8BitDo Pro 2 (D-input).
+    // Determines BT pairing behavior and USB identity. Reboot required.
+    uint8_t controller_type;             // 0=DS5, 1=8BitDo
 };
 
 struct __attribute__((packed)) Config {

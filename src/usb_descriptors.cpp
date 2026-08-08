@@ -158,7 +158,13 @@ static uint16_t usb_active_bcd_device(void);
 // Invoked when received GET DEVICE DESCRIPTOR
 // Application return pointer to descriptor
 uint8_t const *tud_descriptor_device_cb(void) {
-    desc_device.idProduct = ds_mode() ? 0x0CE6 : 0x0DF2;
+    if (get_config().controller_type == CONTROLLER_TYPE_8BITDO) {
+        desc_device.idVendor = 0x2DC8;
+        desc_device.idProduct = 0x6006;
+    } else {
+        desc_device.idVendor = 0x054C;
+        desc_device.idProduct = ds_mode() ? 0x0CE6 : 0x0DF2;
+    }
 #ifdef ENABLE_WAKE_HID
     // S3-wake wedge fix. Per Microsoft's USB docs, the
     // Windows hub driver CACHES a device's descriptors keyed on
@@ -888,6 +894,51 @@ void usb_variant_task(void) {
 // Descriptor contents must exist long enough for transfer to complete
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
     (void) index; // for multiple configurations
+
+    // 8BitDo mode: serve a simple single-HID-interface configuration.
+    // No audio, no keyboard, no variant swapping.
+    if (get_config().controller_type == CONTROLLER_TYPE_8BITDO) {
+        static uint8_t desc_8bitdo_config[] = {
+            // Configuration descriptor (9 bytes)
+            0x09, 0x02,
+            41, 0x00,   // wTotalLength = 9 + 9 + 9 + 7 + 7 = 41
+            0x01,       // bNumInterfaces = 1
+            0x01,       // bConfigurationValue
+            0x00,       // iConfiguration
+            0xA0,       // bmAttributes: bus powered, remote wakeup
+            0xFA,       // bMaxPower: 500mA
+            // Interface 0: HID Gamepad (9 bytes)
+            0x09, 0x04,
+            0x00,       // bInterfaceNumber
+            0x00,       // bAlternateSetting
+            0x02,       // bNumEndpoints
+            0x03,       // bInterfaceClass: HID
+            0x00,       // bInterfaceSubClass
+            0x00,       // bInterfaceProtocol
+            0x00,       // iInterface
+            // HID descriptor (9 bytes)
+            0x09, 0x21,
+            0x11, 0x01, // bcdHID 1.11
+            0x00,       // bCountryCode
+            0x01,       // bNumDescriptors
+            0x22,       // bDescriptorType: Report
+            150, 0x00,  // wDescriptorLength: 150 (8BitDo)
+            // Endpoint IN (7 bytes)
+            0x07, 0x05,
+            0x84,       // bEndpointAddress: EP4 IN (match DS5's gamepad EP)
+            0x03,       // bmAttributes: Interrupt
+            0x40, 0x00, // wMaxPacketSize: 64
+            0x01,       // bInterval: 1ms
+            // Endpoint OUT (7 bytes)
+            0x07, 0x05,
+            0x03,       // bEndpointAddress: EP3 OUT
+            0x03,       // bmAttributes: Interrupt
+            0x40, 0x00, // wMaxPacketSize: 64
+            0x01,       // bInterval: 1ms
+        };
+        return desc_8bitdo_config;
+    }
+
 #ifdef ENABLE_WAKE_HID
     // Reads ONLY the latched active_target (set at swap time); never the live
     // config, which could change mid-enumeration.
@@ -921,9 +972,17 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
             bInterval = 0x01;
             break;
     }
-    const uint8_t report_len_lo = ds_mode()
-        ? 0x11  // DS report desc low byte (0x0111 = 273)
-        : 0x85; // DSE report desc low byte (0x0185 = 389)
+    uint8_t report_len_lo, report_len_hi;
+    if (get_config().controller_type == CONTROLLER_TYPE_8BITDO) {
+        report_len_lo = 0x96; // 150 = 0x0096
+        report_len_hi = 0x00;
+    } else if (ds_mode()) {
+        report_len_lo = 0x11; // 273 = 0x0111
+        report_len_hi = 0x01;
+    } else {
+        report_len_lo = 0x85; // 389 = 0x0185
+        report_len_hi = 0x01;
+    }
     // Per 32-byte gamepad block, counting from its END:
     //   end-1  = EP OUT bInterval, end-8 = EP IN bInterval,
     //   end-16 = HID wDescriptorLength low byte.
@@ -953,6 +1012,7 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
             desc_full[end - 1] = bInterval;
             desc_full[end - 8] = bInterval;
             desc_full[end - 16] = report_len_lo;
+            desc_full[end - 15] = report_len_hi;
         }
         return desc_full;
     }
@@ -964,6 +1024,7 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
     desc_full[offset - 1] = bInterval;
     desc_full[offset - 8] = bInterval;
     desc_full[offset - 16] = report_len_lo;
+    desc_full[offset - 15] = report_len_hi;
     return desc_full;
 }
 
@@ -1376,10 +1437,33 @@ uint8_t const desc_hid_report_dummy[] = {
 _Static_assert(sizeof(desc_hid_report_dummy) == 21, "dummy report descriptor length must match wDescriptorLength in minimal config descriptor");
 #endif
 
+// 8BitDo Pro 2 D-input HID report descriptor (150 bytes, VID 2DC8 PID 6006)
+static const uint8_t desc_hid_report_8bitdo[] = {
+    0x05, 0x01, 0x09, 0x05, 0xa1, 0x01, 0x85, 0x03, 0x05, 0x01,
+    0x15, 0x00, 0x25, 0x07, 0x46, 0x3b, 0x01, 0x95, 0x01, 0x75,
+    0x04, 0x65, 0x14, 0x09, 0x39, 0x81, 0x42, 0x75, 0x01, 0x95,
+    0x04, 0x81, 0x01, 0x15, 0x00, 0x26, 0xff, 0x00, 0x09, 0x30,
+    0x09, 0x31, 0x09, 0x32, 0x09, 0x35, 0x95, 0x04, 0x75, 0x08,
+    0x81, 0x02, 0x05, 0x02, 0x15, 0x00, 0x26, 0xff, 0x00, 0x09,
+    0xc4, 0x09, 0xc5, 0x95, 0x02, 0x75, 0x08, 0x81, 0x02, 0x05,
+    0x09, 0x19, 0x01, 0x29, 0x10, 0x15, 0x00, 0x25, 0x01, 0x75,
+    0x01, 0x95, 0x10, 0x81, 0x02, 0x06, 0x00, 0xff, 0x85, 0x04,
+    0x09, 0x23, 0x75, 0x08, 0x95, 0x1f, 0x81, 0x03, 0x06, 0x00,
+    0xff, 0x85, 0x06, 0x09, 0x23, 0x95, 0x3f, 0xb1, 0x02, 0x05,
+    0x06, 0x09, 0x20, 0x15, 0x00, 0x25, 0x64, 0x75, 0x08, 0x95,
+    0x01, 0x81, 0x02, 0x05, 0x0f, 0x09, 0x70, 0x85, 0x05, 0x15,
+    0x00, 0x25, 0x64, 0x75, 0x08, 0x95, 0x04, 0x91, 0x02, 0xc0,
+    0x09, 0x02, 0x07, 0x35, 0x08, 0x35, 0x06, 0x09, 0x04, 0x00
+};
+
 // Invoked when received GET HID REPORT DESCRIPTOR
 // Application return pointer to descriptor
 // Descriptor contents must exist long enough for transfer to complete
 uint8_t const *tud_hid_descriptor_report_cb(uint8_t itf) {
+    // 8BitDo mode: always return the 8BitDo descriptor
+    if (get_config().controller_type == CONTROLLER_TYPE_8BITDO) {
+        return desc_hid_report_8bitdo;
+    }
 #ifdef ENABLE_WAKE_HID
     // With the boot keyboard enumerated, HID instance indices are STABLE
     // across variants:

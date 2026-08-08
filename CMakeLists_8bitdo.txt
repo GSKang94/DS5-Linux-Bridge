@@ -1,0 +1,131 @@
+# 8BitDo Bridge firmware - stripped DS5 features, generic BT HID passthrough
+
+cmake_minimum_required(VERSION 3.13)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
+# Pico SDK
+if (WIN32)
+    set(USERHOME $ENV{USERPROFILE})
+else ()
+    set(USERHOME $ENV{HOME})
+endif ()
+set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
+if (EXISTS ${picoVscode})
+    include(${picoVscode})
+endif ()
+
+set(PICO_BOARD pico2_w CACHE STRING "Board type")
+include(pico_sdk_import.cmake)
+
+project(8bitdo-bridge C CXX ASM)
+pico_sdk_init()
+
+# ─── Build options ────────────────────────────────────────────────────────────
+
+option(ENABLE_WIFI_WOL "WiFi config page + WoL + TV control" ON)
+option(ENABLE_OTA "OTA firmware updates from GitHub" ON)
+set(OTA_REPO "GSKang94/DS5-Linux-Bridge" CACHE STRING "GitHub repo for OTA")
+set(OTA_ASSET_NAME "8bitdo-bridge-pico2w-ota.bin" CACHE STRING "OTA asset filename")
+
+if (ENABLE_OTA AND NOT ENABLE_WIFI_WOL)
+    set(ENABLE_OTA OFF)
+endif ()
+
+option(ENABLE_VERBOSE "Verbose UART logging" OFF)
+if(ENABLE_VERBOSE)
+    add_compile_definitions(ENABLE_VERBOSE=1)
+else()
+    add_compile_definitions(ENABLE_VERBOSE=0)
+endif()
+
+# ─── Executable ───────────────────────────────────────────────────────────────
+
+add_executable(8bitdo-bridge
+    src/main_8bitdo.cpp
+    src/bt_generic.cpp
+    src/usb_descriptors_8bitdo.cpp
+    src/config.cpp
+    src/flash_safety.cpp
+    src/tv_control.cpp
+)
+
+target_include_directories(8bitdo-bridge PRIVATE src)
+
+target_compile_definitions(8bitdo-bridge PRIVATE
+    PICO_STACK_SIZE=0x1000
+    MULTI_SLOT_COUNT=1
+    ENABLE_BATT_LED=0
+    EIGHTBITDO_BUILD=1
+)
+
+target_link_libraries(8bitdo-bridge
+    pico_stdlib
+    pico_cyw43_arch_poll
+    pico_btstack_ble
+    pico_btstack_classic
+    pico_btstack_cyw43
+    tinyusb_device
+    tinyusb_board
+    hardware_watchdog
+    hardware_flash
+)
+
+# ─── WiFi / WoL / TV control ─────────────────────────────────────────────────
+
+if (ENABLE_WIFI_WOL)
+    target_sources(8bitdo-bridge PRIVATE
+        src/web_api.cpp
+        src/weblog.cpp
+        src/wifi_net.cpp
+        lib/portal/dhcpserver.c
+        lib/portal/dnsserver.c
+    )
+    target_include_directories(8bitdo-bridge PRIVATE lib/portal)
+    target_compile_definitions(8bitdo-bridge PRIVATE
+        ENABLE_WIFI_WOL
+        ENABLE_WEBUI
+        PICO_CYW43_ARCH_DEFAULT_COUNTRY_CODE=CYW43_COUNTRY\('U','S',0\)
+    )
+    target_link_libraries(8bitdo-bridge
+        pico_unique_id
+        pico_lwip_nosys
+        pico_lwip_http
+        pico_lwip_mdns
+    )
+endif ()
+
+# ─── OTA ──────────────────────────────────────────────────────────────────────
+
+if (ENABLE_OTA)
+    if (NOT DEFINED PICO_LWIP_PATH)
+        set(PICO_LWIP_PATH ${PICO_SDK_PATH}/lib/lwip)
+    endif ()
+    target_sources(8bitdo-bridge PRIVATE
+        src/ota.cpp
+        lib/altcp_tls_patched/altcp_tls_mbedtls.c
+        ${PICO_LWIP_PATH}/src/apps/altcp_tls/altcp_tls_mbedtls_mem.c
+    )
+    target_include_directories(8bitdo-bridge PRIVATE
+        ${PICO_LWIP_PATH}/src/apps/altcp_tls
+    )
+    target_compile_definitions(8bitdo-bridge PRIVATE
+        ENABLE_OTA
+        OTA_REPO="${OTA_REPO}"
+        OTA_ASSET_NAME="${OTA_ASSET_NAME}"
+    )
+    target_link_libraries(8bitdo-bridge pico_mbedtls)
+endif ()
+
+# ─── Output ───────────────────────────────────────────────────────────────────
+
+pico_add_extra_outputs(8bitdo-bridge)
+
+# Disable USB stdio (we use all USB for HID)
+pico_enable_stdio_usb(8bitdo-bridge 0)
+pico_enable_stdio_uart(8bitdo-bridge 1)

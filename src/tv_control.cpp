@@ -200,8 +200,8 @@ void tv_on_host_wake(void) {
     const Config_body &cfg = get_config();
     if (!cfg.tv_adb_enabled || !cfg.tv_input_on_wake) return;
     if (cfg.tv_server_ip[0] == 0) return;
-    printf("[tv] host wake -> TV input\n");
-    pending_cmd = TV_CMD_INPUT;
+    printf("[tv] host wake -> TV wake + input\n");
+    pending_cmd = TV_CMD_WAKE;
 }
 
 bool tv_test_command(const char *cmd) {

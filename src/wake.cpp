@@ -278,7 +278,11 @@ extern "C" void tud_mount_cb(void) {
     host_suspended = false;
     power_off_armed = false;
     usb_set_host_suspended(false);
-    if (!swap) host_resumed_event = true;
+    if (!swap) {
+        host_resumed_event = true;
+        // TV control: cold boot (S5 -> on) fires mount, not resume.
+        tv_on_host_wake();
+    }
 }
 
 void wake_on_bt_input(const uint8_t *hid_input, uint16_t len) {

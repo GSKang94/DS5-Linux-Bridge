@@ -18,6 +18,7 @@
 #include "lwip/tcp.h"
 #include "lwip/ip_addr.h"
 #include "config.h"
+#include "wifi_net.h"
 
 #define TV_SERVER_PORT 7777
 
@@ -200,8 +201,19 @@ void tv_on_host_wake(void) {
     const Config_body &cfg = get_config();
     if (!cfg.tv_adb_enabled || !cfg.tv_input_on_wake) return;
     if (cfg.tv_server_ip[0] == 0) return;
-    printf("[tv] host wake -> TV wake + input\n");
-    pending_cmd = TV_CMD_WAKE;
+
+    // Wake TV instantly via direct WoL (no server round-trip).
+    // wol_target_mac2 holds the TV MAC if configured.
+    if (cfg.wol_target_mac2[0] | cfg.wol_target_mac2[1] | cfg.wol_target_mac2[2] |
+        cfg.wol_target_mac2[3] | cfg.wol_target_mac2[4] | cfg.wol_target_mac2[5]) {
+        wifi_wol_send(cfg.wol_target_mac2);
+        printf("[tv] WoL sent directly to TV\n");
+    }
+
+    // Queue HDMI input switch via server (TV will be awake by the time
+    // the server processes it).
+    printf("[tv] host wake -> TV input\n");
+    pending_cmd = TV_CMD_INPUT;
 }
 
 bool tv_test_command(const char *cmd) {

@@ -10,10 +10,12 @@ Endpoints:
   GET /tv/sleep   - Put TV to sleep
   GET /tv/input   - Switch TV to HDMI 1
   GET /tv/wake    - Wake TV (WoL) + switch input
+  GET /tv/status  - Health check
 """
 
 import subprocess
 import http.server
+import time
 
 TV_IP = "192.168.2.128"
 TV_MAC = "38:26:56:62:AB:8F"
@@ -28,52 +30,77 @@ INPUT_CMD = (
 
 def adb(cmd):
     """Run an adb shell command on the TV."""
-    result = subprocess.run(
-        ["adb", "-s", f"{TV_IP}:5555", "shell", cmd],
-        capture_output=True, text=True, timeout=10
-    )
-    print(f"  adb shell {cmd} -> {result.returncode}")
-    return result.returncode == 0
+    try:
+        result = subprocess.run(
+            ["adb", "-s", f"{TV_IP}:5555", "shell", cmd],
+            capture_output=True, text=True, timeout=10
+        )
+        print(f"  [ADB] shell {cmd}")
+        print(f"  [ADB] rc={result.returncode} stdout={result.stdout.strip()} stderr={result.stderr.strip()}")
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        print(f"  [ADB] shell TIMEOUT: {cmd}")
+        return False
 
 def ensure_connected():
     """Make sure adb is connected to the TV."""
-    result = subprocess.run(
-        ["adb", "connect", f"{TV_IP}:5555"],
-        capture_output=True, text=True, timeout=5
-    )
-    return "connected" in result.stdout
+    try:
+        result = subprocess.run(
+            ["adb", "connect", f"{TV_IP}:5555"],
+            capture_output=True, text=True, timeout=5
+        )
+        connected = "connected" in result.stdout
+        print(f"  [ADB] connect -> {'OK' if connected else 'FAILED'} ({result.stdout.strip()})")
+        return connected
+    except subprocess.TimeoutExpired:
+        print(f"  [ADB] connect -> TIMEOUT")
+        return False
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        ensure_connected()
+        print(f"\n[REQ] {self.path} from {self.client_address[0]}")
 
         if self.path == "/tv/sleep":
             print("[TV] Sleep")
+            ensure_connected()
             ok = adb("input keyevent 223")
         elif self.path == "/tv/input":
             print("[TV] Switch input")
+            ensure_connected()
             ok = adb(INPUT_CMD)
         elif self.path == "/tv/wake":
             print("[TV] Wake + input")
+            print(f"  [WOL] Sending magic packet to {TV_MAC}")
             subprocess.run(["wakeonlan", TV_MAC], capture_output=True)
-            import time; time.sleep(5)
-            ensure_connected()
+            print(f"  [WOL] Waiting 5s for TV to boot...")
+            time.sleep(5)
+            if not ensure_connected():
+                print("  [ADB] Not ready, retrying in 3s...")
+                time.sleep(3)
+                ensure_connected()
             ok = adb(INPUT_CMD)
+        elif self.path == "/tv/status":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+            return
         else:
             self.send_response(404)
             self.end_headers()
             return
 
+        print(f"[RESULT] {'OK' if ok else 'FAILED'}")
         self.send_response(200 if ok else 500)
         self.end_headers()
         self.wfile.write(b"ok" if ok else b"fail")
 
     def log_message(self, format, *args):
-        print(f"[HTTP] {args[0]}")
+        pass  # Suppress default HTTP logs, we have our own
 
 if __name__ == "__main__":
     print(f"TV control server on :7777 (TV={TV_IP})")
     print(f"  GET /tv/sleep  - sleep TV")
     print(f"  GET /tv/input  - switch to HDMI 1")
     print(f"  GET /tv/wake   - WoL + switch input")
+    print(f"  GET /tv/status - health check")
     http.server.HTTPServer(("", 7777), Handler).serve_forever()

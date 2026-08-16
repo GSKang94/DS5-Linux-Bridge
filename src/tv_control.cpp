@@ -18,7 +18,6 @@
 #include "lwip/tcp.h"
 #include "lwip/ip_addr.h"
 #include "config.h"
-#include "wifi_net.h"
 
 #define TV_SERVER_PORT 7777
 
@@ -202,27 +201,9 @@ void tv_on_host_wake(void) {
     if (!cfg.tv_adb_enabled || !cfg.tv_input_on_wake) return;
     if (cfg.tv_server_ip[0] == 0) return;
 
-    // Debounce: only fire once per wake cycle. The DS5 flow can trigger
-    // both tud_resume_cb and tud_mount_cb (variant swap), causing duplicate
-    // commands that confuse the TV. 10s window covers any swap settling.
-    static uint64_t last_wake_us = 0;
-    const uint64_t now = time_us_64();
-    if (last_wake_us != 0 && (now - last_wake_us) < 10ULL * 1000000ULL) {
-        printf("[tv] host wake -> debounced (duplicate)\n");
-        return;
-    }
-    last_wake_us = now;
-
-    // Wake TV instantly via direct WoL (no server round-trip).
-    // wol_target_mac2 holds the TV MAC if configured.
-    if (cfg.wol_target_mac2[0] | cfg.wol_target_mac2[1] | cfg.wol_target_mac2[2] |
-        cfg.wol_target_mac2[3] | cfg.wol_target_mac2[4] | cfg.wol_target_mac2[5]) {
-        wifi_wol_send(cfg.wol_target_mac2);
-        printf("[tv] WoL sent directly to TV\n");
-    }
-
-    // Queue HDMI input switch via server (TV will be awake by the time
-    // the server processes it).
+    // Queue HDMI input switch via server. TV WoL is handled separately:
+    // - DS5 path: wifi_wol_send_all() already sent it before we get here.
+    // - Cold boot: tud_mount_cb sends it directly.
     printf("[tv] host wake -> TV input\n");
     pending_cmd = TV_CMD_INPUT;
 }

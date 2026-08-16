@@ -16,6 +16,8 @@
 #include "usb.h"
 #include "wake_link.h"
 #include "tv_control.h"
+#include "config.h"
+#include "wifi_net.h"
 
 // The boot keyboard is HID instance 1 in BOTH descriptor variants (a dummy
 // placeholder HID holds instance 0 in minimal — see usb_descriptors.cpp), so
@@ -280,7 +282,16 @@ extern "C" void tud_mount_cb(void) {
     usb_set_host_suspended(false);
     if (!swap) {
         host_resumed_event = true;
-        // TV control: cold boot (S5 -> on) fires mount, not resume.
+        // Cold boot (S5 -> on): wake TV directly via WoL. The DS5 button-press
+        // path never reaches here (it fires tud_resume_cb, not mount), so this
+        // won't duplicate.
+        const Config_body &cfg = get_config();
+        if (cfg.tv_input_on_wake &&
+            (cfg.wol_target_mac2[0] | cfg.wol_target_mac2[1] | cfg.wol_target_mac2[2] |
+             cfg.wol_target_mac2[3] | cfg.wol_target_mac2[4] | cfg.wol_target_mac2[5])) {
+            wifi_wol_send(cfg.wol_target_mac2);
+            printf("[tv] cold boot -> WoL sent to TV\n");
+        }
         tv_on_host_wake();
     }
 }

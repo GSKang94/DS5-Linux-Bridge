@@ -280,8 +280,13 @@ extern "C" void tud_mount_cb(void) {
     usb_set_host_suspended(false);
     if (!swap) {
         host_resumed_event = true;
-        // TV control: cold boot (S5 -> on) fires mount, not resume.
-        tv_on_host_wake();
+        // Cold boot (S5 -> on): tud_resume_cb never fires, only mount does.
+        // On a normal wake-from-sleep, resume already fired tv_on_host_wake,
+        // so skip here. Detect cold boot: host_resumed_event was false before
+        // we set it (no prior resume this power cycle set it).
+        // Simple approach: tv_on_host_wake uses pending_cmd which is still
+        // TV_CMD_NONE only if resume didn't already set it.
+        tv_on_cold_boot_wake();
     }
 }
 

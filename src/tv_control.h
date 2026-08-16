@@ -33,6 +33,10 @@ void tv_on_host_suspend(void);
 // WoL to the TV MAC is handled separately by the existing wake path.
 void tv_on_host_wake(void);
 
+// Cold boot (S5 -> on): send /tv/wake (WoL + input switch) but only if
+// tud_resume_cb didn't already fire tv_on_host_wake this cycle.
+void tv_on_cold_boot_wake(void);
+
 // Send a test command from the web UI. `cmd` is one of "sleep", "wake",
 // "input". Returns true if the command was queued (the ADB state machine
 // will execute it asynchronously).
@@ -46,6 +50,7 @@ static inline void tv_control_init(void) {}
 static inline void tv_control_task(void) {}
 static inline void tv_on_host_suspend(void) {}
 static inline void tv_on_host_wake(void) {}
+static inline void tv_on_cold_boot_wake(void) {}
 static inline bool tv_test_command(const char *) { return false; }
 static inline bool tv_is_connected(void) { return false; }
 #endif // ENABLE_WIFI_WOL

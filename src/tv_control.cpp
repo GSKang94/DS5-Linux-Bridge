@@ -202,6 +202,17 @@ void tv_on_host_wake(void) {
     if (!cfg.tv_adb_enabled || !cfg.tv_input_on_wake) return;
     if (cfg.tv_server_ip[0] == 0) return;
 
+    // Debounce: only fire once per wake cycle. The DS5 flow can trigger
+    // both tud_resume_cb and tud_mount_cb (variant swap), causing duplicate
+    // commands that confuse the TV. 10s window covers any swap settling.
+    static uint64_t last_wake_us = 0;
+    const uint64_t now = time_us_64();
+    if (last_wake_us != 0 && (now - last_wake_us) < 10ULL * 1000000ULL) {
+        printf("[tv] host wake -> debounced (duplicate)\n");
+        return;
+    }
+    last_wake_us = now;
+
     // Wake TV instantly via direct WoL (no server round-trip).
     // wol_target_mac2 holds the TV MAC if configured.
     if (cfg.wol_target_mac2[0] | cfg.wol_target_mac2[1] | cfg.wol_target_mac2[2] |

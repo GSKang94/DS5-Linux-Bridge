@@ -204,17 +204,6 @@ void tv_on_host_wake(void) {
     pending_cmd = TV_CMD_INPUT;
 }
 
-void tv_on_cold_boot_wake(void) {
-    const Config_body &cfg = get_config();
-    if (!cfg.tv_adb_enabled || !cfg.tv_input_on_wake) return;
-    if (cfg.tv_server_ip[0] == 0) return;
-    // Only fire if no command is already pending/in-flight (i.e., tud_resume_cb
-    // didn't already trigger tv_on_host_wake this wake cycle).
-    if (pending_cmd != TV_CMD_NONE || state != TV_IDLE) return;
-    printf("[tv] cold boot -> TV wake + input\n");
-    pending_cmd = TV_CMD_WAKE;
-}
-
 bool tv_test_command(const char *cmd) {
     const Config_body &cfg = get_config();
     if (!cfg.tv_adb_enabled || cfg.tv_server_ip[0] == 0) return false;

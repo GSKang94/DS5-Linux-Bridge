@@ -37,11 +37,14 @@ def adb(cmd):
 
 def ensure_connected():
     """Make sure adb is connected to the TV."""
-    result = subprocess.run(
-        ["adb", "connect", f"{TV_IP}:5555"],
-        capture_output=True, text=True, timeout=5
-    )
-    return "connected" in result.stdout
+    try:
+        result = subprocess.run(
+            ["adb", "connect", f"{TV_IP}:5555"],
+            capture_output=True, text=True, timeout=5
+        )
+        return "connected" in result.stdout
+    except subprocess.TimeoutExpired:
+        return False
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):

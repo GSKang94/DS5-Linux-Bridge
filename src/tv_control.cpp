@@ -48,7 +48,7 @@ static char response_line[32];
 static uint8_t response_line_len = 0;
 static int response_status = 0;
 
-#define TV_TIMEOUT_US 30000000ULL // 30s: /tv/wake waits for Android TV boot
+#define TV_TIMEOUT_US 5000000ULL  // 5s
 #define TV_COOLDOWN_US 1000000ULL // 1s
 
 static void enter_state(tv_state_t s) {
@@ -251,11 +251,10 @@ void tv_on_host_wake(void) {
         return;
     }
 
-    // The helper owns the complete TV wake transaction: one TV WOL packet,
-    // readiness polling, then one input selection. Keep it out of the generic
-    // PC WOL path so the TV cannot receive two wake packets during boot.
-    printf("[tv] host wake -> TV wake + input\n");
-    pending_cmd = TV_CMD_WAKE;
+    // WOL for the PC and optional TV target was already emitted by the
+    // controller wake path. The helper performs only one immediate input switch.
+    printf("[tv] host wake -> TV input\n");
+    pending_cmd = TV_CMD_INPUT;
 }
 
 bool tv_test_command(const char *cmd) {

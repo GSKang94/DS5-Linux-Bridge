@@ -219,6 +219,16 @@ void wake_init(void) {
 static volatile bool     power_off_armed = false;
 static volatile uint64_t power_off_armed_at_us = 0;
 static constexpr uint64_t POWER_OFF_DEBOUNCE_US = 10ULL * 1000000ULL; // 10 s
+// TinyUSB can deliver both resume and mount for one host wake, and can later
+// mount again for a descriptor re-enumeration. Allow one TV input action per
+// USB suspend spell, independent of those callback details.
+static volatile bool     tv_wake_fired_this_spell = false;
+
+static void tv_on_host_wake_once(void) {
+    if (tv_wake_fired_this_spell) return;
+    tv_wake_fired_this_spell = true;
+    tv_on_host_wake();
+}
 
 extern "C" void tud_suspend_cb(bool remote_wakeup_en) {
     WAKE_DBG("tud_suspend_cb remote_wakeup_en=%d prev_state=%s",
@@ -228,6 +238,7 @@ extern "C" void tud_suspend_cb(bool remote_wakeup_en) {
     usb_set_host_suspended(true);
     wol_fired_this_spell = false;  // new suspend spell -> allow one WOL again
     link_fired_this_spell = false; // ... and one companion-Pico pulse
+    tv_wake_fired_this_spell = false;
 
     // Arm the deferred DualSense power-off. wake_task() will fire it after
     // POWER_OFF_DEBOUNCE_US unless tud_resume_cb / tud_mount_cb cancel it
@@ -266,8 +277,7 @@ extern "C" void tud_resume_cb(void) {
     // letting the FSM act on it caused the "fic" key spam.
     if (!swap) {
         host_resumed_event = true;
-        // TV control: switch TV input on genuine host wake
-        tv_on_host_wake();
+        tv_on_host_wake_once();
     }
 }
 
@@ -280,8 +290,8 @@ extern "C" void tud_mount_cb(void) {
     usb_set_host_suspended(false);
     if (!swap) {
         host_resumed_event = true;
-        // TV control: cold boot (S5 -> on) fires mount, not resume.
-        tv_on_host_wake();
+        // Cold boot (S5 -> on) fires mount, not resume.
+        tv_on_host_wake_once();
     }
 }
 

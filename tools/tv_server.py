@@ -15,7 +15,6 @@ Endpoints:
 import subprocess
 import http.server
 import threading
-import time
 
 TV_IP = "192.168.2.128"
 TV_MAC = "38:26:56:62:AB:8F"
@@ -27,8 +26,6 @@ INPUT_CMD = (
     "com.tcl.tvinput%2F.TvPassThroughService%2FHW15' "
     "-n com.tcl.tv/com.tcl.player.TVActivity -f 0x10008000"
 )
-ADB_READY_TIMEOUT = 25
-ADB_CONNECT_TIMEOUT = 2
 _command_lock = threading.Lock()
 
 def adb(cmd):
@@ -49,30 +46,11 @@ def ensure_connected():
     try:
         result = subprocess.run(
             ["adb", "connect", f"{TV_IP}:5555"],
-            capture_output=True, text=True, timeout=ADB_CONNECT_TIMEOUT
+            capture_output=True, text=True, timeout=5
         )
         return "connected" in result.stdout
     except (OSError, subprocess.TimeoutExpired) as exc:
         print(f"  adb connect failed: {exc}")
-        return False
-
-def wait_for_adb():
-    """Wait until the TV has completed enough of its boot to accept ADB."""
-    deadline = time.monotonic() + ADB_READY_TIMEOUT
-    while time.monotonic() < deadline:
-        if ensure_connected():
-            return True
-        time.sleep(1)
-    print("  adb connect timed out waiting for TV boot")
-    return False
-
-def send_wol():
-    try:
-        subprocess.run(["wakeonlan", TV_MAC], capture_output=True, timeout=5,
-                       check=True)
-        return True
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        print(f"  wakeonlan failed: {exc}")
         return False
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -108,7 +86,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ok = adb(INPUT_CMD)
         elif self.path == "/tv/wake":
             print("[TV] Wake + input")
-            ok = send_wol() and wait_for_adb() and adb(INPUT_CMD)
+            ok = adb(INPUT_CMD)
 
         self.send_response(200 if ok else 500)
         self.end_headers()
@@ -121,5 +99,5 @@ if __name__ == "__main__":
     print(f"TV control server on :7777 (TV={TV_IP})")
     print(f"  GET /tv/sleep  - sleep TV")
     print(f"  GET /tv/input  - switch to HDMI 1")
-    print(f"  GET /tv/wake   - WoL, wait for ADB, switch input")
+    print(f"  GET /tv/wake   - switch input (legacy endpoint)")
     http.server.ThreadingHTTPServer(("", 7777), Handler).serve_forever()

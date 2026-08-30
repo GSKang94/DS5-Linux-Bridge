@@ -181,22 +181,14 @@ extern "C" int web_api_resolve_mac_poll_impl(uint8_t out_mac[6]) {
 }
 
 // Wake companion hook, called from wake.cpp's request_host_wake() whenever a
-// genuine host wake is warranted. The controller wake path must wake only the
-// PC here. TV wake is deliberately owned by tv_server.py's /tv/wake endpoint,
-// which waits for Android to finish booting before selecting the input. Sending
-// wol_target_mac2 from both paths was a second TV wake during startup.
+// genuine host wake is warranted. The second target is normally the TV: it
+// must receive its WOL packet immediately, without waiting for the PC-hosted
+// ADB helper to come back after the host wake.
 extern "C" bool wake_emit_wol(void) {
     // No LAN in onboarding mode -- the SoftAP carries only the local portal, so
     // a magic packet has nowhere to go. (wifi_wol_send_all() re-checks this too.)
     if (wifi_net_in_ap_mode()) return false;
-    const Config_body &c = get_config();
-    if (mac_is_zero(c.wol_target_mac)) return false;
-    const bool sent = wifi_wol_send(c.wol_target_mac);
-    printf("[wifi] PC WOL %02X:%02X:%02X:%02X:%02X:%02X %s\n",
-           c.wol_target_mac[0], c.wol_target_mac[1], c.wol_target_mac[2],
-           c.wol_target_mac[3], c.wol_target_mac[4], c.wol_target_mac[5],
-           sent ? "sent" : "send failed");
-    return sent;
+    return wifi_wol_send_all();
 }
 
 //--------------------------------------------------------------------+

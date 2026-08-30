@@ -48,7 +48,7 @@ static char response_line[32];
 static uint8_t response_line_len = 0;
 static int response_status = 0;
 
-#define TV_TIMEOUT_US 5000000ULL  // 5s
+#define TV_TIMEOUT_US 30000000ULL // 30s: /tv/wake waits for Android TV boot
 #define TV_COOLDOWN_US 1000000ULL // 1s
 
 static void enter_state(tv_state_t s) {
@@ -251,18 +251,11 @@ void tv_on_host_wake(void) {
         return;
     }
 
-    // Wake TV instantly via direct WoL (no server round-trip).
-    // wol_target_mac2 holds the TV MAC if configured.
-    if (cfg.wol_target_mac2[0] | cfg.wol_target_mac2[1] | cfg.wol_target_mac2[2] |
-        cfg.wol_target_mac2[3] | cfg.wol_target_mac2[4] | cfg.wol_target_mac2[5]) {
-        wifi_wol_send(cfg.wol_target_mac2);
-        printf("[tv] WoL sent directly to TV\n");
-    }
-
-    // Queue HDMI input switch via server (TV will be awake by the time
-    // the server processes it).
-    printf("[tv] host wake -> TV input\n");
-    pending_cmd = TV_CMD_INPUT;
+    // The helper owns the complete TV wake transaction: one TV WOL packet,
+    // readiness polling, then one input selection. Keep it out of the generic
+    // PC WOL path so the TV cannot receive two wake packets during boot.
+    printf("[tv] host wake -> TV wake + input\n");
+    pending_cmd = TV_CMD_WAKE;
 }
 
 bool tv_test_command(const char *cmd) {

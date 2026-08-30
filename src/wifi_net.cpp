@@ -90,10 +90,10 @@ static bool mac_is_zero(const uint8_t mac[6]) {
 }
 
 // Fire a magic packet at every configured (non-zero) WOL target -- currently
-// wol_target_mac (the PC) and wol_target_mac2 (e.g. a TV). Shared by the wake
-// companion (wake_emit_wol) and the web UI's "Wake now" so both wake ALL stored
-// targets. Returns true if at least one packet was sent. Skips silently in AP
-// onboarding mode (no LAN uplink -- the caller usually gates this too).
+// wol_target_mac (the PC) and wol_target_mac2 (e.g. a TV). Used by the web
+// UI's explicit "Wake now" action. Returns true if at least one packet was
+// sent. Skips silently in AP onboarding mode (no LAN uplink -- the caller
+// usually gates this too).
 bool wifi_wol_send_all(void) {
     if (wifi_net_in_ap_mode()) return false;
     const Config_body &c = get_config();
@@ -181,15 +181,22 @@ extern "C" int web_api_resolve_mac_poll_impl(uint8_t out_mac[6]) {
 }
 
 // Wake companion hook, called from wake.cpp's request_host_wake() whenever a
-// genuine host wake is warranted. wake.cpp owns WHEN (and the once-per-spell
-// rate-limit); this just emits to the configured target. Returns true if a
-// packet was sent.
+// genuine host wake is warranted. The controller wake path must wake only the
+// PC here. TV wake is deliberately owned by tv_server.py's /tv/wake endpoint,
+// which waits for Android to finish booting before selecting the input. Sending
+// wol_target_mac2 from both paths was a second TV wake during startup.
 extern "C" bool wake_emit_wol(void) {
     // No LAN in onboarding mode -- the SoftAP carries only the local portal, so
     // a magic packet has nowhere to go. (wifi_wol_send_all() re-checks this too.)
     if (wifi_net_in_ap_mode()) return false;
-    // Wake every configured target (PC + optional 2nd, e.g. a TV).
-    return wifi_wol_send_all();
+    const Config_body &c = get_config();
+    if (mac_is_zero(c.wol_target_mac)) return false;
+    const bool sent = wifi_wol_send(c.wol_target_mac);
+    printf("[wifi] PC WOL %02X:%02X:%02X:%02X:%02X:%02X %s\n",
+           c.wol_target_mac[0], c.wol_target_mac[1], c.wol_target_mac[2],
+           c.wol_target_mac[3], c.wol_target_mac[4], c.wol_target_mac[5],
+           sent ? "sent" : "send failed");
+    return sent;
 }
 
 //--------------------------------------------------------------------+

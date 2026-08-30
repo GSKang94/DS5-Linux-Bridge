@@ -188,7 +188,8 @@ static void apply_config_post(char *buf) {
         } else if (strcmp(tok, "tv_server_ip") == 0) {
             url_decode(eq);
             unsigned a, b, d, e;
-            if (sscanf(eq, "%u.%u.%u.%u", &a, &b, &d, &e) == 4) {
+            if (sscanf(eq, "%u.%u.%u.%u", &a, &b, &d, &e) == 4 &&
+                a <= 255 && b <= 255 && d <= 255 && e <= 255) {
                 c.tv_server_ip[0] = a; c.tv_server_ip[1] = b;
                 c.tv_server_ip[2] = d; c.tv_server_ip[3] = e;
             }

@@ -14,6 +14,7 @@ Endpoints:
 
 import subprocess
 import http.server
+import time
 
 TV_IP = "192.168.2.128"
 TV_MAC = "38:26:56:62:AB:8F"
@@ -28,12 +29,16 @@ INPUT_CMD = (
 
 def adb(cmd):
     """Run an adb shell command on the TV."""
-    result = subprocess.run(
-        ["adb", "-s", f"{TV_IP}:5555", "shell", cmd],
-        capture_output=True, text=True, timeout=10
-    )
-    print(f"  adb shell {cmd} -> {result.returncode}")
-    return result.returncode == 0
+    try:
+        result = subprocess.run(
+            ["adb", "-s", f"{TV_IP}:5555", "shell", cmd],
+            capture_output=True, text=True, timeout=10
+        )
+        print(f"  adb shell {cmd} -> {result.returncode}")
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"  adb shell failed: {exc}")
+        return False
 
 def ensure_connected():
     """Make sure adb is connected to the TV."""
@@ -43,23 +48,31 @@ def ensure_connected():
             capture_output=True, text=True, timeout=5
         )
         return "connected" in result.stdout
-    except subprocess.TimeoutExpired:
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"  adb connect failed: {exc}")
         return False
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        ensure_connected()
-
         if self.path == "/tv/sleep":
             print("[TV] Sleep")
+            ensure_connected()
             ok = adb("input keyevent 223")
         elif self.path == "/tv/input":
             print("[TV] Switch input")
+            ensure_connected()
             ok = adb(INPUT_CMD)
         elif self.path == "/tv/wake":
             print("[TV] Wake + input")
-            subprocess.run(["wakeonlan", TV_MAC], capture_output=True)
-            import time; time.sleep(5)
+            try:
+                subprocess.run(["wakeonlan", TV_MAC], capture_output=True, timeout=5)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                print(f"  wakeonlan failed: {exc}")
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(b"fail")
+                return
+            time.sleep(5)
             ensure_connected()
             ok = adb(INPUT_CMD)
         else:
@@ -79,4 +92,4 @@ if __name__ == "__main__":
     print(f"  GET /tv/sleep  - sleep TV")
     print(f"  GET /tv/input  - switch to HDMI 1")
     print(f"  GET /tv/wake   - WoL + switch input")
-    http.server.HTTPServer(("", 7777), Handler).serve_forever()
+    http.server.ThreadingHTTPServer(("", 7777), Handler).serve_forever()
